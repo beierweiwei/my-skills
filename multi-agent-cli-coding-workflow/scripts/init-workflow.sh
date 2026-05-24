@@ -1155,6 +1155,7 @@ HOOKCFG
 # 创建 sentinel 标记，钩子脚本据此判断是子 agent 会话
 touch "$target_dir/.agent/.sub-agent"
 cat > "$target_dir/.agent/.sub-agent-task.env" <<TASKENV
+AGENT_SUB_AGENT_SESSION=1
 AGENT_ROLE=$(printf '%q' "$role")
 AGENT_TASK_ID=$(printf '%q' "$task_id")
 AGENT_TASK_FILE=$(printf '%q' "$task_file")
@@ -1181,6 +1182,7 @@ if [ -n "$prompt" ]; then
   printf '%s\n' "$prompt" > "$prompt_file"
   cat > "$runner" <<-RUNNER
 	export PAGER=cat GIT_PAGER=cat IS_SANDBOX=1
+	export AGENT_SUB_AGENT_SESSION=1
 	export AGENT_ROLE='${role}'
 	export AGENT_TASK_ID='${task_id}'
 	export AGENT_TASK_FILE='${task_file}'
@@ -1197,6 +1199,7 @@ if [ -n "$prompt" ]; then
 else
   cat > "$runner" <<-RUNNER
 	export PAGER=cat GIT_PAGER=cat IS_SANDBOX=1
+	export AGENT_SUB_AGENT_SESSION=1
 	export AGENT_ROLE='${role}'
 	export AGENT_TASK_ID='${task_id}'
 	export AGENT_TASK_FILE='${task_file}'
@@ -1407,17 +1410,27 @@ write_executable ".agent/hooks/agent-done-hook.sh" <<'EOF'
 
 IFS= read -r line < /dev/stdin 2>/dev/null || true
 
-# 只处理子 agent 会话（仅 tmux-spawn-agent 会创建此标记）
+# 只处理 tmux-spawn-agent 启动的子 agent 会话。
+#
+# Claude Code 的 Stop hook 是项目级/全局配置；如果只检查项目内
+# `.agent/.sub-agent` 文件，用户之后在同一项目正常启动 claude 时也会
+# 命中 hook，并可能关闭当前 tmux 面板。因此这里必须要求进程环境中带有
+# tmux-spawn-agent runner 注入的会话标记。
+[ "${AGENT_SUB_AGENT_SESSION:-}" = "1" ] || exit 0
+
+# 兼容旧版本 runner：有些已启动的子 agent 可能只留下项目标记。
 [ ! -f .agent/.sub-agent ] && exit 0
 
-# 读取 tmux-spawn-agent 写入的任务作用域。没有该文件时 fallback 到旧单任务路径。
+# 读取 tmux-spawn-agent 写入的任务作用域。正常 claude 会话不会走到这里。
 if [ -f .agent/.sub-agent-task.env ]; then
   # shellcheck disable=SC1091
   . .agent/.sub-agent-task.env
 fi
 
-TASK_FILE="${AGENT_TASK_FILE:-.agent/tasks/current.md}"
-RUN_FILE="${AGENT_RUN_FILE:-.agent/runs/implementer.md}"
+TASK_FILE="${AGENT_TASK_FILE:-}"
+RUN_FILE="${AGENT_RUN_FILE:-}"
+
+[ -n "$TASK_FILE" ] && [ -n "$RUN_FILE" ] || exit 0
 
 # 检查任务状态（跳过状态后的空行）
 TASK_STATUS=$(awk '
