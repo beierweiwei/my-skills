@@ -71,19 +71,19 @@ Use `Verifier: Human` when the result depends on manual Feishu/OA/customer-servi
 Run:
 
 ```bash
-.venv/bin/python scripts/requirements_status.py
+python requirements_status.py
 ```
 
 Use JSON for automation:
 
 ```bash
-.venv/bin/python scripts/requirements_status.py --format json
+python requirements_status.py --format json
 ```
 
 Use strict mode before claiming the tracker is clean:
 
 ```bash
-.venv/bin/python scripts/requirements_status.py --strict
+python requirements_status.py --strict
 ```
 
 Strict mode exits non-zero when PRDs/issues violate the format contract.
@@ -96,5 +96,5 @@ Strict mode exits non-zero when PRDs/issues violate the format contract.
    - AI-verifiable: keep or move to `ready-for-agent`; verify with local tests/dry-run/code audit before `verified`.
    - Human-verifiable: set `ready-for-human` and list exact human inputs.
    - Complete: set `verified` only with `Verifier`, `Result`, and `Evidence`.
-4. Run `scripts/requirements_status.py --strict`.
+4. Run `python requirements_status.py --strict`.
 5. Report counts: PRDs, issues by status, completed issues, blocked/human-confirmation items, and format issues.

@@ -9,11 +9,7 @@ Use this wrapper before `to-issues`. Do not create new issues until the intake d
 
 ## Intake First
 
-Before calling `to-issues`, inspect current tracker state:
-
-```bash
-.venv/bin/python scripts/requirements_status.py --format json
-```
+Before calling `to-issues`, inspect current tracker state — invoke the `requirements-dashboard` skill to get current tracker state.
 
 Read the candidate parent PRD and related issues. If no parent was provided, search `.scratch/*/PRD.md` and pick the best owner before splitting.
 
@@ -81,8 +77,4 @@ Status: ready-for-agent
 
 Use `Status: ready-for-human` only when the next action truly requires human decision, production operation, or business verification. Do not put external Hermes/OA/Feishu setup into an AI-verifiable code issue.
 
-Then run:
-
-```bash
-.venv/bin/python scripts/requirements_status.py --strict
-```
+Then invoke the `requirements-dashboard` skill (with `--strict`) to validate the tracker is clean.

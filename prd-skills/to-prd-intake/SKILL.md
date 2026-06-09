@@ -9,11 +9,7 @@ Use this wrapper before `to-prd`. Do not create a new PRD until the intake decis
 
 ## Intake First
 
-Before calling `to-prd`, inspect existing requirements:
-
-```bash
-.venv/bin/python scripts/requirements_status.py --format json
-```
+Before calling `to-prd`, inspect existing requirements — invoke the `requirements-dashboard` skill to get current tracker state.
 
 Then read likely related files under `.scratch/*/PRD.md` and `.scratch/*/issues/*.md`.
 
@@ -72,11 +68,7 @@ Status: ready-for-agent
 - Related: <paths or none>
 ```
 
-Then run:
-
-```bash
-.venv/bin/python scripts/requirements_status.py --strict
-```
+Then invoke the `requirements-dashboard` skill (with `--strict`) to validate the tracker is clean.
 
 ## Preferred Alternatives
 
