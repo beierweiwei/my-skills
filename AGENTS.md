@@ -46,15 +46,6 @@
 - 境外网站/资源统一走本地代理 `http://127.0.0.1:7890`，失败先检查代理可用性再重试。
 - Linux 软件源、DockerHub 等优先用国内镜像（清华、阿里云）。
 
-## Windows 本机坑
-
-跑 bash / gh / cmd 涉及以下场景时先看这里：
-
-- **gh**：未装 jq 且 `gh issue` 无 `--json`——JSON 解析用 `gh --jq` 或 python；建票/接线用 `--parent` / `--blocked-by`；带完结评论的关闭分两步（先 comment 再 close，别用 `||`/`&&` 拼）。
-- **bash 反引号**：双引号包裹的命令里内嵌反引号会被静默命令替换——含反引号的正文先落文件，再 `--body-file` / `-F body=@file` 传参。
-- **cmd.exe 引号**：单引号+管道会被拆断，带字面引号的参数会原样传给 API 报 400——封装成脚本用 execFileSync 参数数组拼命令。
-- **共享文档并发**：改 issue body 等共享内容前先重取最新全文再整体重写，防并发覆盖。
-- **Codex apply_patch 报 `Invalid patch`**：见 [notes/codex-apply-patch.md](notes/codex-apply-patch.md)。
 
 ## 本库约定
 

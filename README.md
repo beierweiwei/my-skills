@@ -13,7 +13,9 @@
 │   └── <34 个开源技能>      # junction 指向 repos/，由脚本管理，勿直接改
 ├── plugins/                # Claude 官方插件（junction），由脚本管理
 ├── repos/                  # 脚本的克隆缓存（浅克隆，可随时删除重建）
-└── scripts/update-skills.ps1
+└── scripts/
+    ├── update-skills.ps1      # Windows
+    └── update-skills.sh       # Linux/macOS
 ```
 
 ## 用法
@@ -25,9 +27,17 @@ powershell -ExecutionPolicy Bypass -File scripts/update-skills.ps1
 powershell -ExecutionPolicy Bypass -File scripts/update-skills.ps1 -NoProxy
 ```
 
+```bash
+# Linux/macOS
+bash scripts/update-skills.sh
+# 代理不可用时直连
+bash scripts/update-skills.sh --no-proxy
+```
+
 接入各工具：
 
 - **技能**：把 `skills/*` 链接/复制到 `~/.agents/skills/`（Claude 的 `~/.claude/skills/` 已是指向它的符号链接）
+- **全局指令**：将 `AGENTS.md` 链接到 `~/.agents/AGENTS.md` 和 `~/.config/opencode/AGENTS.md`，将 `CLAUDE.md` 链接到 `~/.claude/CLAUDE.md`
 - **MCP**：`mcp/mcp.json` 内容合并进 `~/.claude.json` 的 `mcpServers`，并在环境变量设置 `EXA_API_KEY`、`ZREAD_API_TOKEN`
 - **插件**：把 `plugins/*` 登记到 Claude Code（`/plugin`），或直接使用官方 marketplace 安装
 
