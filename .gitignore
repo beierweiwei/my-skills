@@ -1,0 +1,7 @@
+# 脚本缓存与 junction 重建产物，不入库（克隆后跑 scripts/update-skills.ps1 重建）
+repos/
+plugins/
+skills/*
+!skills/local/
+!skills/README.md
+!skills/local/**

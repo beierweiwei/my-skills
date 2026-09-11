@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "exa-web-search": {
+      "type": "http",
+      "url": "https://mcp.exa.ai/mcp?client=claude-code-plugin",
+      "headers": {
+        "x-exa-source": "claude-code-plugin",
+        "x-api-key": "${EXA_API_KEY}"
+      }
+    },
+    "zread": {
+      "type": "http",
+      "url": "https://open.bigmodel.cn/api/mcp/zread/mcp",
+      "headers": {
+        "Authorization": "Bearer ${ZREAD_API_TOKEN}"
+      }
+    }
+  }
+}
