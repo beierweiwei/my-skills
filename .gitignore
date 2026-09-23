@@ -1,7 +1,10 @@
-# 脚本缓存与链接重建产物，不入库（克隆后运行 update-skills 脚本重建）
-repos/
+# 脚本缓存：第三方仓库浅克隆（可随时删除重建）；repos/local/ 例外——自研技能源，入库、勿删
+repos/*
+!repos/local/
+
 plugins/
-skills/*
-!skills/local/
-!skills/README.md
-!skills/local/**
+
+# skills/<层>/<技能>：全部是指向 repos/ 的 junction（脚本重建，不入库）；各层 README 入库
+skills/*/*
+!skills/*/README.md
+raw/

@@ -4,7 +4,7 @@
   拉取全部开源技能/插件最新版，并以目录联接(junction)引用进 skills/ 与 plugins/。
 .DESCRIPTION
   - 每次运行都把 repos/ 下的镜像更新到远端最新（--depth 1）。
-  - skills/<名> 是指向 repos/ 内技能目录的 junction，升级 = 重跑本脚本。
+  - skills/<层>/<名> 是指向 repos/ 内技能目录的 junction，升级 = 重跑本脚本。
   - 断网或代理不可用时自动回退直连。
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts/update-skills.ps1
@@ -21,65 +21,85 @@ $SkillsDir = Join-Path $Root "skills"
 $PluginsDir = Join-Path $Root "plugins"
 foreach ($d in $ReposDir, $SkillsDir, $PluginsDir) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
 
-# 目标名 = 仓库内路径（相对于仓库根）
+# 目标名 = skills/ 下的链接路径（<层>/<名>）；值 = 仓库内路径（相对于仓库根）
 $Repos = [ordered]@{
   "mattpocock-skills" = @{
     url    = "https://github.com/mattpocock/skills.git"
     ref    = "main"
     skills = [ordered]@{
-      "ask-matt"                    = "skills/engineering/ask-matt"
-      "code-review"                 = "skills/engineering/code-review"
-      "codebase-design"             = "skills/engineering/codebase-design"
-      "diagnosing-bugs"             = "skills/engineering/diagnosing-bugs"
-      "domain-modeling"             = "skills/engineering/domain-modeling"
-      "grill-with-docs"             = "skills/engineering/grill-with-docs"
-      "implement"                   = "skills/engineering/implement"
-      "improve-codebase-architecture" = "skills/engineering/improve-codebase-architecture"
-      "prototype"                   = "skills/engineering/prototype"
-      "research"                    = "skills/engineering/research"
-      "resolving-merge-conflicts"   = "skills/engineering/resolving-merge-conflicts"
-      "setup-matt-pocock-skills"    = "skills/engineering/setup-matt-pocock-skills"
-      "tdd"                         = "skills/engineering/tdd"
-      "to-spec"                     = "skills/engineering/to-spec"
-      "to-tickets"                  = "skills/engineering/to-tickets"
-      "triage"                      = "skills/engineering/triage"
-      "wayfinder"                   = "skills/engineering/wayfinder"
-      "wizard"                      = "skills/engineering/wizard"
-      "grill-me"                    = "skills/productivity/grill-me"
-      "grilling"                    = "skills/productivity/grilling"
-      "handoff"                     = "skills/productivity/handoff"
-      "teach"                       = "skills/productivity/teach"
-      "to-questionnaire"            = "skills/productivity/to-questionnaire"
-      "wait-what"                   = "skills/productivity/wait-what"
-      "writing-for-agents"          = "skills/productivity/writing-for-agents"
+      "engineering/ask-matt"                    = "skills/engineering/ask-matt"
+      "engineering/code-review"                 = "skills/engineering/code-review"
+      "engineering/codebase-design"             = "skills/engineering/codebase-design"
+      "engineering/diagnosing-bugs"             = "skills/engineering/diagnosing-bugs"
+      "engineering/domain-modeling"             = "skills/engineering/domain-modeling"
+      "engineering/grill-with-docs"             = "skills/engineering/grill-with-docs"
+      "engineering/implement"                   = "skills/engineering/implement"
+      "engineering/improve-codebase-architecture" = "skills/engineering/improve-codebase-architecture"
+      "engineering/prototype"                   = "skills/engineering/prototype"
+      "engineering/research"                    = "skills/engineering/research"
+      "engineering/resolving-merge-conflicts"   = "skills/engineering/resolving-merge-conflicts"
+      "engineering/setup-matt-pocock-skills"    = "skills/engineering/setup-matt-pocock-skills"
+      "engineering/tdd"                         = "skills/engineering/tdd"
+      "engineering/to-spec"                     = "skills/engineering/to-spec"
+      "engineering/to-tickets"                  = "skills/engineering/to-tickets"
+      "engineering/triage"                      = "skills/engineering/triage"
+      "engineering/wayfinder"                   = "skills/engineering/wayfinder"
+      "engineering/wizard"                      = "skills/engineering/wizard"
+      "productivity/grill-me"                    = "skills/productivity/grill-me"
+      "productivity/grilling"                    = "skills/productivity/grilling"
+      "productivity/handoff"                     = "skills/productivity/handoff"
+      "productivity/teach"                       = "skills/productivity/teach"
+      "productivity/to-questionnaire"            = "skills/productivity/to-questionnaire"
+      "productivity/wait-what"                   = "skills/productivity/wait-what"
+      "productivity/writing-for-agents"          = "skills/productivity/writing-for-agents"
     }
   }
   "ponytail" = @{
     url    = "https://github.com/DietrichGebert/ponytail.git"
     ref    = "main"
     skills = [ordered]@{
-      "ponytail"        = "skills/ponytail"
-      "ponytail-audit"  = "skills/ponytail-audit"
-      "ponytail-debt"   = "skills/ponytail-debt"
-      "ponytail-gain"   = "skills/ponytail-gain"
-      "ponytail-help"   = "skills/ponytail-help"
-      "ponytail-review" = "skills/ponytail-review"
+      "engineering/ponytail"        = "skills/ponytail"
+      "engineering/ponytail-audit"  = "skills/ponytail-audit"
+      "engineering/ponytail-debt"   = "skills/ponytail-debt"
+      "engineering/ponytail-gain"   = "skills/ponytail-gain"
+      "engineering/ponytail-help"   = "skills/ponytail-help"
+      "engineering/ponytail-review" = "skills/ponytail-review"
     }
   }
   "caveman" = @{
     url    = "https://github.com/JuliusBrussee/caveman.git"
     ref    = "main"
-    skills = [ordered]@{ "caveman" = "skills/caveman" }
+    skills = [ordered]@{ "productivity/caveman" = "skills/caveman" }
   }
   "ui-ux-pro-max-skill" = @{
     url    = "https://github.com/nextlevelbuilder/ui-ux-pro-max-skill.git"
     ref    = "main"
-    skills = [ordered]@{ "ui-ux-pro-max" = ".claude/skills/ui-ux-pro-max" }
+    skills = [ordered]@{ "engineering/ui-ux-pro-max" = ".claude/skills/ui-ux-pro-max" }
   }
   "planning-with-files" = @{
     url    = "https://github.com/OthmanAdi/planning-with-files.git"
     ref    = "master"
-    skills = [ordered]@{ "planning-with-files" = "skills/planning-with-files" }
+    skills = [ordered]@{ "productivity/planning-with-files" = "skills/planning-with-files" }
+  }
+  "playwright-cli" = @{
+    url    = "https://github.com/microsoft/playwright-cli.git"
+    ref    = "main"
+    skills = [ordered]@{ "engineering/playwright-cli" = "skills/playwright-cli" }
+  }
+  "humanlayer-skills" = @{
+    url    = "https://github.com/humanlayer/skills.git"
+    ref    = "main"
+    skills = [ordered]@{ "productivity/show-me" = "plugins/show-me/skills/show-me" }
+  }
+  "wshobson-agents" = @{
+    url    = "https://github.com/wshobson/agents.git"
+    ref    = "main"
+    skills = [ordered]@{ "engineering/e2e-testing-patterns" = "plugins/developer-essentials/skills/e2e-testing-patterns" }
+  }
+  "anthropics-skills" = @{
+    url    = "https://github.com/anthropics/skills.git"
+    ref    = "main"
+    skills = [ordered]@{ "engineering/frontend-design" = "skills/frontend-design" }
   }
   "claude-plugins-official" = @{
     url     = "https://github.com/anthropics/claude-plugins-official.git"
@@ -87,7 +107,7 @@ $Repos = [ordered]@{
     skills  = [ordered]@{}
     plugins = @(
       "claude-code-setup", "claude-md-management", "code-review", "commit-commands",
-      "feature-dev", "frontend-design", "hookify", "ralph-loop", "typescript-lsp"
+      "feature-dev", "hookify", "ralph-loop", "typescript-lsp"
     )
   }
 }
@@ -124,6 +144,18 @@ function Add-Junction([string]$link, [string]$target) {
   if (Test-Path $link) { Remove-Junction $link }
   New-Item -ItemType Junction -Path $link -Target $target | Out-Null
   Write-Host "  + $link -> $target" -ForegroundColor Green
+}
+
+# 自研技能：源在 repos/local/（入库，勿删），skills/ 下建 junction 指向源目录
+$LocalDir = Join-Path $ReposDir "local"
+if (Test-Path $LocalDir) {
+  foreach ($layerDir in Get-ChildItem $LocalDir -Directory) {
+    foreach ($skillDir in Get-ChildItem $layerDir.FullName -Directory) {
+      if (-not (Test-Path (Join-Path $skillDir.FullName "SKILL.md"))) { continue }
+      try { Add-Junction (Join-Path $SkillsDir "$($layerDir.Name)/$($skillDir.Name)") $skillDir.FullName }
+      catch { Write-Warning $_; $failed += "local:$($skillDir.Name)" }
+    }
+  }
 }
 
 $failed = @()
