@@ -53,11 +53,11 @@
 
 ### 网络
 
-- 境外网站/资源统一走本地代理 `http://127.0.0.1:7890`，失败先检查代理可用性再重试。
+- 境外网站/资源统一走本地代理 `http://192.168.6.51:7890`，失败先检查代理可用性再重试。
 - Linux 软件源、DockerHub 等优先用国内镜像（清华、阿里云）。
 
 
 ## 本库约定
 
-- 技能按层放在 `skills/<层>/<技能>/`：`engineering`、`productivity` 是生产层（`scripts/install-skills.*` 默认安装），`in-progress` 需点名安装，`deprecated` 只留记录、永不安装。`skills/` 下全是指向 `repos/` 的 junction，由 `scripts/update-skills.ps1` 统一拉最新：上游技能源在 `repos/<仓库>/`，改进上游提 PR 到上游仓库；自研技能源在 `repos/local/<层>/<技能>/`（随库提交），本地定制改这里。
+- 技能按层放在 `skills/<层>/<技能>/`：`engineering`、`productivity` 是生产层（`scripts/install-skills.*` 默认安装），`in-progress` 需点名安装，`deprecated` 只留记录、永不安装。`skills/` 下全是指向 `repos/` 的 junction，由 `scripts/update-skills.*` 统一生成/拉最新（新克隆的机器先跑一次，否则 `skills/` 为空）：上游技能源在 `repos/<仓库>/`，改进上游提 PR 到上游仓库；自研技能源在 `repos/local/<层>/<技能>/`（随库提交），本地定制改这里。
 - 生成 spec（to-spec）前：先读 [notes/to-spec-patches.md](notes/to-spec-patches.md) 的两条补丁。

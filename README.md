@@ -8,7 +8,7 @@
 ├── AGENTS.md               # 统一全局指令（Codex/Qoder 直接读；CLAUDE.md @引用本文件）
 ├── CLAUDE.md               # 一行指针 → AGENTS.md
 ├── mcp/mcp.json            # MCP 服务器配置（密钥用环境变量占位）
-├── skills/<层>/<技能>/      # 技能库，按层组织；全部是指向 repos/ 的 junction
+├── skills/<层>/<技能>/      # 技能库，按层组织；全部是指向 repos/ 的 junction（脚本生成，不入库）
 │   ├── engineering/        # 生产层：工程实践（默认安装）
 │   ├── productivity/       # 生产层：通用工作流（默认安装）
 │   ├── in-progress/        # 试验层：默认不装，需点名
@@ -18,10 +18,12 @@
 │   └── local/              # 自研技能源（随库提交，勿删）
 └── scripts/
     ├── install-skills.ps1 / .sh   # 选择安装技能到 Agent 技能目录
-    └── update-skills.ps1 / .sh    # 拉取/更新上游技能与插件，刷新 junction
+    └── update-skills.ps1 / .sh    # 首次初始化/更新技能库：拉取上游 + 刷新 skills/、plugins/ 链接
 ```
 
 ## 安装技能
+
+> 首次使用（新克隆的机器）：先运行一次 `scripts/update-skills.*` 生成 `skills/` 下的技能链接（自研与上游技能），否则技能库为空，安装脚本无从选择。
 
 ### 1. 从本库选择安装（自研 + 上游都可）
 
@@ -53,7 +55,9 @@ npx skills@latest update mao-methods
 
 上游技能在本库是 junction、不入库，`npx skills add` 看不到；装上游走第 1 种，或用上游仓库地址。
 
-### 3. 更新上游快照
+### 3. 初始化 / 更新技能库
+
+首次克隆后必须先运行一次（生成 `skills/` 下的技能链接）；之后按需更新上游快照。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/update-skills.ps1   # 加 -NoProxy 直连
@@ -84,7 +88,7 @@ bash scripts/update-skills.sh                                        # 加 --no-
 
 | 上游仓库 | 技能 |
 |---|---|
-| [mattpocock/skills](https://github.com/mattpocock/skills) | ask-matt, code-review, codebase-design, diagnosing-bugs, domain-modeling, grill-with-docs, implement, improve-codebase-architecture, prototype, research, resolving-merge-conflicts, setup-matt-pocock-skills, tdd, to-spec, to-tickets, triage, wayfinder, wizard, grill-me, grilling, handoff, teach, to-questionnaire, wait-what, writing-for-agents |
+| [mattpocock/skills](https://github.com/mattpocock/skills) | ask-matt, code-review, codebase-design, diagnosing-bugs, domain-modeling, grill-with-docs, implement, improve-codebase-architecture, prototype, research, setup-matt-pocock-skills, tdd, to-spec, to-tickets, triage, wayfinder, wizard, grill-me, grilling, handoff, teach, to-questionnaire, wait-what, writing-for-agents |
 | [DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail) | ponytail, ponytail-audit/debt/gain/help/review |
 | [JuliusBrussee/caveman](https://github.com/JuliusBrussee/caveman) | caveman |
 | [nextlevelbuilder/ui-ux-pro-max-skill](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill) | ui-ux-pro-max |

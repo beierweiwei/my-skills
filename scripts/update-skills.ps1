@@ -5,13 +5,13 @@
 .DESCRIPTION
   - 每次运行都把 repos/ 下的镜像更新到远端最新（--depth 1）。
   - skills/<层>/<名> 是指向 repos/ 内技能目录的 junction，升级 = 重跑本脚本。
-  - 断网或代理不可用时自动回退直连。
+  - 代理不可达时用 -Proxy 指定其他代理，或 -NoProxy 直连。
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts/update-skills.ps1
-  powershell -ExecutionPolicy Bypass -File scripts/update-skills.ps1 -Proxy http://127.0.0.1:7890
+  powershell -ExecutionPolicy Bypass -File scripts/update-skills.ps1 -Proxy http://192.168.6.51:7890
 #>
 param(
-  [string]$Proxy = $(if ($env:HTTPS_PROXY) { $env:HTTPS_PROXY } else { "http://127.0.0.1:7890" }),
+  [string]$Proxy = $(if ($env:HTTPS_PROXY) { $env:HTTPS_PROXY } else { "http://192.168.6.51:7890" }),
   [switch]$NoProxy
 )
 $ErrorActionPreference = "Stop"
@@ -37,7 +37,6 @@ $Repos = [ordered]@{
       "engineering/improve-codebase-architecture" = "skills/engineering/improve-codebase-architecture"
       "engineering/prototype"                   = "skills/engineering/prototype"
       "engineering/research"                    = "skills/engineering/research"
-      "engineering/resolving-merge-conflicts"   = "skills/engineering/resolving-merge-conflicts"
       "engineering/setup-matt-pocock-skills"    = "skills/engineering/setup-matt-pocock-skills"
       "engineering/tdd"                         = "skills/engineering/tdd"
       "engineering/to-spec"                     = "skills/engineering/to-spec"
@@ -147,6 +146,7 @@ function Add-Junction([string]$link, [string]$target) {
 }
 
 # 自研技能：源在 repos/local/（入库，勿删），skills/ 下建 junction 指向源目录
+$failed = @()
 $LocalDir = Join-Path $ReposDir "local"
 if (Test-Path $LocalDir) {
   foreach ($layerDir in Get-ChildItem $LocalDir -Directory) {
@@ -158,7 +158,6 @@ if (Test-Path $LocalDir) {
   }
 }
 
-$failed = @()
 foreach ($kv in $Repos.GetEnumerator()) {
   $r = $kv.Value
   try {

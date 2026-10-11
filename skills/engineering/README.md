@@ -10,7 +10,7 @@
 
 ## 上游（junction）
 
-- **mattpocock/skills**：ask-matt、code-review、codebase-design、diagnosing-bugs、domain-modeling、grill-with-docs、implement、improve-codebase-architecture、prototype、research、resolving-merge-conflicts、setup-matt-pocock-skills、tdd、to-spec、to-tickets、triage、wayfinder、wizard
+- **mattpocock/skills**：ask-matt、code-review、codebase-design、diagnosing-bugs、domain-modeling、grill-with-docs、implement、improve-codebase-architecture、prototype、research、setup-matt-pocock-skills、tdd、to-spec、to-tickets、triage、wayfinder、wizard
 - **DietrichGebert/ponytail**：ponytail、ponytail-audit、ponytail-debt、ponytail-gain、ponytail-help、ponytail-review
 - **nextlevelbuilder/ui-ux-pro-max-skill**：ui-ux-pro-max
 - **anthropics/skills**：frontend-design

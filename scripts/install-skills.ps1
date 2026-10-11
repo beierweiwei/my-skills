@@ -8,6 +8,7 @@
     in-progress                 试验层，默认不装，需显式点名
     deprecated                  淘汰层，永不安装
   安装 = 复制技能目录；同名目录已存在时覆盖（重跑即更新）。
+  首次使用（或新克隆的机器）：先运行 scripts/update-skills.ps1 生成 skills/ 下的技能链接，否则技能库为空。
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts/install-skills.ps1
   powershell -ExecutionPolicy Bypass -File scripts/install-skills.ps1 -List
@@ -53,6 +54,12 @@ function Get-SkillEntries {
 
 $library = @(Get-SkillEntries)
 $layerNames = @($library | ForEach-Object { $_.Layer } | Sort-Object -Unique)
+
+if (-not $library) {
+  Write-Host "技能库为空：skills/ 下没有任何技能。技能条目（自研 + 上游）由 update-skills.ps1 生成的 junction 提供，请先运行一次。" -ForegroundColor Red
+  Write-Host "powershell -ExecutionPolicy Bypass -File scripts/update-skills.ps1" -ForegroundColor DarkGray
+  exit 1
+}
 
 if ($List) {
   $width = ($library | ForEach-Object { $_.Name.Length } | Measure-Object -Maximum).Maximum

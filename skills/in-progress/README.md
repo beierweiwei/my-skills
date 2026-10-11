@@ -9,7 +9,7 @@ powershell -ExecutionPolicy Bypass -File scripts/install-skills.ps1 -Layer in-pr
 powershell -ExecutionPolicy Bypass -File scripts/install-skills.ps1 -Skill <名字>
 ```
 
-毕业流程：用过一段时间、确认稳定后 `git mv skills/in-progress/<名字> skills/engineering/<名字>`（或 `productivity/`），它就进入默认安装。
+毕业流程：用过一段时间、确认稳定后 `git mv repos/local/in-progress/<名字> repos/local/engineering/<名字>`（或 `productivity/`），再重跑一次 `scripts/update-skills.*` 刷新链接，它就进入默认安装。
 
 ## 当前
 

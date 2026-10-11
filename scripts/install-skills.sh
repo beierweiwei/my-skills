@@ -24,6 +24,8 @@ usage() {
   --dest DIR          目标目录（默认 ~/.agents/skills）
   --dry-run           只预览，不写入
   -h, --help          显示本帮助
+
+首次使用（或新克隆的机器）：先运行 scripts/update-skills.sh 生成 skills/ 下的技能链接，否则库为空。
 EOF
 }
 
@@ -50,6 +52,13 @@ while IFS= read -r skill_md; do
   desc="$(sed -n 's/^description:[[:space:]]*//p' "$skill_md" | head -n 1 | cut -c1-64)"
   LAYERS+=("$layer"); NAMES+=("$name"); PATHS+=("$dir"); DESCS+=("$desc")
 done < <(find -L "$SKILLS_DIR" -mindepth 3 -maxdepth 3 -name SKILL.md | sort)
+
+if ((${#NAMES[@]} == 0)); then
+  printf 'Error: 技能库为空——skills/ 下没有任何技能。\n' >&2
+  printf '技能条目（自研 + 上游）由 update-skills 脚本生成的链接提供；首次使用（或新克隆的机器）请先运行：\n' >&2
+  printf '  bash scripts/update-skills.sh [--proxy URL]\n' >&2
+  exit 1
+fi
 
 if ((LIST)); then
   printf '目标目录: %s\n' "$DEST_DIR"
@@ -95,7 +104,8 @@ for i in "${selected[@]}"; do
   fi
   mkdir -p "$DEST_DIR"
   [[ -e "$target" || -L "$target" ]] && rm -rf -- "$target"
-  if cp -R -- "${PATHS[$i]}" "$target"; then
+  # -L：源是 skills/ 下的符号链接，必须解引用后复制实体，安装结果不能依赖本仓库
+  if cp -RL -- "${PATHS[$i]}" "$target"; then
     printf '  + %s/%s\n' "${LAYERS[$i]}" "${NAMES[$i]}"
     installed=$((installed + 1))
   else

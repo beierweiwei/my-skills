@@ -7,7 +7,7 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 REPOS_DIR="$ROOT/repos"
 SKILLS_DIR="$ROOT/skills"
 PLUGINS_DIR="$ROOT/plugins"
-PROXY="${HTTPS_PROXY:-http://127.0.0.1:7890}"
+PROXY="${HTTPS_PROXY:-http://192.168.6.51:7890}"
 NO_PROXY_MODE=0
 
 usage() {
@@ -73,6 +73,7 @@ link_entry() {
 }
 
 # 自研技能：源在 repos/local/（入库，勿删），skills/ 下建同名符号链接
+failed=()
 if [[ -d "$REPOS_DIR/local" ]]; then
   while IFS= read -r -d '' skill_md; do
     dir="$(dirname -- "$skill_md")"
@@ -82,7 +83,6 @@ if [[ -d "$REPOS_DIR/local" ]]; then
   done < <(find "$REPOS_DIR/local" -mindepth 3 -maxdepth 3 -name SKILL.md -print0)
 fi
 
-failed=()
 update_repo mattpocock-skills https://github.com/mattpocock/skills.git main || failed+=(mattpocock-skills)
 if [[ -d "$REPOS_DIR/mattpocock-skills" ]]; then
   while IFS=$'\t' read -r name path; do
@@ -98,7 +98,6 @@ engineering/implement	skills/engineering/implement
 engineering/improve-codebase-architecture	skills/engineering/improve-codebase-architecture
 engineering/prototype	skills/engineering/prototype
 engineering/research	skills/engineering/research
-engineering/resolving-merge-conflicts	skills/engineering/resolving-merge-conflicts
 engineering/setup-matt-pocock-skills	skills/engineering/setup-matt-pocock-skills
 engineering/tdd	skills/engineering/tdd
 engineering/to-spec	skills/engineering/to-spec
@@ -152,6 +151,7 @@ fi
 
 if ((${#failed[@]})); then
   printf 'Completed with failures: %s\n' "${failed[*]}" >&2
+  printf '提示：网络/代理问题可用 --proxy URL 指定代理，或 --no-proxy 直连。\n' >&2
   exit 1
 fi
 printf 'Open-source skills updated.\n'
