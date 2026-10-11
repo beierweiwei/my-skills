@@ -5,6 +5,9 @@ repos/*
 plugins/
 
 # skills/<层>/<技能>：全部是指向 repos/ 的 junction（脚本重建，不入库）；各层 README 入库
+# skills/* 同时覆盖顶层一层链接（旧布局残留），!skills/*/ 放行各层目录
+skills/*
+!skills/*/
 skills/*/*
 !skills/*/README.md
 raw/
