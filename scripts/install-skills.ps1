@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   从本库选择技能安装到 Agent 技能目录（默认 ~/.agents/skills）。
@@ -8,6 +8,8 @@
     in-progress                 试验层，默认不装，需显式点名
     deprecated                  淘汰层，永不安装
   安装 = 复制技能目录；同名目录已存在时覆盖（重跑即更新）。
+  技能自带 scripts/setup.* 时，安装完成后自动运行其自举脚本（如 inone-memory
+  配置凭据/装全局命令/拉取记忆）；-SkipSetup 跳过，可事后手动运行。
   首次使用（或新克隆的机器）：先运行 scripts/update-skills.ps1 生成 skills/ 下的技能链接，否则技能库为空。
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts/install-skills.ps1
@@ -15,6 +17,7 @@
   powershell -ExecutionPolicy Bypass -File scripts/install-skills.ps1 -Skill tdd,mao-methods
   powershell -ExecutionPolicy Bypass -File scripts/install-skills.ps1 -Layer engineering -DryRun
   powershell -ExecutionPolicy Bypass -File scripts/install-skills.ps1 -DestDir "$HOME\.claude\skills"
+  powershell -ExecutionPolicy Bypass -File scripts/install-skills.ps1 -SkipSetup
 #>
 param(
   [string[]]$Skill,
@@ -22,7 +25,8 @@ param(
   [switch]$All,
   [switch]$List,
   [string]$DestDir = (Join-Path $HOME ".agents/skills"),
-  [switch]$DryRun
+  [switch]$DryRun,
+  [switch]$SkipSetup
 )
 $ErrorActionPreference = "Stop"
 $Root      = Split-Path -Parent $PSScriptRoot
@@ -101,10 +105,12 @@ if (-not $wanted) { Write-Warning "没有选中任何技能。"; return }
 
 $installed = 0
 $failed = @()
+$setupDirs = @()
 foreach ($s in $wanted) {
   $target = Join-Path $DestDir $s.Name
   if ($DryRun) {
     Write-Host "  ~ $($s.Layer)/$($s.Name) -> $target" -ForegroundColor DarkGray
+    if (Test-Path (Join-Path $s.Path "scripts/setup.ps1")) { Write-Host "    ~ 自举: $($s.Name)/scripts/setup.ps1 将运行" -ForegroundColor DarkGray }
     continue
   }
   try {
@@ -120,9 +126,26 @@ foreach ($s in $wanted) {
     Copy-Item -Recurse -Force $s.Path $target
     Write-Host "  + $($s.Layer)/$($s.Name)" -ForegroundColor Green
     $installed++
+    if (Test-Path (Join-Path $target "scripts/setup.ps1")) { $setupDirs += $target }
   } catch {
     Write-Warning "安装失败 $($s.Name): $_"
     $failed += $s.Name
+  }
+}
+
+# 技能自带自举脚本:安装完成后逐个运行(如 inone-memory 配置凭据/装全局
+# 命令/拉取记忆)。setup 失败只警告不中断——技能本体已装好,可事后手动重跑
+if (-not $DryRun -and -not $SkipSetup -and $setupDirs) {
+  foreach ($dir in $setupDirs) {
+    $setupPath = Join-Path $dir "scripts/setup.ps1"
+    Write-Host ""
+    Write-Host "运行自举: $($dir | Split-Path -Leaf)/scripts/setup.ps1 …" -ForegroundColor Cyan
+    try {
+      & $setupPath
+      if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "setup 退出码 $LASTEXITCODE" }
+    } catch {
+      Write-Warning "自举失败($($dir | Split-Path -Leaf)): $_ ——技能本体已装好,可事后手动重跑 scripts/setup.ps1"
+    }
   }
 }
 

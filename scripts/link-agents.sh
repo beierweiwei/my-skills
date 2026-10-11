@@ -11,7 +11,7 @@ usage() {
 用法: link-agents.sh [选项]
 
   默认: 把 AGENTS.md / CLAUDE.md 链接到本机已安装 Agent 的全局位置
-        （~/.agents、~/.claude、~/.codex、~/.qoder-cn、~/.config/opencode）；
+        （~/.agents、~/.claude、~/.codex、~/.qoder-cn、~/.config/opencode、~/.zcode）；
         目录不存在视为未安装，跳过；已有实体文件先备份为 *.bak.<时间戳>。
 
   -n, --dry-run   只预览，不写入
@@ -66,6 +66,7 @@ link_one "claude"   "$HOME/.claude/CLAUDE.md"           "$ROOT/CLAUDE.md"
 link_one "codex"    "$HOME/.codex/AGENTS.md"            "$ROOT/AGENTS.md"
 link_one "qoder-cn" "$HOME/.qoder-cn/AGENTS.md"         "$ROOT/AGENTS.md"
 link_one "opencode" "$HOME/.config/opencode/AGENTS.md"  "$ROOT/AGENTS.md"
+link_one "zcode"    "$HOME/.zcode/AGENTS.md"            "$ROOT/AGENTS.md"
 
 if ((DRY_RUN)); then
   printf '\n预览完成（--dry-run 未实际写入）。\n'

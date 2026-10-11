@@ -17,7 +17,7 @@
 ├── repos/                  # 上游仓库浅克隆缓存（可随时删除重建）
 │   └── local/              # 自研技能源（随库提交，勿删）
 └── scripts/
-    ├── install-skills.ps1 / .sh   # 选择安装技能到 Agent 技能目录
+    ├── install-skills.ps1 / .sh   # 选择安装技能到 Agent 技能目录；技能自带 scripts/setup.* 时顺带运行其自举
     ├── link-agents.ps1 / .sh      # 把全局指令（AGENTS.md/CLAUDE.md）链接接入各 Agent 全局位置
     └── update-skills.ps1 / .sh    # 首次初始化/更新技能库：拉取上游 + 刷新 skills/、plugins/ 链接
 ```
@@ -44,6 +44,7 @@ bash scripts/install-skills.sh --skill tdd,mao-methods --dry-run
 
 - 默认只装生产层（engineering + productivity）；`in-progress` 要显式 `-Skill` / `-Layer` 点名；`deprecated` 永不安装。
 - `-All` 装除 deprecated 外的全部层；`-DestDir` / `--dest` 换目标目录（默认 `~/.agents/skills`）。
+- 技能自带 `scripts/setup.*` 时装完自动运行自举（如 inone-memory 配置凭据/装全局命令 inone/拉取记忆分发）；`-SkipSetup` / `--skip-setup` 跳过，事后手动跑也幂等。
 - 重复运行 = 覆盖更新。
 
 ### 2. 用 skills CLI 装（只覆盖随库提交的自研技能）
@@ -70,8 +71,8 @@ bash scripts/update-skills.sh                                        # 加 --no-
 
 ## 接入各工具
 
-- **技能**：`scripts/install-skills.*` 装到 `~/.agents/skills/`；Claude Code 另加 `-DestDir "$HOME\.claude\skills"`
-- **全局指令**：运行 `scripts/link-agents.*` 接入（未装的 Agent 自动跳过，已有实体文件先备份再链接），把 `AGENTS.md` / `CLAUDE.md` 链接到：`~/.agents/AGENTS.md`（通用约定）、`~/.claude/CLAUDE.md`（Claude Code，指向仓库 CLAUDE.md → @AGENTS.md）、`~/.codex/AGENTS.md`（Codex）、`~/.qoder-cn/AGENTS.md`（Qoder 国内版）、`~/.config/opencode/AGENTS.md`（opencode）。改仓库文件即对所有 Agent 生效。
+- **技能**：`scripts/install-skills.*` 装到 `~/.agents/skills/`；Claude Code 另加 `-DestDir "$HOME\.claude\skills"`，ZCode 另加 `-DestDir "$HOME\.zcode\skills"`（ZCode 同时也扫描 `~/.agents/skills`，装一处即可见）
+- **全局指令**：运行 `scripts/link-agents.*` 接入（未装的 Agent 自动跳过，已有实体文件先备份再链接），把 `AGENTS.md` / `CLAUDE.md` 链接到：`~/.agents/AGENTS.md`（通用约定）、`~/.claude/CLAUDE.md`（Claude Code，指向仓库 CLAUDE.md → @AGENTS.md）、`~/.codex/AGENTS.md`（Codex）、`~/.qoder-cn/AGENTS.md`（Qoder 国内版）、`~/.config/opencode/AGENTS.md`（opencode）、`~/.zcode/AGENTS.md`（ZCode）。改仓库文件即对所有 Agent 生效。
 - **MCP**：`mcp/mcp.json` 内容合并进 `~/.claude.json` 的 `mcpServers`，并在环境变量设置 `EXA_API_KEY`、`ZREAD_API_TOKEN`
 - **插件**：把 `plugins/*` 登记到 Claude Code（`/plugin`），或直接使用官方 marketplace 安装
 
@@ -80,7 +81,7 @@ bash scripts/update-skills.sh                                        # 加 --no-
 ### 自研（源在 `repos/local/`，随库提交）
 
 - **engineering**：experience-kb-init
-- **productivity**：grill-the-goal
+- **productivity**：grill-the-goal、inone-memory（统一记忆推送/检索；自带 setup 自举，上游 = inone 仓库蒸馏母本 `deploy/12-memory-hub/skills/_shared/`，母本修订后同步本库）
 - **in-progress**：mao-methods、mao-collaboration
 
 分隔说明见各层 README：`skills/engineering/README.md`、`skills/productivity/README.md`、`skills/in-progress/README.md`、`skills/deprecated/README.md`。

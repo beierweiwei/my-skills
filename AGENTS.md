@@ -40,12 +40,12 @@
 
 ### 网络
 
-- 境外网站/资源统一走本地代理 `http://127.0.0.1:7890`(如果本地没有代理服务尝试走 `http://192.168.6.51:7890`)，用法：
+- 境外网站/资源统一走本机代理 `http://127.0.0.1:7890`（本机没起代理服务时，按机器环境走局域网代理，地址记在各机器自己的说明里，不进本通用文件），用法：
 
   ```bash
-  export http_proxy=http://192.168.6.51:7890
-  export https_proxy=http://192.168.6.51:7890
-  export all_proxy=http://192.168.6.51:7890
+  export http_proxy=http://127.0.0.1:7890
+  export https_proxy=http://127.0.0.1:7890
+  export all_proxy=http://127.0.0.1:7890
   ```
 
 - GitHub API 匿名请求可能被限流，取版本信息失败时可改为直接下载 release 资产。
@@ -54,14 +54,16 @@
 
 ## 统一记忆(inone)
 
-- 我的跨 agent 统一记忆(偏好/事实/经验教训/纠错/项目上下文)单向生成在 `/home/wjj/inone-memory-dist/`(只读;由 inone 管道重生成,永不手编);
-- 开始任务前或需要个人背景时，读 `/home/wjj/inone-memory-dist/MEMORY-CORE.md`(≤150 行摘要);
-- 需要某类型完整记忆时，读 `/home/wjj/inone-memory-dist/topics/<kind>.md`(kind ∈ semantic|episodic|procedural，scope ∈ user|project:<名>);
+- 我的跨 agent 统一记忆(偏好/事实/经验教训/纠错/项目上下文)单向生成在
+  `~/inone-memory-dist/`(只读;由 inone 管道重生成,永不手编);
+- 开始任务前或需要个人背景时，读 `~/inone-memory-dist/MEMORY-CORE.md`(≤150 行摘要);
+- 需要某类型完整记忆时，读 `~/inone-memory-dist/topics/<kind>.md`(kind ∈ semantic|episodic|procedural，scope ∈ user|project:<名>);
 - 我说「记住 X」，或会话中出现值得跨会话保留的内容(我的偏好/纠错、你亲历的坑与解法、代码推不出的项目决策)时，使用 inone-memory 技能推送(直接入库即时生效，不当记忆我在溯源页审核工作台删除);
-- 永不编辑 `/home/wjj/inone-memory-dist` 内的文件，永不把内容写回任何 agent 的 auto-memory 目录(~/.qoder/projects/<p>/memory/、~/.qoder/memory/ 均为只读参考)。
+- 永不编辑 `~/inone-memory-dist` 内的文件，永不把内容写回任何 agent 的 auto-memory 目录(各家 agent 的 memory 目录均为只读参考)。
 
 ## 本库约定
 
-- 全局指令接入：`scripts/link-agents.*` 把本文件（AGENTS.md）/ CLAUDE.md 链接到各 Agent 全局位置（agents 约定、Claude Code、Codex、Qoder 国内版、opencode），改本文件即对所有 Agent 生效。
+- 全局指令接入：`scripts/link-agents.*` 把本文件（AGENTS.md）/ CLAUDE.md 链接到各 Agent 全局位置（agents 约定、Claude Code、Codex、Qoder 国内版、opencode、ZCode），改本文件即对所有 Agent 生效。
 - 技能按层放在 `skills/<层>/<技能>/`：`engineering`、`productivity` 是生产层（`scripts/install-skills.*` 默认安装），`in-progress` 需点名安装，`deprecated` 只留记录、永不安装。`skills/` 下全是指向 `repos/` 的 junction，由 `scripts/update-skills.*` 统一生成/拉最新（新克隆的机器先跑一次，否则 `skills/` 为空）：上游技能源在 `repos/<仓库>/`，改进上游提 PR 到上游仓库；自研技能源在 `repos/local/<层>/<技能>/`（随库提交），本地定制改这里。
+- 技能自带 `scripts/setup.*` 时（如 inone-memory 配置凭据/装全局命令/拉记忆分发），`install-skills.*` 装完自动运行；`-SkipSetup` / `--skip-setup` 跳过，事后可手动重跑（幂等）。
 - 生成 spec（to-spec）前：先读 [notes/to-spec-patches.md](notes/to-spec-patches.md) 的两条补丁。

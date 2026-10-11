@@ -9,7 +9,7 @@ DEST_DIR="$HOME/.agents/skills"
 DEFAULT_LAYERS=(engineering productivity)
 NEVER_LAYERS=(deprecated)
 
-LIST=0; ALL=0; DRY_RUN=0
+LIST=0; ALL=0; DRY_RUN=0; SKIP_SETUP=0
 PICK_SKILLS=(); PICK_LAYERS=()
 
 usage() {
@@ -23,6 +23,7 @@ usage() {
   --list              列出库中技能与安装状态
   --dest DIR          目标目录（默认 ~/.agents/skills）
   --dry-run           只预览，不写入
+  --skip-setup        跳过技能自带的自举脚本（如 inone-memory 的 scripts/setup.sh）
   -h, --help          显示本帮助
 
 首次使用（或新克隆的机器）：先运行 scripts/update-skills.sh 生成 skills/ 下的技能链接，否则库为空。
@@ -37,6 +38,7 @@ while (($#)); do
     --list) LIST=1; shift ;;
     --dest) (($# >= 2)) || { usage >&2; exit 2; }; DEST_DIR="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --skip-setup) SKIP_SETUP=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
@@ -96,10 +98,12 @@ if ((${#selected[@]} == 0)); then
 fi
 
 installed=0; failed=()
+setup_dirs=()
 for i in "${selected[@]}"; do
   target="$DEST_DIR/${NAMES[$i]}"
   if ((DRY_RUN)); then
     printf '  ~ %s/%s -> %s\n' "${LAYERS[$i]}" "${NAMES[$i]}" "$target"
+    [[ -f "${PATHS[$i]}/scripts/setup.sh" ]] && printf '    ~ 自举: %s/scripts/setup.sh 将运行\n' "${NAMES[$i]}"
     continue
   fi
   mkdir -p "$DEST_DIR"
@@ -108,11 +112,23 @@ for i in "${selected[@]}"; do
   if cp -RL -- "${PATHS[$i]}" "$target"; then
     printf '  + %s/%s\n' "${LAYERS[$i]}" "${NAMES[$i]}"
     installed=$((installed + 1))
+    [[ -f "$target/scripts/setup.sh" ]] && setup_dirs+=("$target")
   else
     printf 'Warning: 安装失败 %s\n' "${NAMES[$i]}" >&2
     failed+=("${NAMES[$i]}")
   fi
 done
+
+# 技能自带自举脚本：安装完成后逐个运行（如 inone-memory 配置凭据/装全局
+# 命令/拉取记忆）。setup 失败只警告不中断——技能本体已装好，可事后手动重跑
+if (( ! DRY_RUN && ! SKIP_SETUP && ${#setup_dirs[@]} )); then
+  for dir in "${setup_dirs[@]}"; do
+    printf '\n运行自举: %s/scripts/setup.sh …\n' "$(basename -- "$dir")"
+    if ! bash "$dir/scripts/setup.sh"; then
+      printf 'Warning: 自举失败(%s)——技能本体已装好，可事后手动重跑 scripts/setup.sh\n' "$(basename -- "$dir")" >&2
+    fi
+  done
+fi
 
 printf '\n'
 if ((DRY_RUN)); then

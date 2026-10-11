@@ -7,7 +7,7 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 REPOS_DIR="$ROOT/repos"
 SKILLS_DIR="$ROOT/skills"
 PLUGINS_DIR="$ROOT/plugins"
-PROXY="${HTTPS_PROXY:-http://192.168.6.51:7890}"
+PROXY="${HTTPS_PROXY:-http://127.0.0.1:7890}"
 NO_PROXY_MODE=0
 
 usage() {

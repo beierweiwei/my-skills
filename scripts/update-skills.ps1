@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   拉取全部开源技能/插件最新版，并以目录联接(junction)引用进 skills/ 与 plugins/。
@@ -11,7 +11,7 @@
   powershell -ExecutionPolicy Bypass -File scripts/update-skills.ps1 -Proxy http://192.168.6.51:7890
 #>
 param(
-  [string]$Proxy = $(if ($env:HTTPS_PROXY) { $env:HTTPS_PROXY } else { "http://192.168.6.51:7890" }),
+  [string]$Proxy = $(if ($env:HTTPS_PROXY) { $env:HTTPS_PROXY } else { "http://127.0.0.1:7890" }),
   [switch]$NoProxy
 )
 $ErrorActionPreference = "Stop"

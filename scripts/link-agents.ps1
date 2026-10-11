@@ -1,9 +1,9 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   把本库的全局指令（AGENTS.md / CLAUDE.md）链接到各 Agent 的全局位置，所有 Agent 共用同一份源文件。
 .DESCRIPTION
-  - 覆盖：agents(通用约定) / Claude Code / Codex / Qoder(国内版) / opencode 的全局指令路径。
+  - 覆盖：agents(通用约定) / Claude Code / Codex / Qoder(国内版) / opencode / ZCode 的全局指令路径。
   - 目录不存在视为该 Agent 未安装，自动跳过；已有实体文件先备份为 *.bak.<时间戳> 再链接。
   - Windows 创建符号链接需要开发者模式（设置 → 系统 → 开发者选项）或管理员权限。
 .EXAMPLE
@@ -22,6 +22,7 @@ $Targets = @(
   @{ name = "codex";    link = (Join-Path $HOME ".codex/AGENTS.md");           source = (Join-Path $Root "AGENTS.md") }
   @{ name = "qoder-cn"; link = (Join-Path $HOME ".qoder-cn/AGENTS.md");       source = (Join-Path $Root "AGENTS.md") }
   @{ name = "opencode"; link = (Join-Path $HOME ".config/opencode/AGENTS.md"); source = (Join-Path $Root "AGENTS.md") }
+  @{ name = "zcode";    link = (Join-Path $HOME ".zcode/AGENTS.md");           source = (Join-Path $Root "AGENTS.md") }
 )
 
 $failed = @()
@@ -63,8 +64,20 @@ foreach ($t in $Targets) {
     New-Item -ItemType SymbolicLink -Path $t.link -Target $t.source | Out-Null
     Write-Host ("  + {0,-10} {1} -> {2}" -f $t.name, $t.link, $t.source) -ForegroundColor Green
   } catch {
-    Write-Warning "$($t.name) 创建链接失败（需开发者模式或管理员权限）: $_"
-    $failed += $t.name
+    # 无符号链接权限(未开发者模式/非管理员,Windows 实锤):降级为副本接入,
+    # 绝不让原位悬空——先试符号链接失败再落副本;副本也失败则把备份还原
+    try {
+      Copy-Item $t.source $t.link -Force
+      Write-Host ("  + {0,-10} 副本接入(无符号链接权限): {1}" -f $t.name, $t.link) -ForegroundColor Green
+      Write-Host "    改仓库后需重跑本脚本同步;以管理员身份重跑可升级为真链接(改仓库即全局生效)"
+    } catch {
+      Write-Warning "$($t.name) 副本接入也失败: $_"
+      if ($item -and -not $isLink -and (Test-Path "$bak")) {
+        Move-Item $bak $t.link -Force
+        Write-Host "    已还原原文件: $t.link"
+      }
+      $failed += $t.name
+    }
   }
 }
 
