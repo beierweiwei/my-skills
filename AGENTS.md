@@ -1,6 +1,6 @@
 # 全局协作原则
 
-个人跨项目默认协作方式，适用于 Codex / Claude Code / Qoder。项目内或子目录更具体的 `AGENTS.md` / `CLAUDE.md` 优先；项目命令、技术栈约束和业务规则留在项目级文件。
+项目内或子目录更具体的 `AGENTS.md` / `CLAUDE.md` 优先；项目命令、技术栈约束和业务规则留在项目级文件。
 
 ## 沟通
 
@@ -9,9 +9,6 @@
 - 完成目标后总结关键工作；经历多轮失败后，总结可复用的经验。
 
 ## 编码守则
-
-改编自 [andrej-karpathy-skills](https://github.com/multica-ai/andrej-karpathy-skills)，偏向谨慎；对显而易见的微小改动自行判断，无需机械套用。
-
 ### 编码前思考
 
 - 实施前明确假设；有关键不确定性先问。
@@ -38,16 +35,16 @@
 
 ### 搜索与网页
 
-- 联网搜索走 exa MCP：GitHub 代码库优先，其次网页；优先复用已知代码模式。
-- 抓取网页内容优先 playwright-cli；环境自带 WebFetch 可用时可直接用。
+- 如果自带的联网搜索不可用则走走 exa MCP。
+- 如果自带的WebFetch服务不可用，则使用哦 playwright-cli抓取
 
 ### 网络
 
-- 境外网站/资源统一走本地代理 `http://127.0.0.1:7890`(如果本地没有代理服务看是否能走http://192.168.6.51:7890)，失败先检查代理可用性再重试。
+- 境外网站/资源统一走本地代理 `http://127.0.0.1:7890`(如果本地没有代理服务尝试走http://192.168.6.51:7890)。
 - Linux 软件源、DockerHub 等优先用国内镜像（清华、阿里云）。
 
 
 ## 本库约定
 
-- `skills/` 中开源技能是指向 `repos/` 的 junction，由 `scripts/update-skills.ps1` 统一拉最新；改进上游技能提 PR 到上游仓库，本地定制放 `skills/local/`。
+- 技能按层放在 `skills/<层>/<技能>/`：`engineering`、`productivity` 是生产层（`scripts/install-skills.*` 默认安装），`in-progress` 需点名安装，`deprecated` 只留记录、永不安装。`skills/` 下全是指向 `repos/` 的 junction，由 `scripts/update-skills.*` 统一生成/拉最新（新克隆的机器先跑一次，否则 `skills/` 为空）：上游技能源在 `repos/<仓库>/`，改进上游提 PR 到上游仓库；自研技能源在 `repos/local/<层>/<技能>/`（随库提交），本地定制改这里。
 - 生成 spec（to-spec）前：先读 [notes/to-spec-patches.md](notes/to-spec-patches.md) 的两条补丁。
