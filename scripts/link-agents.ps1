@@ -1,0 +1,76 @@
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+  把本库的全局指令（AGENTS.md / CLAUDE.md）链接到各 Agent 的全局位置，所有 Agent 共用同一份源文件。
+.DESCRIPTION
+  - 覆盖：agents(通用约定) / Claude Code / Codex / Qoder(国内版) / opencode 的全局指令路径。
+  - 目录不存在视为该 Agent 未安装，自动跳过；已有实体文件先备份为 *.bak.<时间戳> 再链接。
+  - Windows 创建符号链接需要开发者模式（设置 → 系统 → 开发者选项）或管理员权限。
+.EXAMPLE
+  powershell -ExecutionPolicy Bypass -File scripts/link-agents.ps1
+  powershell -ExecutionPolicy Bypass -File scripts/link-agents.ps1 -DryRun
+#>
+param([switch]$DryRun)
+
+$ErrorActionPreference = "Stop"
+$Root = Split-Path -Parent $PSScriptRoot
+
+# 名称、链接路径、仓库内源文件（AGENTS.md 为共用源，CLAUDE.md 是指向它的指针）
+$Targets = @(
+  @{ name = "agents";   link = (Join-Path $HOME ".agents/AGENTS.md");          source = (Join-Path $Root "AGENTS.md") }
+  @{ name = "claude";   link = (Join-Path $HOME ".claude/CLAUDE.md");          source = (Join-Path $Root "CLAUDE.md") }
+  @{ name = "codex";    link = (Join-Path $HOME ".codex/AGENTS.md");           source = (Join-Path $Root "AGENTS.md") }
+  @{ name = "qoder-cn"; link = (Join-Path $HOME ".qoder-cn/AGENTS.md");       source = (Join-Path $Root "AGENTS.md") }
+  @{ name = "opencode"; link = (Join-Path $HOME ".config/opencode/AGENTS.md"); source = (Join-Path $Root "AGENTS.md") }
+)
+
+$failed = @()
+foreach ($t in $Targets) {
+  $dir = Split-Path -Parent $t.link
+  if (-not (Test-Path $dir)) {
+    Write-Host ("  - {0,-10} 未安装（{1} 不存在），跳过" -f $t.name, $dir)
+    continue
+  }
+  if (-not (Test-Path $t.source)) {
+    Write-Warning "仓库源文件缺失: $($t.source)"
+    $failed += $t.name
+    continue
+  }
+
+  $item = Get-Item $t.link -Force -ErrorAction SilentlyContinue
+  $isLink = $item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+
+  if ($isLink -and $item.Target -eq $t.source) {
+    Write-Host ("  = {0,-10} 已是链接" -f $t.name)
+    continue
+  }
+  if ($DryRun) {
+    if ($isLink)        { Write-Host ("  ~ {0,-10} 将重建链接: {1}" -f $t.name, $t.link) }
+    elseif ($item)      { Write-Host ("  ~ {0,-10} 将备份实体文件并链接: {1}" -f $t.name, $t.link) }
+    else                { Write-Host ("  ~ {0,-10} 将创建链接: {1} -> {2}" -f $t.name, $t.link, $t.source) }
+    continue
+  }
+
+  if ($isLink) {
+    [System.IO.File]::Delete($t.link)
+  } elseif ($item) {
+    $bak = "$($t.link).bak." + (Get-Date -Format "yyyyMMddHHmmss")
+    Move-Item $t.link $bak
+    Write-Host ("  ! {0,-10} 原文件已备份: {1}" -f $t.name, $bak)
+  }
+
+  try {
+    New-Item -ItemType SymbolicLink -Path $t.link -Target $t.source | Out-Null
+    Write-Host ("  + {0,-10} {1} -> {2}" -f $t.name, $t.link, $t.source) -ForegroundColor Green
+  } catch {
+    Write-Warning "$($t.name) 创建链接失败（需开发者模式或管理员权限）: $_"
+    $failed += $t.name
+  }
+}
+
+Write-Host ""
+if ($failed) {
+  Write-Host "完成，失败: $($failed -join ', ')" -ForegroundColor Yellow
+} else {
+  Write-Host "全局指令已接入。改仓库文件即对所有 Agent 生效。" -ForegroundColor Green
+}

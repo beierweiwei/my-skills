@@ -18,6 +18,7 @@
 │   └── local/              # 自研技能源（随库提交，勿删）
 └── scripts/
     ├── install-skills.ps1 / .sh   # 选择安装技能到 Agent 技能目录
+    ├── link-agents.ps1 / .sh      # 把全局指令（AGENTS.md/CLAUDE.md）链接接入各 Agent 全局位置
     └── update-skills.ps1 / .sh    # 首次初始化/更新技能库：拉取上游 + 刷新 skills/、plugins/ 链接
 ```
 
@@ -70,7 +71,7 @@ bash scripts/update-skills.sh                                        # 加 --no-
 ## 接入各工具
 
 - **技能**：`scripts/install-skills.*` 装到 `~/.agents/skills/`；Claude Code 另加 `-DestDir "$HOME\.claude\skills"`
-- **全局指令**：将 `AGENTS.md` 链接到 `~/.agents/AGENTS.md` 和 `~/.config/opencode/AGENTS.md`，将 `CLAUDE.md` 链接到 `~/.claude/CLAUDE.md`
+- **全局指令**：运行 `scripts/link-agents.*` 接入（未装的 Agent 自动跳过，已有实体文件先备份再链接），把 `AGENTS.md` / `CLAUDE.md` 链接到：`~/.agents/AGENTS.md`（通用约定）、`~/.claude/CLAUDE.md`（Claude Code，指向仓库 CLAUDE.md → @AGENTS.md）、`~/.codex/AGENTS.md`（Codex）、`~/.qoder-cn/AGENTS.md`（Qoder 国内版）、`~/.config/opencode/AGENTS.md`（opencode）。改仓库文件即对所有 Agent 生效。
 - **MCP**：`mcp/mcp.json` 内容合并进 `~/.claude.json` 的 `mcpServers`，并在环境变量设置 `EXA_API_KEY`、`ZREAD_API_TOKEN`
 - **插件**：把 `plugins/*` 登记到 Claude Code（`/plugin`），或直接使用官方 marketplace 安装
 
