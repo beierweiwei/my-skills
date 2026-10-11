@@ -26,6 +26,28 @@ $Targets = @(
 )
 
 $failed = @()
+
+function New-SymLink([string]$Path, [string]$Target) {
+  try {
+    New-Item -ItemType SymbolicLink -Path $Path -Target $Target -ErrorAction Stop | Out-Null
+  } catch { }
+  if (Test-Path $Path) { return }
+  # PS 5.1 的 New-Item 不带 SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE(0x800),
+  # 开发者模式开着也报"需要管理员"——P/Invoke 直调补上旗标
+  if (-not ("MySkills.SymLink" -as [type])) {
+    Add-Type -Namespace MySkills -Name SymLink -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern bool CreateSymbolicLink(string lpSymlinkFileName, string lpTargetFileName, int dwFlags);
+'@
+  }
+  $flags = 0x800  # SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE(文件链接,0x0)
+  [void][MySkills.SymLink]::CreateSymbolicLink($Path, $Target, $flags)
+  # Windows 怪相实锤(2026-10-12 本机):无特权时 API 竟返回 true 但不落任何
+  # 文件(lasterr=1314 ERROR_PRIVILEGE_NOT_HELD)——返回值不可信,以落盘为准
+  if (-not (Test-Path $Path)) {
+    throw "符号链接未落盘(无特权且开发者模式旗标未生效)"
+  }
+}
 foreach ($t in $Targets) {
   $dir = Split-Path -Parent $t.link
   if (-not (Test-Path $dir)) {
@@ -61,7 +83,7 @@ foreach ($t in $Targets) {
   }
 
   try {
-    New-Item -ItemType SymbolicLink -Path $t.link -Target $t.source | Out-Null
+    New-SymLink -Path $t.link -Target $t.source
     Write-Host ("  + {0,-10} {1} -> {2}" -f $t.name, $t.link, $t.source) -ForegroundColor Green
   } catch {
     # 无符号链接权限(未开发者模式/非管理员,Windows 实锤):降级为副本接入,
