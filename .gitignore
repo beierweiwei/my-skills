@@ -11,3 +11,4 @@ skills/*
 skills/*/*
 !skills/*/README.md
 raw/
+__pycache__/
