@@ -22,6 +22,14 @@
     └── update-skills.ps1 / .sh    # 首次初始化/更新技能库：拉取上游 + 刷新 skills/、plugins/ 链接
 ```
 
+## Agent 约定（本仓库内的工作提示，不随 link-agents 全局分发）
+
+- 根 `AGENTS.md` 是**全局共享面**：只放跨机器/跨项目通用的沟通、编码守则、网络、统一记忆约定；本仓库自身的工作约定只住在本 README，不进 AGENTS.md（否则会被链到所有机器所有项目，出了本库全是死引用）。
+- 全局指令接入：`scripts/link-agents.*` 把根 AGENTS.md / CLAUDE.md 链接到各 Agent 全局位置（agents 约定、Claude Code、Codex、Qoder 国内版、opencode、ZCode），改根 AGENTS.md 即对所有 Agent 生效。
+- 技能按层放在 `skills/<层>/<技能>/`：`engineering`、`productivity` 生产层（默认安装），`in-progress` 需点名，`deprecated` 永不安装；全部是指向 `repos/` 的 junction，由 `scripts/update-skills.*` 生成（新克隆机器先跑一次）。上游技能源在 `repos/<仓库>/`（改进提 PR 上游）；自研源在 `repos/local/<层>/<技能>/`（随库提交，本地定制改这里）。
+- 技能自带 `scripts/setup.*` 时（如 inone-memory 配置凭据/装全局命令/拉记忆分发），`install-skills.*` 装完自动运行；`-SkipSetup` / `--skip-setup` 跳过，事后手动重跑幂等。
+- 生成 spec（to-spec）前：先读 [notes/to-spec-patches.md](notes/to-spec-patches.md) 的两条补丁。
+
 ## 安装技能
 
 > 首次使用（新克隆的机器）：先运行一次 `scripts/update-skills.*` 生成 `skills/` 下的技能链接（自研与上游技能），否则技能库为空，安装脚本无从选择。
