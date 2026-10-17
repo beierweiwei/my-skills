@@ -2,30 +2,38 @@
 set -uo pipefail
 
 # Linux/macOS equivalent of install-skills.ps1. Copies selected skills from the
-# layered library (skills/<layer>/<skill>) into an agent skill directory.
+# layered library (skills/<layer>/<skill>) into agent skill directories.
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 SKILLS_DIR="$ROOT/skills"
-DEST_DIR="$HOME/.agents/skills"
 DEFAULT_LAYERS=(engineering productivity)
 NEVER_LAYERS=(deprecated)
 
+# 各 Agent 的技能目录约定（<基础目录>/skills）；检测规则与 link-agents 一致：
+# 基础目录存在视为已安装。agents 是跨 Agent 共享目录（ZCode 也扫描这里）。
+AGENT_NAMES=(agents claude codex qoder-cn opencode zcode)
+AGENT_BASES=("$HOME/.agents" "$HOME/.claude" "$HOME/.codex" "$HOME/.qoder-cn" "$HOME/.config/opencode" "$HOME/.zcode")
+
 LIST=0; ALL=0; DRY_RUN=0; SKIP_SETUP=0
-PICK_SKILLS=(); PICK_LAYERS=()
+DEST_DIR=""
+PICK_SKILLS=(); PICK_LAYERS=(); PICK_AGENTS=()
 
 usage() {
   cat <<'EOF'
 用法: install-skills.sh [选项]
 
-  (无选项)            安装生产层（engineering、productivity）全部技能
+  (无选项)            检测本机已装 Agent，安装生产层（engineering、productivity）到全部已装 Agent
   --skill A,B         只安装指定技能（逗号分隔，可重复）
   --layer LAYER       只安装指定层（可重复）
+  --agent A,B         只安装到指定 Agent（逗号分隔，可重复；未检测到的警告跳过）
   --all               安装除 deprecated 外的全部层
-  --list              列出库中技能与安装状态
-  --dest DIR          目标目录（默认 ~/.agents/skills）
+  --list              列出库中技能与各目标目录的安装状态
+  --dest DIR          只安装到指定目录（覆盖 Agent 检测；与 --agent 同给时 --dest 优先）
   --dry-run           只预览，不写入
   --skip-setup        跳过技能自带的自举脚本（如 inone-memory 的 scripts/setup.sh）
   -h, --help          显示本帮助
 
+Agent 检测规则与 link-agents 相同：基础目录（~/.agents、~/.claude、~/.codex、
+~/.qoder-cn、~/.config/opencode、~/.zcode）存在视为已装，技能装到其 skills/ 子目录。
 首次使用（或新克隆的机器）：先运行 scripts/update-skills.sh 生成 skills/ 下的技能链接，否则库为空。
 EOF
 }
@@ -34,6 +42,7 @@ while (($#)); do
   case "$1" in
     --skill) (($# >= 2)) || { usage >&2; exit 2; }; IFS=',' read -r -a _s <<< "$2"; PICK_SKILLS+=("${_s[@]}"); shift 2 ;;
     --layer) (($# >= 2)) || { usage >&2; exit 2; }; PICK_LAYERS+=("$2"); shift 2 ;;
+    --agent) (($# >= 2)) || { usage >&2; exit 2; }; IFS=',' read -r -a _a <<< "$2"; PICK_AGENTS+=("${_a[@]}"); shift 2 ;;
     --all) ALL=1; shift ;;
     --list) LIST=1; shift ;;
     --dest) (($# >= 2)) || { usage >&2; exit 2; }; DEST_DIR="$2"; shift 2 ;;
@@ -45,6 +54,40 @@ while (($#)); do
 done
 
 contains() { local needle="$1"; shift; local x; for x in "$@"; do [[ "$x" == "$needle" ]] && return 0; done; return 1; }
+
+# 解析安装目标目录：--dest 显式指定优先；否则按 Agent 检测（显式 --agent 只看指定项）
+DESTS=()
+resolve_dests() {
+  if [[ -n "$DEST_DIR" ]]; then DESTS=("$DEST_DIR"); return; fi
+  local wanted=() n i found
+  if ((${#PICK_AGENTS[@]})); then wanted=("${PICK_AGENTS[@]}"); else wanted=("${AGENT_NAMES[@]}"); fi
+  for n in "${wanted[@]}"; do
+    found=0
+    for i in "${!AGENT_NAMES[@]}"; do
+      [[ "${AGENT_NAMES[$i]}" == "$n" ]] || continue
+      found=1
+      if [[ -d "${AGENT_BASES[$i]}" ]]; then
+        DESTS+=("${AGENT_BASES[$i]}/skills")
+      elif ((${#PICK_AGENTS[@]})); then
+        printf 'Warning: Agent %s 未检测到（%s 不存在），跳过\n' "$n" "${AGENT_BASES[$i]}" >&2
+      fi
+      break
+    done
+    if (( ! found )); then
+      printf 'Error: 未知 Agent: %s（可选: %s）\n' "$n" "${AGENT_NAMES[*]}" >&2
+      exit 2
+    fi
+  done
+  if ((${#DESTS[@]} == 0)); then
+    if ((${#PICK_AGENTS[@]})); then
+      printf 'Error: 指定的 Agent 均未检测到，无安装目标。\n' >&2
+    else
+      printf 'Error: 未检测到任何已安装的 Agent（基础目录: %s）。\n' "${AGENT_BASES[*]}" >&2
+    fi
+    exit 1
+  fi
+}
+resolve_dests
 
 LAYERS=(); NAMES=(); PATHS=(); DESCS=()
 while IFS= read -r skill_md; do
@@ -63,9 +106,16 @@ if ((${#NAMES[@]} == 0)); then
 fi
 
 if ((LIST)); then
-  printf '目标目录: %s\n' "$DEST_DIR"
+  printf '目标目录:\n'
+  for d in "${DESTS[@]}"; do printf '  %s\n' "$d"; done
   for i in "${!NAMES[@]}"; do
-    mark='[    ]'; [[ -e "$DEST_DIR/${NAMES[$i]}" ]] && mark='[已装]'
+    count=0
+    for d in "${DESTS[@]}"; do [[ -e "$d/${NAMES[$i]}" ]] && count=$((count + 1)); done
+    if ((${#DESTS[@]} == 1)); then
+      mark='[    ]'; ((count)) && mark='[已装]'
+    else
+      mark="[$count/${#DESTS[@]}]"
+    fi
     printf '  %s %-14s %-34s  %s\n' "$mark" "${LAYERS[$i]}" "${NAMES[$i]}" "${DESCS[$i]}"
   done
   exit 0
@@ -98,44 +148,52 @@ if ((${#selected[@]} == 0)); then
 fi
 
 installed=0; failed=()
-setup_dirs=()
-for i in "${selected[@]}"; do
-  target="$DEST_DIR/${NAMES[$i]}"
-  if ((DRY_RUN)); then
-    printf '  ~ %s/%s -> %s\n' "${LAYERS[$i]}" "${NAMES[$i]}" "$target"
-    [[ -f "${PATHS[$i]}/scripts/setup.sh" ]] && printf '    ~ 自举: %s/scripts/setup.sh 将运行\n' "${NAMES[$i]}"
-    continue
-  fi
-  mkdir -p "$DEST_DIR"
-  [[ -e "$target" || -L "$target" ]] && rm -rf -- "$target"
-  # -L：源是 skills/ 下的符号链接，必须解引用后复制实体，安装结果不能依赖本仓库
-  if cp -RL -- "${PATHS[$i]}" "$target"; then
-    printf '  + %s/%s\n' "${LAYERS[$i]}" "${NAMES[$i]}"
-    installed=$((installed + 1))
-    [[ -f "$target/scripts/setup.sh" ]] && setup_dirs+=("$target")
-  else
-    printf 'Warning: 安装失败 %s\n' "${NAMES[$i]}" >&2
-    failed+=("${NAMES[$i]}")
-  fi
+declare -A setup_seen=()
+for dest in "${DESTS[@]}"; do
+  printf '→ %s\n' "$dest"
+  for i in "${selected[@]}"; do
+    target="$dest/${NAMES[$i]}"
+    if ((DRY_RUN)); then
+      printf '  ~ %s/%s\n' "${LAYERS[$i]}" "${NAMES[$i]}"
+      if [[ -f "${PATHS[$i]}/scripts/setup.sh" && -z "${setup_seen[${NAMES[$i]}]:-}" ]]; then
+        printf '    ~ 自举: %s/scripts/setup.sh 将运行\n' "${NAMES[$i]}"
+      fi
+      continue
+    fi
+    mkdir -p "$dest"
+    [[ -e "$target" || -L "$target" ]] && rm -rf -- "$target"
+    # -L：源是 skills/ 下的符号链接，必须解引用后复制实体，安装结果不能依赖本仓库
+    if cp -RL -- "${PATHS[$i]}" "$target"; then
+      printf '  + %s/%s\n' "${LAYERS[$i]}" "${NAMES[$i]}"
+      installed=$((installed + 1))
+      # 自举按技能名去重：装多份只跑一次（配置的是全局环境）
+      if [[ -f "$target/scripts/setup.sh" && -z "${setup_seen[${NAMES[$i]}]:-}" ]]; then
+        setup_seen[${NAMES[$i]}]="$target"
+      fi
+    else
+      printf 'Warning: 安装失败 %s\n' "$dest/${NAMES[$i]}" >&2
+      failed+=("$dest/${NAMES[$i]}")
+    fi
+  done
 done
 
 # 技能自带自举脚本：安装完成后逐个运行（如 inone-memory 配置凭据/装全局
 # 命令/拉取记忆）。setup 失败只警告不中断——技能本体已装好，可事后手动重跑
-if (( ! DRY_RUN && ! SKIP_SETUP && ${#setup_dirs[@]} )); then
-  for dir in "${setup_dirs[@]}"; do
-    printf '\n运行自举: %s/scripts/setup.sh …\n' "$(basename -- "$dir")"
-    if ! bash "$dir/scripts/setup.sh"; then
-      printf 'Warning: 自举失败(%s)——技能本体已装好，可事后手动重跑 scripts/setup.sh\n' "$(basename -- "$dir")" >&2
+if (( ! DRY_RUN && ! SKIP_SETUP && ${#setup_seen[@]} )); then
+  for target in "${setup_seen[@]}"; do
+    printf '\n运行自举: %s/scripts/setup.sh …\n' "$(basename -- "$target")"
+    if ! bash "$target/scripts/setup.sh"; then
+      printf 'Warning: 自举失败(%s)——技能本体已装好，可事后手动重跑 scripts/setup.sh\n' "$(basename -- "$target")" >&2
     fi
   done
 fi
 
 printf '\n'
 if ((DRY_RUN)); then
-  printf '预览：将安装 %d 个技能到 %s（--dry-run 未实际写入）\n' "${#selected[@]}" "$DEST_DIR"
+  printf '预览：将安装 %d 个技能 × %d 个目标目录（--dry-run 未实际写入）\n' "${#selected[@]}" "${#DESTS[@]}"
 elif ((${#failed[@]})); then
-  printf '完成 %d/%d，失败: %s\n' "$installed" "${#selected[@]}" "${failed[*]}" >&2
+  printf '完成 %d/%d，失败: %s\n' "$installed" "$(( ${#selected[@]} * ${#DESTS[@]} ))" "${failed[*]}" >&2
   exit 1
 else
-  printf '已安装 %d 个技能到 %s\n' "$installed" "$DEST_DIR"
+  printf '已安装 %d 个技能 × %d 个目标目录\n' "${#selected[@]}" "${#DESTS[@]}"
 fi

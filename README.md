@@ -37,16 +37,18 @@
 ### 1. 从本库选择安装（自研 + 上游都可）
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/install-skills.ps1        # 生产层全部 → ~/.agents/skills
-powershell -ExecutionPolicy Bypass -File scripts/install-skills.ps1 -List  # 列出技能与安装状态
+powershell -ExecutionPolicy Bypass -File scripts/install-skills.ps1        # 检测已装 Agent，生产层全部装到各 Agent 的 skills/
+powershell -ExecutionPolicy Bypass -File scripts/install-skills.ps1 -List  # 列出技能与各目标目录的安装状态
+powershell -ExecutionPolicy Bypass -File scripts/install-skills.ps1 -Agent claude  # 只装到指定 Agent
 powershell -ExecutionPolicy Bypass -File scripts/install-skills.ps1 -Skill tdd,mao-methods
 powershell -ExecutionPolicy Bypass -File scripts/install-skills.ps1 -Layer engineering -DryRun
-powershell -ExecutionPolicy Bypass -File scripts/install-skills.ps1 -DestDir "$HOME\.claude\skills"
+powershell -ExecutionPolicy Bypass -File scripts/install-skills.ps1 -DestDir "$HOME\.claude\skills"  # 显式指定单目录（优先于 Agent 检测）
 ```
 
 ```bash
-bash scripts/install-skills.sh                    # Linux/macOS
+bash scripts/install-skills.sh                    # Linux/macOS，检测已装 Agent 全部安装
 bash scripts/install-skills.sh --list
+bash scripts/install-skills.sh --agent claude
 bash scripts/install-skills.sh --skill tdd,mao-methods --dry-run
 ```
 
@@ -79,7 +81,7 @@ bash scripts/update-skills.sh                                        # 加 --no-
 
 ## 接入各工具
 
-- **技能**：`scripts/install-skills.*` 装到 `~/.agents/skills/`；Claude Code 另加 `-DestDir "$HOME\.claude\skills"`，ZCode 另加 `-DestDir "$HOME\.zcode\skills"`（ZCode 同时也扫描 `~/.agents/skills`，装一处即可见）
+- **技能**：`scripts/install-skills.*` 默认检测已装 Agent（基础目录存在即视为已装，规则同 `link-agents.*`：~/.agents、~/.claude、~/.codex、~/.qoder-cn、~/.config/opencode、~/.zcode），生产层装到全部已装 Agent 的 `skills/` 子目录；`-Agent claude` / `--agent claude` 只装指定 Agent（未检测到的警告跳过）；`-DestDir` / `--dest` 显式指定单目录、优先于 Agent 检测。ZCode 同时也扫描 `~/.agents/skills`，装一处即可见
 - **全局指令**：运行 `scripts/link-agents.*` 接入（未装的 Agent 自动跳过，已有实体文件先备份再链接），把 `AGENTS.md` / `CLAUDE.md` 链接到：`~/.agents/AGENTS.md`（通用约定）、`~/.claude/CLAUDE.md`（Claude Code，指向仓库 CLAUDE.md → @AGENTS.md）、`~/.codex/AGENTS.md`（Codex）、`~/.qoder-cn/AGENTS.md`（Qoder 国内版）、`~/.config/opencode/AGENTS.md`（opencode）、`~/.zcode/AGENTS.md`（ZCode）。改仓库文件即对所有 Agent 生效。
 - **MCP**：`mcp/mcp.json` 内容合并进 `~/.claude.json` 的 `mcpServers`，并在环境变量设置 `EXA_API_KEY`、`ZREAD_API_TOKEN`
 - **插件**：把 `plugins/*` 登记到 Claude Code（`/plugin`），或直接使用官方 marketplace 安装
