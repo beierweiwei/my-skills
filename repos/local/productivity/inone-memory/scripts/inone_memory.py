@@ -191,6 +191,7 @@ def _request(
     *,
     accept_json: bool = False,
     timeout: float = 15,
+    timeout_hint: str = "",
 ) -> dict:
     base = _base_url()
     if not base:
@@ -228,11 +229,13 @@ def _request(
             )
         sys.exit(f"HTTP {error.code}:{detail}")
     except TimeoutError:
-        # 超时≠失败:慢调用(save 同步跑混合推理提取,常态 25s+)在服务端
-        # 可能已完成——先 search 验证再决定重推,盲重推会重复入库
+        # 超时≠失败:慢调用在服务端可能已完成——save(同步跑混合推理提取,
+        # 常态 25s+)必须先 search 查证再决定重推,盲重推会重复入库,故 save
+        # 传专属提示;其余子命令用通用句,不给与当前命令无关(甚至自指,
+        # 如 search 超时让人「先 search 查证」)的指引
         sys.exit(
-            f"请求超时(>{timeout:.0f}s):服务端可能已完成——先 search 查证"
-            "是否已入库,确认没进再重推,否则会推重"
+            f"请求超时(>{timeout:.0f}s):"
+            + (timeout_hint or "服务端慢或检索后端繁忙,稍后重试;本次未收到结果")
         )
     except urllib.error.URLError as error:
         sys.exit(f"服务不可达:{url}({error})——Tailscale/内网是否连通?")
@@ -1156,7 +1159,13 @@ def _save(args: argparse.Namespace) -> None:
     if args.provenance:
         payload["provenance"] = args.provenance
     # 写后审推送同步跑外流提取(混合推理模型常态 25s+),15s 缺省必假超时
-    entry = _request("POST", "/memory/push", body=payload, timeout=120)
+    entry = _request(
+        "POST",
+        "/memory/push",
+        body=payload,
+        timeout=120,
+        timeout_hint="服务端可能已完成——先 search 查证是否已入库,确认没进再重推,否则会推重",
+    )
     print(json.dumps(entry, ensure_ascii=False, sort_keys=True))
     print(
         f"已直接入库即时生效 entry_id={entry.get('entry_id')}"
@@ -1196,7 +1205,11 @@ def _search(args: argparse.Namespace) -> None:
     degraded_seen = False
     for attempt in (1, 2):
         try:
-            result = _request("POST", "/memory/entries", body=params)
+            # 检索超时配套服务端降级线(2026-10-19 修):服务端 Hindsight
+            # recall 超时 30s 后走账本降级兜底返回 degraded——客户端须等过
+            # 这条线才拿得到降级结果;15s 缺省会在兜底生效前掐断,表现为
+            # 检索后端一慢「search 必超时」
+            result = _request("POST", "/memory/entries", body=params, timeout=45)
         except SystemExit as exit_error:
             if attempt == 1 and str(exit_error).startswith("服务不可达"):
                 time.sleep(_SEARCH_RETRY_DELAY_S)
