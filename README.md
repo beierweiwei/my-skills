@@ -18,7 +18,8 @@
 │   └── local/              # 自研技能源（随库提交，勿删）
 └── scripts/
     ├── install-skills.ps1 / .sh   # 选择安装技能到 Agent 技能目录；技能自带 scripts/setup.* 时顺带运行其自举
-    ├── link-agents.ps1 / .sh      # 把全局指令（AGENTS.md/CLAUDE.md）链接接入各 Agent 全局位置
+    ├── link-agents.ps1 / .sh      # 把全局指令（AGENTS.md/CLAUDE.md）链接接入各 Agent；并写入统一状态栏配置
+    ├── statusline.js              # 跨 Agent 状态栏渲染器：模型、已用上下文、仓库名、分支
     └── update-skills.ps1 / .sh    # 首次初始化/更新技能库：拉取上游 + 刷新 skills/、plugins/ 链接
 ```
 
@@ -83,6 +84,8 @@ bash scripts/update-skills.sh                                        # 加 --no-
 
 - **技能**：`scripts/install-skills.*` 默认检测已装 Agent（基础目录存在即视为已装，规则同 `link-agents.*`：~/.agents、~/.claude、~/.codex、~/.qoder-cn、~/.config/opencode、~/.zcode），生产层装到全部已装 Agent 的 `skills/` 子目录；`-Agent claude` / `--agent claude` 只装指定 Agent（未检测到的警告跳过）；`-DestDir` / `--dest` 显式指定单目录、优先于 Agent 检测。ZCode 同时也扫描 `~/.agents/skills`，装一处即可见
 - **全局指令**：运行 `scripts/link-agents.*` 接入（未装的 Agent 自动跳过，已有实体文件先备份再链接），把 `AGENTS.md` / `CLAUDE.md` 链接到：`~/.agents/AGENTS.md`（通用约定）、`~/.claude/CLAUDE.md`（Claude Code，指向仓库 CLAUDE.md → @AGENTS.md）、`~/.codex/AGENTS.md`（Codex）、`~/.qoder-cn/AGENTS.md`（Qoder 国内版）、`~/.config/opencode/AGENTS.md`（opencode）、`~/.zcode/AGENTS.md`（ZCode）。改仓库文件即对所有 Agent 生效。
+- **状态栏**：同一脚本为已安装的 Claude Code / Qoder / Qoder-CN 写入 `settings.json` 的 `statusLine`，统一指向 `scripts/statusline.js`，显示模型、已用上下文、git 仓库名、分支。Codex / opencode 没有命令式状态栏，不接入。
+  脚本只检测状态栏所需的 JetBrainsMono Nerd Font，未安装时打印手动安装命令，不会自动安装或改动系统字体。
 - **MCP**：`mcp/mcp.json` 内容合并进 `~/.claude.json` 的 `mcpServers`，并在环境变量设置 `EXA_API_KEY`、`ZREAD_API_TOKEN`
 - **插件**：把 `plugins/*` 登记到 Claude Code（`/plugin`），或直接使用官方 marketplace 安装
 

@@ -1,9 +1,13 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-  把本库的全局指令（AGENTS.md / CLAUDE.md）链接到各 Agent 的全局位置，所有 Agent 共用同一份源文件。
+  把本库的全局指令（AGENTS.md / CLAUDE.md）与状态栏脚本接入各 Agent 的全局位置。
 .DESCRIPTION
-  - 覆盖：agents(通用约定) / Claude Code / Codex / Qoder(国内版) / opencode / ZCode 的全局指令路径。
+  - 指令：覆盖 agents(通用约定) / Claude Code / Codex / Qoder(国内版) / opencode / ZCode 的全局指令路径。
+  - 状态栏：为已安装的 Claude Code / Qoder / Qoder-CN 写入 settings.json 的 statusLine
+    （指向本库 scripts/statusline.js）；其余 Agent 无命令式状态栏，跳过。
+  - Nerd Font：状态栏分支图标依赖 JetBrainsMono Nerd Font。脚本只检测并打印手动安装
+    命令，不自动安装、不改动系统字体或终端配置。
   - 目录不存在视为该 Agent 未安装，自动跳过；已有实体文件先备份为 *.bak.<时间戳> 再链接。
   - Windows 创建符号链接需要开发者模式（设置 → 系统 → 开发者选项）或管理员权限。
 .EXAMPLE
@@ -102,6 +106,95 @@ foreach ($t in $Targets) {
     }
   }
 }
+
+# ---- 状态栏接入：一份渲染器，Claude Code / Qoder / Qoder-CN 共用 ----
+$StatuslineTargets = @(
+  @{ name = "claude";   dir = (Join-Path $HOME ".claude") }
+  @{ name = "qoder";    dir = (Join-Path $HOME ".qoder") }
+  @{ name = "qoder-cn"; dir = (Join-Path $HOME ".qoder-cn") }
+)
+
+function Set-StatusLine([string]$Name, [string]$Dir) {
+  $src = Join-Path $Root "scripts/statusline.js"
+  if (-not (Test-Path $src)) {
+    Write-Warning "仓库源文件缺失: $src"
+    $script:failed += $Name
+    return
+  }
+  if (-not (Test-Path $Dir)) {
+    Write-Host ("  - {0,-10} 未安装（{1} 不存在），跳过状态栏" -f $Name, $Dir)
+    return
+  }
+
+  $cmd = 'node "' + ($src -replace '\\', '/') + '"'
+  $file = Join-Path $Dir "settings.json"
+  $settings = $null
+  if (Test-Path $file) {
+    try {
+      $settings = Get-Content -Raw -Encoding UTF8 $file | ConvertFrom-Json
+    } catch {
+      Write-Warning ("{0} 的 settings.json 解析失败，未改动: {1}" -f $Name, $_)
+      $script:failed += $Name
+      return
+    }
+    if ($settings.statusLine -and $settings.statusLine.command -eq $cmd) {
+      Write-Host ("  = {0,-10} 状态栏已是本仓库脚本" -f $Name)
+      return
+    }
+  } else {
+    $settings = [pscustomobject]@{}
+  }
+
+  if ($DryRun) {
+    Write-Host ("  ~ {0,-10} 将写入状态栏配置: {1}" -f $Name, $file)
+    return
+  }
+  if (Test-Path $file) {
+    $bak = "$file.bak." + (Get-Date -Format "yyyyMMddHHmmss")
+    Copy-Item $file $bak
+    Write-Host ("  ! {0,-10} 原配置已备份: {1}" -f $Name, $bak)
+  }
+  $settings | Add-Member -NotePropertyName statusLine -NotePropertyValue `
+    ([pscustomobject]@{ type = "command"; command = $cmd }) -Force
+  $json = $settings | ConvertTo-Json -Depth 100
+  [System.IO.File]::WriteAllText($file, $json, (New-Object System.Text.UTF8Encoding($false)))
+  Write-Host ("  + {0,-10} 状态栏已接入: {1}" -f $Name, $cmd) -ForegroundColor Green
+}
+
+foreach ($t in $StatuslineTargets) { Set-StatusLine -Name $t.name -Dir $t.dir }
+
+
+# ---- Nerd Font 提示（只检测并打印安装命令，不自动安装）----
+function Show-NerdFontHint {
+  $fontName = "JetBrainsMono NF"
+  $installed = $false
+  foreach ($dir in @("$env:WINDIR/Fonts", "$env:LOCALAPPDATA/Microsoft/Windows/Fonts")) {
+    if ((Test-Path $dir) -and (Get-ChildItem $dir -Filter "JetBrainsMonoNerdFont-*.ttf" -ErrorAction SilentlyContinue)) {
+      $installed = $true
+    }
+  }
+
+  if (-not $installed) {
+    Write-Host "  ! nerd-font  未安装，状态栏分支图标可能显示为方框。手动安装："
+    Write-Host "      winget install -e --id DEVCOM.JetBrainsMonoNerdFont --source winget"
+    Write-Host ('      然后在 Windows Terminal 设置里把字体设为 "' + $fontName + '"')
+    return
+  }
+  Write-Host "  = nerd-font  已安装"
+
+  $wt = "$env:LOCALAPPDATA/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json"
+  if (-not (Test-Path $wt)) { return }
+  try {
+    $face = (Get-Content -Raw -Encoding UTF8 $wt | ConvertFrom-Json).profiles.defaults.font.face
+    if ($face -ne $fontName) {
+      Write-Host ('  ! nerd-font  Windows Terminal 字体未设为 "' + $fontName + '"，请手动设置')
+    }
+  } catch {
+    # 配置含注释等无法解析时，跳过字体提示
+  }
+}
+
+Show-NerdFontHint
 
 Write-Host ""
 if ($failed) {
