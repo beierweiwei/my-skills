@@ -20,7 +20,8 @@
     ├── install-skills.ps1 / .sh   # 选择安装技能到 Agent 技能目录；技能自带 scripts/setup.* 时顺带运行其自举
     ├── link-agents.ps1 / .sh      # 把全局指令（AGENTS.md/CLAUDE.md）链接接入各 Agent；并写入统一状态栏配置
     ├── statusline.js              # 跨 Agent 状态栏渲染器：模型、已用上下文、仓库名、分支
-    └── update-skills.ps1 / .sh    # 首次初始化/更新技能库：拉取上游 + 刷新 skills/、plugins/ 链接
+    ├── update-skills.ps1 / .sh    # 首次初始化/更新技能库：拉取上游 + 刷新 skills/、plugins/ 链接
+    └── update-all.ps1 / .sh       # 一键：更新技能库后安装到已装 Agent（update + install）
 ```
 
 ## Agent 约定（本仓库内的工作提示，不随 link-agents 全局分发）
@@ -73,12 +74,16 @@ npx skills@latest update mao-methods
 首次克隆后必须先运行一次（生成 `skills/` 下的技能链接）；之后按需更新上游快照。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/update-skills.ps1   # 加 -NoProxy 直连
+powershell -ExecutionPolicy Bypass -File scripts/update-skills.ps1   # 只更新技能库，加 -NoProxy 直连
+powershell -ExecutionPolicy Bypass -File scripts/update-all.ps1      # 更新 + 安装到已装 Agent
 ```
 
 ```bash
-bash scripts/update-skills.sh                                        # 加 --no-proxy 直连
+bash scripts/update-skills.sh                                        # 只更新技能库，加 --no-proxy 直连
+bash scripts/update-all.sh                                           # 更新 + 安装到已装 Agent
 ```
+
+`update-all` 先运行 update，成功后再运行 install；update 选项（`-Proxy`/`-NoProxy`、`--proxy`/`--no-proxy`）与 install 选项（`-Agent`/`--agent`、`-SkipSetup`/`--skip-setup` 等）可一并传入。更新步骤报错中止时不执行安装；如需使用当前库直接安装，单独运行 `install-skills`。
 
 ## 接入各工具
 
