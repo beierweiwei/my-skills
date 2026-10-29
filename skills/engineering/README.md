@@ -7,6 +7,7 @@
 ## 自研
 
 - **[experience-kb-init](./experience-kb-init/SKILL.md)**：初始化/补齐项目经验知识库（`docs/经验/`），并接线 AGENTS.md。
+- **[agent-crew](./agent-crew/SKILL.md)**：herdr 多 agent 编排/计划看板/角色工位一键装入项目。
 
 ## 上游（junction）
 

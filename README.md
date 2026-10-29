@@ -98,7 +98,7 @@ bash scripts/update-all.sh                                           # 更新 + 
 
 ### 自研（源在 `repos/local/`，随库提交）
 
-- **engineering**：experience-kb-init
+- **engineering**：experience-kb-init、agent-crew（herdr 多 agent 编排/计划看板/角色工位一键装入项目）
 - **productivity**：grill-the-goal、inone-memory（统一记忆推送/检索；自带 setup 自举，上游 = inone 仓库蒸馏母本 `deploy/12-memory-hub/skills/_shared/`，母本修订后同步本库）
 - **in-progress**：mao-methods、mao-collaboration
 
