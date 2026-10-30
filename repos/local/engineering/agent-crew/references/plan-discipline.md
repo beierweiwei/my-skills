@@ -9,6 +9,8 @@
 - **建/恢复/校验**：用上游技能 planning-with-files 的脚本 `init-session.sh`（ASCII 名）建命名 plan（`.planning/YYYY-MM-DD-<slug>/`），填完跑 `check-complete.sh --validate` 校验；开工读**三份文件** + `git diff --stat`；有 `.planning/` 时不回退根 plan；多 plan 无 `PLAN_ID` 先纠偏。
 - **写者**：一 plan 一 owner；worker 只写自己的报告/ledger，不改 `task_plan.md`（多写者会静默覆盖）。
 - **阶段纪律**：阶段完成改该 Phase 下**唯一**的 `**Status:**` 行（pending → in_progress → complete）并刷新 `## Next Step`（单一动作）；错误进 `## Errors Encountered`（Error/Resolution）；决策进 `## Decisions Made`（Decision/Rationale，代决标注「代决（可覆盖）」）。
+- **Current Phase 自动推导**：`## Current Phase` 由 `plan-status.py` 自动推导（首个非 complete 的 Phase），勿手工维护；所有 Phase 都 complete 时，可在该节写收口说明文字，作为看板兜底显示。
+- **Deviation 解决标记**：Deviation 条目解决后在行内（建议「待决策」列）追加「已解决（YYYY-MM-DD）」标记，看板自动过滤折叠已解决条目，不再僵尸堆积；未带标记的照常显示。
 - **待办**：需用户/客户/IT 做的事记入需求文档待澄清节，或在 Backlog 阻塞列标 `待 Cx`；不另建待办文件。
 - **Anti-pattern**：手改派生看板；同一状态多处记录；覆盖已有 plan；多写者改同一 plan；把队列字段塞进 Phases。
 

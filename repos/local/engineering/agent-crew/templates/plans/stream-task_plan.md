@@ -16,6 +16,8 @@
 
 ## Current Phase
 
+<!-- 由 plan-status.py 自动推导（首个未完成的 Phase），勿手工维护；全部完成后可改写为收口说明，作看板兜底显示。 -->
+
 Phase 1
 
 ## Phases

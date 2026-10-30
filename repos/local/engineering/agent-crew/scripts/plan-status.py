@@ -36,6 +36,13 @@ STATUS_RE = re.compile(r"\*\*Status:\*\*\s+(pending|in_progress|complete)")
 PLAN_REF_RE = re.compile(r"^\s*-\s*plan:\s*`([^`]+)`")
 
 HEALTH_DONE, HEALTH_WIP, HEALTH_BLOCKED = "🟢", "🟡", "🔴"
+# 看板「当前阶段」自动推导（S7-b1 缺陷1）：一律取 Phases 中首个 Status≠complete 的阶段名，
+# 活跃期手工 ## Current Phase 不参与显示（防手工滞后误导）；全部 complete 时回落手工值作收口说明。
+ALL_DONE_MARK = "全部完成"
+# Deviation 生命周期（S7-b1 缺陷2）：行内任意列含「已解决」即视为已解决条目（与文档口径
+# 「待决策列追加 已解决（YYYY-MM-DD）」一致——宽松子串匹配，覆盖文档定稿格式）；
+# 看板默认只显示活跃行，节尾注折叠计数；health 偏差计数同步只数活跃行。
+RESOLVED_MARK = "已解决"
 
 # 内置默认 = 通用默认值（与 templates/project.config.json 保持一致；两者同源同改）。
 DEFAULT_CONFIG: dict = {
@@ -135,6 +142,11 @@ def _tables(lines: list[str]) -> list[list[str]]:
     return rows
 
 
+def _row_resolved(row: list[str]) -> bool:
+    """Deviation 行内任意列含「已解决」即命中（宽松子串，兼容文档定稿的已解决（YYYY-MM-DD））。"""
+    return any(RESOLVED_MARK in c for c in row)
+
+
 def parse_plan(path: Path, root: Path) -> Plan:
     plan = Plan(path=path, root=root)
     section, phase = None, None
@@ -169,8 +181,9 @@ def parse_plan(path: Path, root: Path) -> Plan:
             continue
         if section is not None:
             plan.sections[section].append(line)
-    deviation = plan.sections.get("Deviation") or plan.sections.get("Errors Encountered", [])
-    plan.deviations = len(_tables(deviation)) if "Deviation" in plan.sections else 0
+    if "Deviation" in plan.sections:
+        # health 偏差计数只数活跃行（已解决条目不再让流表健康变 🔴）
+        plan.deviations = sum(1 for r in _tables(plan.sections["Deviation"]) if not _row_resolved(r))
     return plan
 
 
@@ -183,10 +196,15 @@ def _section(plan: Plan, name: str) -> str:
 
 
 def current_phase(plan: Plan) -> str:
+    """自动推导（S7-b1）：首个 Status≠complete 的 Phase 名；全部 complete 回落手工
+    ## Current Phase（收口说明兜底），再无则收口态「全部完成」；无 Phase 显示「—」。"""
+    active = next((name for name, status in plan.phases if status != "complete"), None)
+    if active is not None:
+        return active
     declared = _section(plan, "Current Phase")
     if declared:
         return declared
-    return next((name for name, status in plan.phases if status == "in_progress"), "—")
+    return ALL_DONE_MARK if plan.phases else "—"
 
 
 def cell(text: str) -> str:
@@ -248,7 +266,9 @@ def render(plans: list[Plan], cfg: dict, archive: str | None = None) -> str:
     out += rows
 
     out += ["", "## 偏差明细", ""]
-    deviations = _tables(portfolio.sections.get("Deviation", []))
+    deviations_all = _tables(portfolio.sections.get("Deviation", []))
+    deviations = [r for r in deviations_all if not _row_resolved(r)]
+    resolved_count = len(deviations_all) - len(deviations)
     backlog = _tables(portfolio.sections.get("Backlog", []))
     captain_ids = {row[0] for row in backlog if len(row) >= 5 and row[0].startswith(cap_prefix)}
     if deviations:
@@ -257,6 +277,10 @@ def render(plans: list[Plan], cfg: dict, archive: str | None = None) -> str:
             if len(row) >= 4 and row[3].split()[0] in captain_ids:
                 row = row[:3] + [f"见 {row[3].split()[0]}"]
             out.append("| " + " | ".join(cell(c) for c in row) + " |")
+        if resolved_count:
+            out += ["", f"> 已解决 {resolved_count} 条（折叠）"]
+    elif resolved_count:
+        out.append(f"—（{resolved_count} 条已解决，全部折叠）")
     else:
         out.append("—")
 
