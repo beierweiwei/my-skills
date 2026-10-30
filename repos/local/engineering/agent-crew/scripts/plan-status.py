@@ -16,6 +16,15 @@ backlog.captainBlocks（T→C 阻塞映射）。
 > 从 cwd 向上找含 .planning 的目录 > 脚本所在目录的上一级。
 
 真源是各 plan 的 `### Phase N: Name` + `**Status:**`；本脚本不写 .planning。
+
+看板布局（S8-b1，AGENTS 编排效率原则 11 增补「写法四规则」+ Captain 2026-10-30 渲染细化）：
+业务链总览与待 Captain 置顶（业务主线+人工决策先行），当前目标/总舵 Next Step 居中，
+流表只留概览列（流/当前阶段/阶段完成/健康），各流 todo 细节在流表下方按流分节
+（#### 流名 + 行首 todo 列表），偏差明细与 Backlog 置后。
+todo 条目一律标准 md 语法：行首 `- [x]` / `- [ ]`；待 Captain 项 `- [ ] ⏸ 文字（待 Captain）`
+（⏸ 入文字，保持 checkbox 标准性）；状态灯口径 [x]✅ / [ ]🟡 / ⏸🔴。
+各流 plan 的 `## 业务链…` 节（节名含「业务链」即命中）下 | 节点 | 状态 | 说明 | 表
+解析为业务链节点（状态列 todo 三元，链序=表序）；无该节的 plan 不渲染（零破坏）。
 """
 
 from __future__ import annotations
@@ -44,6 +53,11 @@ ALL_DONE_MARK = "全部完成"
 # 看板默认只显示活跃行，节尾注折叠计数；health 偏差计数同步只数活跃行。
 RESOLVED_MARK = "已解决"
 
+# 业务链视图（S8-b1）：状态灯口径（Captain 2026-10-30 细化）[x]✅ / [ ]🟡 / ⏸🔴；
+# todo 条目一律标准 md 语法（行首 - [x] / - [ ]；待 Captain 项 - [ ] ⏸ 文字（待 Captain））。
+CHAIN_LEGEND = "> 图例：[x] ✅ 完成 · [ ] 🟡 未完成 · ⏸ 🔴 待 Captain"
+LIGHT_DONE, LIGHT_TODO, LIGHT_CAPTAIN = "✅", "🟡", "⏸"
+
 # 内置默认 = 通用默认值（与 templates/project.config.json 保持一致；两者同源同改）。
 DEFAULT_CONFIG: dict = {
     "portfolioDir": ".planning/portfolio",
@@ -52,7 +66,8 @@ DEFAULT_CONFIG: dict = {
     "backlog": {"captainPrefix": "C", "agentPrefix": "T", "captainBlocks": {}},
 }
 
-STREAM_TABLE_HEADER = "| 流 | plan | 当前阶段 | 阶段完成 | 健康 | 该流 Next Step |"
+# 流表只留概览列（S8-b1：Markdown 表格单元格不换行、不塞多条 todo）；细节按流分节渲染。
+STREAM_TABLE_HEADER = "| 流 | 当前阶段 | 阶段完成 | 健康 |"
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -102,6 +117,7 @@ class Plan:
     title: str = ""
     phases: list[tuple[str, str]] = field(default_factory=list)
     sections: dict[str, list[str]] = field(default_factory=dict)
+    chain: list[tuple[str, str, str]] = field(default_factory=list)  # (节点, done|todo|captain, 说明)
     deviations: int = 0
 
     @property
@@ -147,6 +163,94 @@ def _row_resolved(row: list[str]) -> bool:
     return any(RESOLVED_MARK in c for c in row)
 
 
+def _todo_mark(text: str) -> str:
+    """业务链状态列 todo 三元判定：[⏸] 或裸 ⏸（b2 文档定稿单值简写，S8R B1-fix）→captain、
+    [x]/[X]→done、其余（含 [ ] 与非标写法）→todo。第三态两形态等价；
+    裸 ⏸ 仅整格单值时命中（strip 相等），说明列/混合文本不参与判定故无误伤。"""
+    if "[⏸]" in text or text.strip() == "⏸":
+        return "captain"
+    if "[x]" in text.lower():
+        return "done"
+    return "todo"
+
+
+def _parse_chain(sections: dict[str, list[str]]) -> list[tuple[str, str, str]]:
+    """业务链表解析（S8-b1）：节名含「业务链」即命中（兼容「业务链节点（…）」带后缀形态）；
+    列按位置取（节点/状态/说明），列头名不参与解析（「说明」/「目标完成状态说明」均兼容）；
+    状态列为准（说明列内嵌标记不翻转节点状态），缺说明列记空串，链序=表序。"""
+    for name, lines in sections.items():
+        if "业务链" not in name:
+            continue
+        chain = []
+        for row in _tables(lines):
+            if len(row) < 2:
+                continue
+            chain.append((row[0], _todo_mark(row[1]), row[2] if len(row) >= 3 else ""))
+        return chain
+    return []
+
+
+def _todo_lights(text: str) -> str:
+    """文本内 todo 三元标记转状态灯（[x]✅ / [ ]🟡 / [⏸]⏸），与图例口径一致。"""
+    return (text.replace("[⏸]", LIGHT_CAPTAIN)
+                .replace("[x]", LIGHT_DONE)
+                .replace("[X]", LIGHT_DONE)
+                .replace("[ ]", LIGHT_TODO))
+
+
+def _cap_suffix(text: str) -> str:
+    """待 Captain 项后缀：文字已含「待 Captain / 待 C」指引则不重复补注。"""
+    return "" if ("待 Captain" in text or "待 C" in text) else "（待 Captain）"
+
+
+def _todo_line(line: str) -> str:
+    """todo 行转标准 md 语法：行首 - [x] / - [ ]；- [⏸] 转 - [ ] ⏸ 文字（待 Captain）；
+    非 todo 行原样（兼容超集）。"""
+    m = re.match(r"^-\s*\[(x|X| |⏸)\]\s*(.+)$", line.strip())
+    if not m:
+        return line.strip()
+    mark, body = m.group(1), m.group(2).strip()
+    if mark in ("x", "X"):
+        return f"- [x] {body}"
+    if mark == "⏸":
+        return f"- [ ] ⏸ {body}{_cap_suffix(body)}"
+    return f"- [ ] {body}"
+
+
+def _next_step_lines(plan: Plan) -> list[str]:
+    """流 plan Next Step 节的非空行（保持行序，供分节 todo 渲染）。"""
+    return [l.strip() for l in plan.sections.get("Next Step", []) if l.strip()]
+
+
+def _captain_lines(plans: list[Plan], portfolio: Plan, cap_prefix: str,
+                   stream_names: dict[str, str]) -> list[str]:
+    """待 Captain 汇总（S8-b1）：portfolio Backlog C 前缀行 + 各 plan Backlog [⏸] 行 +
+    各流业务链表状态列 [⏸] 节点；标准 todo 语法（- [ ] ⏸ 文字），⏸ 入文字；
+    流标注=流名优先（stream_names：plan 相对路径→portfolio 流名），plan title 兜底。"""
+    lines = []
+    for row in _tables(portfolio.sections.get("Backlog", [])):
+        if len(row) >= 5 and row[0].startswith(cap_prefix):
+            lines.append(f"- [ ] ⏸ **{row[0]}** {row[1]} — {row[4]}{_cap_suffix(row[4])}")
+    for p in plans:
+        label = stream_names.get(p.rel) or p.title
+        for row in _tables(p.sections.get("Backlog", [])):
+            if len(row) < 2 or "[⏸]" not in " ".join(row):
+                continue
+            if p is portfolio and len(row) >= 5 and row[0].startswith(cap_prefix):
+                continue  # 已在上面 C 汇总，不重复
+            lines.append(
+                f"- [ ] ⏸ **{cell(row[0])}**（{label}）{_todo_lights(cell(row[1]))}"
+                f" — {_todo_lights(cell(row[-1]))}{_cap_suffix(row[-1])}"
+            )
+        for node, mark, desc in p.chain:
+            if mark != "captain":
+                continue
+            body = f"— {_todo_lights(cell(desc))}" if desc else ""
+            lines.append(f"- [ ] ⏸ **{cell(node)}**（{label}）{body}"
+                         + (_cap_suffix(desc) if desc else ""))
+    return lines
+
+
 def parse_plan(path: Path, root: Path) -> Plan:
     plan = Plan(path=path, root=root)
     section, phase = None, None
@@ -181,6 +285,7 @@ def parse_plan(path: Path, root: Path) -> Plan:
             continue
         if section is not None:
             plan.sections[section].append(line)
+    plan.chain = _parse_chain(plan.sections)
     if "Deviation" in plan.sections:
         # health 偏差计数只数活跃行（已解决条目不再让流表健康变 🔴）
         plan.deviations = sum(1 for r in _tables(plan.sections["Deviation"]) if not _row_resolved(r))
@@ -243,27 +348,62 @@ def render(plans: list[Plan], cfg: dict, archive: str | None = None) -> str:
         target = index.get(ref.split("#")[0])
         if target:
             done, health = f"{target.complete}/{target.total}", target.health
-            now_at, next_step = current_phase(target), _section(target, "Next Step")
+            now_at = current_phase(target)
         else:
             done, health = "—（Backlog 承载）", HEALTH_BLOCKED if portfolio.deviations else HEALTH_WIP
-            now_at, next_step = "—", "—"
-        streams.append((phase, target, next_step))
-        rows.append(
-            f"| {cell(phase)} | `{cell(ref or '—')}` | {cell(now_at)} | {done} | {health} "
-            f"| {cell(next_step)} |"
-        )
+            now_at = "—"
+        streams.append((phase, target, ref))
+        # 流表只留概览列（S8-b1：表格单元格不塞多条 todo），细节在流表下方按流分节
+        rows.append(f"| {cell(phase)} | {cell(now_at)} | {done} | {health} |")
 
-    out += ["## 当前目标", "", _section(portfolio, "Goal") or "—", "", "## 总舵 Next Step", ""]
+    backlog = _tables(portfolio.sections.get("Backlog", []))
+    captain_ids = {row[0] for row in backlog if len(row) >= 5 and row[0].startswith(cap_prefix)}
+    name_by_rel = {t.rel: name for name, t, _ in streams if t}  # plan 路径→流名（标注统一用流名）
+    captain = _captain_lines(plans, portfolio, cap_prefix, name_by_rel)
+
+    # —— 前部：业务链总览 + 待 Captain（业务主线与人工决策先行，工单细节置后）——
+    chain_plans = [p for p in plans if p.chain]
+    if chain_plans:
+        out += ["## 业务链总览", "", CHAIN_LEGEND, ""]
+        for p in chain_plans:
+            out += [f"#### {name_by_rel.get(p.rel) or p.title}", ""]
+            for node, mark, desc in p.chain:
+                if mark == "done":
+                    line = f"- [x] {LIGHT_DONE} **{cell(node)}**"
+                elif mark == "captain":
+                    line = f"- [ ] {LIGHT_CAPTAIN} **{cell(node)}**"
+                else:
+                    line = f"- [ ] {LIGHT_TODO} **{cell(node)}**"
+                if desc:
+                    line += f" — {_todo_lights(cell(desc))}"
+                    if mark == "captain":
+                        line += _cap_suffix(desc)
+                out.append(line)
+            out.append("")
+
+    out += ["## 待 Captain（人工决策/动作）", ""]
+    out += captain or ["—"]
+
+    out += ["", "## 当前目标", "", _section(portfolio, "Goal") or "—", "", "## 总舵 Next Step", ""]
     top = _section(portfolio, "Next Step")
     if top:
-        out.append(top)
+        out.append(_todo_lights(top))
     else:
         # 回退：逐流列出仍在推进的流，不合并（stream 无语义 P 字段，P0 以"仍有未完成阶段"近似）。
-        derived = [s for s in streams if s[1] and s[1].complete < s[1].total and s[2]]
-        out += [f"- 自动推导：{name} — {next_step}" for name, _, next_step in derived] or ["—"]
+        derived = [s for s in streams if s[1] and s[1].complete < s[1].total and _next_step_lines(s[1])]
+        out += [f"- 自动推导：{name}" for name, _, _ in derived] or ["—"]
 
-    out += ["", "## 流表", "", STREAM_TABLE_HEADER, "|---|---|---|---|---|---|"]
+    out += ["", "## 流表", "", STREAM_TABLE_HEADER, "|---|---|---|---|"]
     out += rows
+    # 各流 todo 细节：流表下方按流分节（#### 流名 + 行首 todo 列表；S8-b1 表格不塞多条）
+    for name, target, ref in streams:
+        if not target:
+            continue
+        todos = [_todo_line(l) for l in _next_step_lines(target)]
+        if not todos:
+            continue
+        out += ["", f"#### {cell(name)}（`{ref or target.rel}`）", ""]
+        out += todos
 
     out += ["", "## 偏差明细", ""]
     deviations_all = _tables(portfolio.sections.get("Deviation", []))
@@ -294,13 +434,6 @@ def render(plans: list[Plan], cfg: dict, archive: str | None = None) -> str:
             out.append("| " + " | ".join(cell(c) for c in row) + " |")
     else:
         out.append("—")
-
-    out += ["", "## 待 Captain（人工决策/动作）", ""]
-    pending = [row for row in backlog if row[0] in captain_ids]
-    if pending:
-        out += [f"- **{row[0]}** {row[1]} — {row[4]}" for row in pending]
-    else:
-        out.append("—")
     return "\n".join(out) + "\n"
 
 
@@ -329,10 +462,12 @@ def selftest(plans: list[Plan], cfg: dict) -> None:
     board = render(plans, cfg)
     assert "## 流表" in board and "## Backlog" in board and "## 待 Captain" in board
     assert STREAM_TABLE_HEADER in board
+    assert board.index("## 待 Captain") < board.index("## 流表"), "待 Captain 应置顶于流表"
     cap, agt = cfg["backlog"]["captainPrefix"], cfg["backlog"]["agentPrefix"]
-    backlog, captain = board.split("## Backlog", 1)[1].split("## 待 Captain", 1)
+    captain = board.split("## 待 Captain", 1)[1].split("## Backlog", 1)[0]
+    backlog = board.split("## Backlog", 1)[1]
     backlog_full = re.findall(rf"^\| ([{cap}{agt}]+\d+) \|", backlog, re.M)
-    captain_ids = re.findall(rf"^- \*\*([{cap}{agt}]+\d+)\*\*", captain, re.M)
+    captain_ids = re.findall(rf"^- \[ \] ⏸ \*\*([{cap}{agt}]+\d+)\*\*", captain, re.M)
     # 空表=无混入即通过（阻断1：init 全新产物仓 Backlog 为空，selftest 必须首跑即绿；
     # 不在骨架预置示例数据行——那会进真实看板）
     assert (not backlog_full) or all(i.startswith(agt) for i in backlog_full), "Backlog 混入 Captain 项"
