@@ -10,7 +10,9 @@
 
 配置：`<仓根>/.planning/orchestration.json`（单一参数载体，键见 templates/project.config.json）。
 可配置项：board.path / board.title / board.archive（空=不写归档链接行）/
-portfolioMatch（portfolio 目录识别 glob）/ backlog.captainPrefix、agentPrefix（T/C 前缀分流）/
+portfolioMatch（portfolio 目录识别 glob）/ backlog.captainPrefix、agentPrefix（T/C 前缀分流，
+S8-hotfix 起分流互斥口径：C 前缀 OR 行内含 ⏸ 标记 → 待 Captain 汇总（⏸ 语义优先于前缀），
+其余 T/N 等非 ⏸ → Backlog）/
 backlog.captainBlocks（T→C 阻塞映射）。
 **兼容性**：配置文件不存在时全部取内置默认值；ROOT 解析顺序 = --root 参数
 > 从 cwd 向上找含 .planning 的目录 > 脚本所在目录的上一级。
@@ -163,6 +165,13 @@ def _row_resolved(row: list[str]) -> bool:
     return any(RESOLVED_MARK in c for c in row)
 
 
+def _row_has_pause(row: list[str]) -> bool:
+    """Backlog 行内含 ⏸ 标记（[⏸] / [ ] ⏸ / 裸 ⏸ 均算）→ 待 Captain 语义（S8-hotfix）。
+    ⏸ 语义优先于前缀：C+⏸ 仍 captain、T/N+⏸ 也 captain；分流互斥（⏸ 行不留在 Backlog 表），
+    其余（T/N 等非 ⏸）→ Backlog。"""
+    return "⏸" in " ".join(row)
+
+
 def _todo_mark(text: str) -> str:
     """业务链状态列 todo 三元判定：[⏸] 或裸 ⏸（b2 文档定稿单值简写，S8R B1-fix）→captain、
     [x]/[X]→done、其余（含 [ ] 与非标写法）→todo。第三态两形态等价；
@@ -234,7 +243,7 @@ def _captain_lines(plans: list[Plan], portfolio: Plan, cap_prefix: str,
     for p in plans:
         label = stream_names.get(p.rel) or p.title
         for row in _tables(p.sections.get("Backlog", [])):
-            if len(row) < 2 or "[⏸]" not in " ".join(row):
+            if len(row) < 2 or not _row_has_pause(row):
                 continue
             if p is portfolio and len(row) >= 5 and row[0].startswith(cap_prefix):
                 continue  # 已在上面 C 汇总，不重复
@@ -425,7 +434,9 @@ def render(plans: list[Plan], cfg: dict, archive: str | None = None) -> str:
         out.append("—")
 
     out += ["", "## Backlog（agent 可执行）", ""]
-    todo = [row for row in backlog if len(row) >= 5 and row[0].startswith(agt_prefix)]
+    # 分流（S8-hotfix）：C 前缀 OR ⏸ → 待 Captain 汇总；其余（T/N 等非 ⏸）→ Backlog，互斥
+    todo = [row for row in backlog if len(row) >= 5
+            and not row[0].startswith(cap_prefix) and not _row_has_pause(row)]
     if todo:
         out += ["| # | 目标 | P | 依赖 | 阻塞 |", "|---|---|---|---|---|"]
         for row in todo:
@@ -464,14 +475,22 @@ def selftest(plans: list[Plan], cfg: dict) -> None:
     assert STREAM_TABLE_HEADER in board
     assert board.index("## 待 Captain") < board.index("## 流表"), "待 Captain 应置顶于流表"
     cap, agt = cfg["backlog"]["captainPrefix"], cfg["backlog"]["agentPrefix"]
-    captain = board.split("## 待 Captain", 1)[1].split("## Backlog", 1)[0]
+    # captain 切片止于紧邻 ## 节（S8-hotfix）：待 Captain 与 Backlog 间还隔着
+    # 当前目标/总舵 Next Step/流表等节，旧口径切到 ## Backlog 会误吞中间节行
+    captain = board.split("## 待 Captain", 1)[1].split("\n## ", 1)[0]
     backlog = board.split("## Backlog", 1)[1]
     backlog_full = re.findall(rf"^\| ([{cap}{agt}]+\d+) \|", backlog, re.M)
-    captain_ids = re.findall(rf"^- \[ \] ⏸ \*\*([{cap}{agt}]+\d+)\*\*", captain, re.M)
+    # S8-hotfix 分流口径：待 Captain 合法成员 = C 前缀行 + 任意前缀 ⏸ 行（T/N+⏸ 合法，
+    # 不再断言全 C 前缀）；守门改为——①Backlog 表不混入 ⏸ 行（⏸ 语义应进待 Captain）；
+    # ②待 Captain 节条目行均标准 `- [ ] ⏸` 语法（渲染格式回退检测）。
+    backlog_pause = [l for l in backlog.splitlines() if l.startswith("|") and "⏸" in l]
+    captain_stray = [l for l in captain.splitlines()
+                     if l.startswith("- ") and not l.startswith("- [ ] ⏸")]
     # 空表=无混入即通过（阻断1：init 全新产物仓 Backlog 为空，selftest 必须首跑即绿；
     # 不在骨架预置示例数据行——那会进真实看板）
-    assert (not backlog_full) or all(i.startswith(agt) for i in backlog_full), "Backlog 混入 Captain 项"
-    assert (not captain_ids) or all(i.startswith(cap) for i in captain_ids), "待 Captain 混入 agent 项"
+    assert (not backlog_full) or all(not i.startswith(cap) for i in backlog_full), "Backlog 混入 Captain 项"
+    assert not backlog_pause, "Backlog 混入 ⏸ 行（应进待 Captain）"
+    assert not captain_stray, "待 Captain 节混入非 ⏸ 条目行"
     print(f"selftest ok: {len(plans)} plans, {sum(p.total for p in plans)} phases")
 
 

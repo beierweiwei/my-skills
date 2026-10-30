@@ -242,6 +242,35 @@ class CaptainSummaryTest(_TmpRepoTest):
         captain = self._captain(board)
         self.assertIn("- [ ] ⏸ **节点四**（流A）— 真实发送待放行。", captain)
 
+    def test_n_prefix_pause_row_summarized(self):
+        # S8-hotfix：N 前缀 + ⏸ 标记行进待 Captain 汇总（⏸ 语义优先于前缀）；
+        # 阻塞列 `[ ] ⏸` 形态（行首 todo 标准语法嵌格）与本仓 N7–N10 实况同形
+        board = self._render({"x-portfolio": portfolio_body(
+            ["| N7 | 服务探针未实现 | P2 | — | [ ] ⏸ 待 Captain 排期 |"])})
+        captain = self._captain(board)
+        self.assertIn(
+            "- [ ] ⏸ **N7**（测试项目组合 plan）服务探针未实现 — 🟡 ⏸ 待 Captain 排期",
+            captain)
+        # 分流互斥：⏸ 行不留在 Backlog 表格（一处显示，不两处记账）
+        self.assertNotIn("| N7 |", board.split("## Backlog", 1)[1])
+
+    def test_n_prefix_plain_row_stays_backlog(self):
+        # S8-hotfix：N 前缀无 ⏸ 行进 Backlog（agent 可执行），不进待 Captain；C 前缀无 ⏸ 兼容不变
+        board = self._render({"x-portfolio": portfolio_body(
+            ["| N3 | 服务进程内存储改造 | P3 | — | — |",
+             "| C1 | 决策一 | P0 | — | 待定 |"])})
+        self.assertIn("| N3 | 服务进程内存储改造 | P3 | — | — |",
+                      board.split("## Backlog", 1)[1])
+        self.assertNotIn("**N3**", self._captain(board))
+        self.assertIn("- [ ] ⏸ **C1** 决策一 — 待定（待 Captain）", self._captain(board))
+
+    def test_t_prefix_pause_row_exits_backlog(self):
+        # S8-hotfix 互斥语义：T+⏸ 进待 Captain（既有）且退出 Backlog 表格（新增口径）
+        board = self._render({"x-portfolio": portfolio_body(
+            ["| T9 | [⏸] 真实放行任务 | P1 | — | 待 C4 |"])})
+        self.assertIn("- [ ] ⏸ **T9**（测试项目组合 plan）", self._captain(board))
+        self.assertNotIn("| T9 |", board.split("## Backlog", 1)[1])
+
     def test_captain_block_before_stream_table(self):
         board = self._render({"x-portfolio": portfolio_body(), "stream-a": chain_body(SAMPLE_ROWS)})
         self.assertLess(board.index("## 待 Captain"), board.index("## 流表"))
@@ -310,6 +339,19 @@ class OrderCompatTest(_TmpRepoTest):
         root = make_repo(self.tmp, {
             "x-portfolio": portfolio_body(["| C1 | 决策一 | P0 | — | 待定 |"]),
             "stream-a": chain_body(SAMPLE_ROWS),
+        })
+        self.assertEqual(ps.main(["--root", str(root), "--selftest"]), 0)
+
+    def test_selftest_green_with_prose_next_steps(self):
+        # S8-hotfix 回归守护：总舵 Next Step 散文 `-` 行 + 流分节 todo 存在时，
+        # captain 守门切片须止于紧邻 ## 节（旧口径切到 ## Backlog 会误吞中间节报混入）
+        pbody = portfolio_body(["| C1 | 决策一 | P0 | — | 待定 |"]).replace(
+            "## Next Step\n推进流 A。",
+            "## Next Step\n- ✅ 事一完成 - 🟡 ⏸ 事二待决（待 Captain）")
+        root = make_repo(self.tmp, {
+            "x-portfolio": pbody,
+            "stream-a": chain_body(SAMPLE_ROWS,
+                                   next_step="- [x] 件一完成\n- [ ] 件二待办"),
         })
         self.assertEqual(ps.main(["--root", str(root), "--selftest"]), 0)
 
