@@ -7,7 +7,8 @@
   (自 inone deploy/12-memory-hub/install/install.ps1 的 [3/6][4/6][5/6] 段
   蒸馏,行为同源):
     1. 配置:hub 地址 + token(已存 ~/.inone/config.json 且同服务则复用),
-       setx 写 INONE_MEMORY_URL / INONE_MEMORY_TOKEN / INONE_AGENT_NAME;
+       setx 写 INONE_MEMORY_URL / INONE_AGENT_NAME(token 永不 setx——持久化
+       只走 inone login 存的 ~\.inone\config.json;旧版 setx 残留重跑即清);
     2. 全局命令:~\.inone\bin\inone.cmd(+ ps1 壳)包住本技能的
        scripts/inone_memory.py,注册用户 PATH——任何终端直呼 inone;
     3. 分发:inone login + init --global 把 MEMORY-CORE.md + topics/ 下到
@@ -18,13 +19,16 @@
 .PARAMETER Url
   inone 服务地址(http://<NAS_LAN_IP>:8095)。缺省 = 已存配置里的同服务地址,
   再缺省 = 交互输入。
-.PARAMETER Token
-  INONE_MEMORY_TOKEN。缺省 = 已存凭据复用;再缺省 = 交互输入(不回显)。
 .PARAMETER AgentName
   记账归因名。缺省 = 沿用现有 INONE_AGENT_NAME;都没有则不写该变量(CLI 落 unknown)。
+.NOTES
+  token 由溯源页「凭证管理」签发、可随时吊销;安装时交互输入(不回显)
+  或预置环境变量 INONE_MEMORY_TOKEN,已存凭据(同服务)自动复用。本机
+  持久化只在 ~\.inone\config.json——永不 setx / 进命令行(--token 参数
+  已移除:会进 PSReadLine 历史与进程列表)。
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 --url http://192.168.2.25:8095
-  powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 --url http://192.168.2.25:8095 --token <t> --agent-name zcode --smoke
+  powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 --url http://192.168.2.25:8095 --agent-name zcode --smoke
 #>
 param()
 
@@ -37,8 +41,6 @@ function Usage {
 
 选项:
   --url <地址>          inone 服务地址(缺省 = 已存配置同服务地址,再缺省交互输入)
-  --token <token>       INONE_MEMORY_TOKEN(优先交互输入不回显;留空 = 沿用已存凭据
-                        或服务端未设鉴权)
   --agent-name <名>     记账归因名(缺省 = 沿用现有 INONE_AGENT_NAME)
   --dist-clone <路径>   分发目录(缺省 ~\inone-memory-dist)
   --dist-remote <url>   git 兜底:HTTP 不可用且无本地文件时自动 git clone 的远端地址
@@ -46,6 +48,11 @@ function Usage {
   --smoke               装完调技能 save 推送一条冒烟记忆
   --no-setx             不写用户环境变量(setx),仅当前会话生效
   -h | --help           本说明
+
+token:由溯源页「凭证管理」签发、可随时吊销;安装时交互输入(不回显)
+      或预置环境变量 INONE_MEMORY_TOKEN,已存凭据(同服务)自动复用。
+      本机持久化只在 ~\.inone\config.json——永不 setx / 进命令行
+      (--token 参数已移除:会进 PSReadLine 历史与进程列表)。
 '@
 }
 
@@ -68,8 +75,6 @@ for ($i = 0; $i -lt $rest.Count; $i++) {
   switch ($rest[$i]) {
     "--url" { $url = $rest[++$i] }
     "-url" { $url = $rest[++$i] }
-    "--token" { $token = $rest[++$i] }
-    "-token" { $token = $rest[++$i] }
     "--agent-name" { $agentName = $rest[++$i] }
     "-agent-name" { $agentName = $rest[++$i] }
     "--dist-clone" { $distCloneGiven = $rest[++$i] }
@@ -81,6 +86,9 @@ for ($i = 0; $i -lt $rest.Count; $i++) {
     "--help" { Usage; exit 0 }
     default {
       [Console]::Error.WriteLine("未知参数:$($rest[$i])")
+      if ($rest[$i] -eq "--token" -or $rest[$i] -eq "-token") {
+        [Console]::Error.WriteLine("提示:--token 已移除(会进 PSReadLine 历史/进程列表)——token 改为交互输入(不回显)、预置环境变量 INONE_MEMORY_TOKEN,或沿用 inone login 已存凭据")
+      }
       Usage
       exit 2
     }
@@ -101,6 +109,24 @@ if ($distCloneGiven) { $distCloneGiven = Clean-Invisible $distCloneGiven }
 # 家目录基准(INONE_INSTALL_HOME 覆盖;测试替身与多用户隔离用)
 $HomeBase = if ($env:INONE_INSTALL_HOME) { $env:INONE_INSTALL_HOME } else { $HOME }
 $distClone = if ($distCloneGiven) { $distCloneGiven } else { Join-Path $HomeBase "inone-memory-dist" }
+
+# 用户环境变量注册表子键(INONE_INSTALL_REG 指向替身子键 = 测试隔离,
+# 真实运行缺省 Environment;token 残留清理与 PATH 追加共用同一入口)
+$regSub = if ($env:INONE_INSTALL_REG) { $env:INONE_INSTALL_REG } else { "Environment" }
+
+function Send-EnvBroadcast {
+  # 广播环境变更:之后新开的终端立即可见,无需注销重登(替身子键 = 测试隔离,不广播)
+  if ($env:INONE_INSTALL_REG) { return }
+  if (-not ("Inone.NativeEnv" -as [type])) {
+    Add-Type -Namespace Inone -Name NativeEnv -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
+'@
+  }
+  $result = [IntPtr]::Zero
+  [Inone.NativeEnv]::SendMessageTimeout(
+    [IntPtr]0xFFFF, 0x1A, [IntPtr]::Zero, "Environment", 2, 5000, [ref]$result) | Out-Null
+}
 
 # python 探测(实跑甄别——Windows 的 WindowsApps\python 是商店占位桩,
 # Get-Command 在但运行必败;login/init --global 与技能本体都依赖它)
@@ -183,11 +209,23 @@ if ($noSetx) {
     setx INONE_AGENT_NAME $agentName | Out-Null
     if ($LASTEXITCODE -ne 0) { Fail "setx INONE_AGENT_NAME 失败" }
   }
-  if ($token) {
-    setx INONE_MEMORY_TOKEN $token | Out-Null
-    if ($LASTEXITCODE -ne 0) { Fail "setx INONE_MEMORY_TOKEN 失败" }
-  }
   Write-Host "  用户环境变量已写入(setx;已开终端需重开生效)"
+}
+# token 永不 setx(明文落注册表,与集中密钥管理冲突):持久化只走 inone
+# login 存的 ~\.inone\config.json。旧版 setx 残留重跑即清(--no-setx 也清:
+# 那是旧版泄漏的明文,不是用户配置);删值 + 广播,新终端不再带旧 token
+$regKey = $null
+try {
+  $regKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($regSub)
+  if ($null -ne $regKey.GetValue("INONE_MEMORY_TOKEN")) {
+    $regKey.DeleteValue("INONE_MEMORY_TOKEN")
+    Send-EnvBroadcast
+    Write-Host "  已清除旧版 setx 残留的用户环境变量 INONE_MEMORY_TOKEN(凭据持久化只在 $cliConfig)"
+  }
+} catch {
+  Write-Host "  ⚠ 清理旧版 setx 残留 INONE_MEMORY_TOKEN 失败($_);可手工删除该用户环境变量"
+} finally {
+  if ($regKey) { $regKey.Close() }
 }
 
 # ---- 2) 全局命令 inone(~\.inone\bin,cmd 壳 + ps1 壳两层)----
@@ -217,8 +255,7 @@ if (-not @($env:Path -split ";" | Where-Object { $_.Trim().TrimEnd("\") -ieq $bi
 }
 # 用户 PATH(HKCU)追加:原生注册表 API 直写——setx 有 1024 截断与
 # REG_EXPAND_SZ 重写两重坑;读取不展开 %VAR%、写回保留原值类型,
-# 大小写不敏感查重,幂等。INONE_INSTALL_REG 指向替身子键 = 测试隔离。
-$regSub = if ($env:INONE_INSTALL_REG) { $env:INONE_INSTALL_REG } else { "Environment" }
+# 大小写不敏感查重,幂等(子键与广播见顶部 $regSub / Send-EnvBroadcast)。
 $regKey = $null
 try {
   $regKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($regSub)
@@ -231,18 +268,7 @@ try {
             catch { [Microsoft.Win32.RegistryValueKind]::ExpandString }
     $newPath = if ($rawPath.Trim()) { $rawPath.TrimEnd(";") + ";" + $inoneBin } else { $inoneBin }
     $regKey.SetValue("Path", $newPath, $kind)
-    if (-not $env:INONE_INSTALL_REG) {
-      # 广播环境变更:之后新开的终端立即可见,无需注销重登
-      if (-not ("Inone.NativeEnv" -as [type])) {
-        Add-Type -Namespace Inone -Name NativeEnv -MemberDefinition @'
-[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
-public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
-'@
-      }
-      $result = [IntPtr]::Zero
-      [Inone.NativeEnv]::SendMessageTimeout(
-        [IntPtr]0xFFFF, 0x1A, [IntPtr]::Zero, "Environment", 2, 5000, [ref]$result) | Out-Null
-    }
+    Send-EnvBroadcast
     Write-Host "  全局命令就绪:inone(新开终端即可用;本会话已可直呼 inone)"
   } else {
     Write-Host "  全局命令就绪:inone(PATH 已含 $inoneBin)"
@@ -343,7 +369,7 @@ if ($smoke) {
   if ($LASTEXITCODE -eq 0) {
     Write-Host "  冒烟成功:溯源页 $url/ 记忆 tab 审核子视图应立即可见"
   } else {
-    Write-Host "  ⚠ 冒烟推送失败(检查 --url/--token;技能与配置已就位,不影响安装)"
+    Write-Host "  ⚠ 冒烟推送失败(检查 --url 与 token 供给;技能与配置已就位,不影响安装)"
   }
 }
 
