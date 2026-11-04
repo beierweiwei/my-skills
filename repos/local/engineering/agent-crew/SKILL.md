@@ -24,7 +24,7 @@ description: 多 agent 编排体系一键启用与日常编排（Herdr 运行时
 
 此后总舵/大副的全部操作走角色文件内封装的 SOP 与脚本，Captain 只对话。
 
-**自举说明**：本技能不带 `setup.sh`——init 的作用域是目标项目仓，只有在项目内由 agent 按 SKILL.md 执行才能完成检测与渲染（与 experience-kb-init / project-landing-init 同模式）。
+**自举说明**：本技能不带 `setup.sh`——init 的作用域是目标项目仓，只有在项目内由 agent 按 SKILL.md 执行才能完成检测与渲染（与 experience-kb-init / project-init 同模式）。
 
 ## init 做什么（行为契约）
 
