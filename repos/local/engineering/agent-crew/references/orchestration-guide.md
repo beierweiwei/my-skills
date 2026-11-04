@@ -225,6 +225,17 @@ herdr agent start <流>-firstmate --kind opencode --pane <pane-id> -- --agent fi
 11. **进度视图**：维护 `{{portfolio_dir}}/task_plan.md`（Goal / Next Step / Phases=活跃流 / Backlog / Deviation）+ 各流 plan；派生看板由 `scripts/plan-status.py --write` 生成，勿手改。向 Captain 汇报以看板为准：流表 + Backlog + 待 Captain。
 12. **交接省 token**：交接只给文件路径 + 当前在跑清单，不复述正文；接收方读 portfolio 三文件 + 各流 plan 接手；`/compact` 摘要即交接，不另写 handoff。**发送方负责执行**，不把规则只写在接收方角色里。
 
+### 5.10 工位/tab 回收（Captain 2026-11-04）
+
+1. **段收口回执必填「工位处置」**：每段收口回执写明「工位处置：关闭 / 保留至 HH:MM（同资产下一件）」，不填视为未收口。
+2. **one-shot 收口即关**：scout / runner / reviewer 等一次性工位，交付后立即关闭 pane/tab，不留空转。
+3. **builder 保留窗 24h → 2h**：仅「同一资产还有下一件」时保留，窗口 2 小时；超时关闭，需要时重建。
+4. **保留工位 tab 标签带「·保留至 HH:MM」**：如 `demo-builder ·保留至 14:30`，到点由 owner/副舵关闭。
+5. **空 tab 自动关**：无 agent、无待读输出的空 tab 直接关闭，不保留占位。
+6. **交接 digest 含 pane 清单与待关项**：交接时列出在跑 pane 与「保留至 HH:MM」工位，接收方按清单续管或关闭。
+
+**巡检工具（项目侧）**：`python3 scripts/pane-audit.py` 默认 dry-run 只列建议，`--apply` 才执行关闭；白名单 `Captain·*` / `流程优化·*` / 总舵本 pane，working 状态不关。脚本落各项目 `scripts/`（CASE 仓为首个落地），本技能仓只留指针，不复制实现。
+
 ## 6. 三道人工门（不可由 Agent 自批）
 
 1. **单需求需求门**：该需求的业务核心流程图、口径、范围、验收标准、输入输出契约、准确性标准。需求门对『落地要点』只核：核心流程节点完整、契约语义与责任边界清楚、红线与边界写明、切片顺序可执行；**不核实现细节**。

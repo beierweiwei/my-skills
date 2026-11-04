@@ -53,6 +53,7 @@ init 后所有项目差异集中在 `<项目>/.planning/orchestration.json`：�
 | 记进度、记决策、记错误 | 各 plan owner | portfolio 三文件 + 各流 plan（目录见配置 `portfolioDir`） |
 | 看全局进度 | Captain/编排者 | 派生看板（`python3 scripts/plan-status.py --write` 生成，勿手改；Current Phase 由脚本自动推导，Deviation 已解决条目行内标「已解决（YYYY-MM-DD）」自动折叠；plan 可选「业务链」节点视图由看板自动置顶渲染，写法见 references/plan-discipline.md §4） |
 | 排查 Herdr 操作问题 | 任何人 | [references/herdr-cheatsheet.md](references/herdr-cheatsheet.md) |
+| 工位/tab 回收（收口关闭、保留窗、空 tab、交接 pane 清单） | 各段 owner（副舵核对） | [references/orchestration-guide.md](references/orchestration-guide.md) §5.10；项目侧 `python3 scripts/pane-audit.py`（dry-run 默认，`--apply` 才关） |
 | 编排漏洞/流程问题上报 | 任何角色 | portfolio 目录下 `feedback.md`（场景/问题/影响/建议/状态） |
 
 ## 环境假设与已知边界

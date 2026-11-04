@@ -105,6 +105,8 @@
 3. **progress 事件触发写入**：决策/阻塞/派单/收口/异常各写一次，最长 30–60 分钟兜底；一段多里程碑、一条一行。
 4. **交接看板优先**：看板 + portfolio 索引 + Decisions/Errors + 活跃流 Next Step + 最近 3 段 progress；需求文档只读当前活跃章节，全量读仅在歧义时。看板未刷新或源 sha 不一致时，禁止交接。
 
+> 交接 digest 另含 pane 清单与待关项；工位/tab 回收规则见 [orchestration-guide.md](orchestration-guide.md) §5.10（单一真源，此处只留指针）。
+
 ### 5.2 归档 SOP（交接前静默窗口）
 
 顺序：**① 旧舵/owner 归档（dry-run → apply）→ ② 启动新舵 → ③ 新舵读文件 → ④ 关闭旧舵**；apply 必须在无写者的静默窗口内，禁止定时自动归档。
