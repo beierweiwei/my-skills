@@ -93,3 +93,41 @@
 - ❌ 反例：`| T8 | [x] | 完成 |`——裸编号，编号后无节点/任务描述（违反规则①）
 - ❌ 反例：`| 单据录入 | [x] | 跑了 xx 命令改了 xx 文件，重启后端口通了 |`——过程流水账，写了步骤/命令/端口（违反规则②）
 - ❌ 反例：`| 单据录入 | [x] - [ ] 修边界 - [ ] ⏸ 等拍板 |`——表内塞多条 todo（违反细化②③，todo 应另起分节列表）
+
+## 5. plan 归档与写法规约（Captain 2026-11-04）
+
+> 出处：CASE 仓流程审计 `process-review.md` §5 第三步（4 条硬规则）与归档设计稿 `audit.md` §3/§5；适用于所有 plan owner（portfolio＝总舵，各流＝对应 owner）。
+
+### 5.1 四条硬规则
+
+1. **Next Step 只放未完成**（≤10 条、每条 ≤1 行 ≤100 字）；完成项迁入 `## 最近完成`（≤10 条，含 commit/测试/证据指针）。
+2. **待 Captain 项只在 Backlog**（C 行）；Next Step 只引用编号，不复制待办正文。
+3. **progress 事件触发写入**：决策/阻塞/派单/收口/异常各写一次，最长 30–60 分钟兜底；一段多里程碑、一条一行。
+4. **交接看板优先**：看板 + portfolio 索引 + Decisions/Errors + 活跃流 Next Step + 最近 3 段 progress；需求文档只读当前活跃章节，全量读仅在歧义时。看板未刷新或源 sha 不一致时，禁止交接。
+
+### 5.2 归档 SOP（交接前静默窗口）
+
+顺序：**① 旧舵/owner 归档（dry-run → apply）→ ② 启动新舵 → ③ 新舵读文件 → ④ 关闭旧舵**；apply 必须在无写者的静默窗口内，禁止定时自动归档。
+
+| 约束 | 做法 |
+|---|---|
+| 触发 | 交接前；progress >500 行或 Next Step 已完成 >30 条时由 `plan-status.py --write` stderr 告警 |
+| 归属 | 一 plan 一 owner：portfolio 由总舵归档，各流由对应 owner 归档；Runner 只做只读 `--report` |
+| 命令 | `python3 scripts/plan-archive.py --task <slug> --dry-run` 预览，确认后 `--apply`；**禁止 `--all --apply`**（脚本在项目侧，本技能当前未内置，跨仓同步另行立项） |
+| 静默校验 | 仅 owner 执行；运行前后源文件 sha256 不变；`flock .planning/.plan-archive.lock`；活动 worker 检测（herdr 可用则查，否则 `--quiet-ok` 显式确认）；mtime 仅提示 |
+| 落点 | `.planning/_archive/<task>-<YYYYMMDD-HHMM>.md`（入库）；文件名不得叫 `task_plan.md`；一 task 一次运行一个归档文件 |
+| 备份 | 先写归档文件并 fsync，再「临时文件 + 原子 rename」重写 live；归档失败即中止；**禁止无备份删除** |
+| 对账 | 行多重集守恒、活跃项前后计数相等、health before==after（不等 abort）、`plan-status --selftest` 绿、看板 diff 仅已完成行减少 |
+| 归档头 | 来源路径、归档日期、截止边界、before/after 行数、**源文件归档前 sha256**、操作角色 |
+| live 指针 | 尾部留一行：「归档记录：<date> 移出 N 段/M 行 → `.planning/_archive/<file>`」 |
+| 回滚 | 归档文件与 live 改动同一 commit，`git revert` 一步还原；不提供 `--restore` |
+
+**保留粒度**：progress 目标 300–350 行、硬上限 400；Next Step 未完成全留，已完成只留最近 ≤10 条迁入 `## 最近完成`；Decisions/Errors/Backlog/未解决 Deviation/Phase 不动；Deviation 仅归档含「已解决」的行；findings 不归档（上限 50 行）。
+
+**禁止**：无备份删除、归档活跃项、删改 Phase/Status、跨 task 合并归档、写者活跃时 apply、`.scratch` 作唯一备份。
+
+### 5.3 feedback 生命周期
+
+- **状态流转**：待处理 → 讨论中 → 已固化 → 已归档；feedback 先入库（勿留 untracked）。
+- **固化留痕**：每条固化后在 `AGENTS.md`/角色文件留指针。
+- **折叠归档**：已固化且 >14 天的条目折叠或归档，**编号保留**；脚本自动归档暂不覆盖 feedback，按本规约人工执行。
