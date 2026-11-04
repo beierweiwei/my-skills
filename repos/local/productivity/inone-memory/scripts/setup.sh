@@ -4,7 +4,9 @@
 # (自 inone deploy/12-memory-hub/install/install.sh 的 [3/6][4/6][5/6] 段蒸馏,
 # 行为同源):
 #   1. 配置:hub 地址 + token(已存 ~/.inone/config.json 且同服务则复用),
-#      写 profile 标记块(INONE_MEMORY_URL / INONE_MEMORY_TOKEN / INONE_AGENT_NAME);
+#      写 profile 标记块(INONE_MEMORY_URL / INONE_AGENT_NAME / PATH;token
+#      永不写 profile——持久化只走 inone login 存的 ~/.inone/config.json,
+#      ~/.config/shell/secrets.env 在位时随标记块 source 一行);
 #   2. 全局命令:~/.local/bin/inone(sh 包装器)包住本技能的 scripts/inone_memory.py,
 #      PATH export 随 profile 标记块写入——任何终端直呼 inone;
 #   3. 分发:inone login + init --global 把 MEMORY-CORE.md + topics/ 下到
@@ -15,8 +17,6 @@
 #
 # 用法:bash setup.sh [--url http://<NAS_LAN_IP>:8095] [选项]
 #   --url <地址>          inone 服务地址(缺省 = 已存配置同服务地址,再缺省交互输入)
-#   --token <token>       INONE_MEMORY_TOKEN(优先交互输入不回显;留空 = 沿用
-#                         已存凭据或服务端未设鉴权)
 #   --agent-name <名>     记账归因名(缺省 = 沿用现有 INONE_AGENT_NAME)
 #   --dist-clone <路径>   分发目录(缺省 ~/inone-memory-dist)
 #   --dist-remote <url>   git 兜底:HTTP 不可用且无本地文件时自动 git clone 的远端地址
@@ -24,6 +24,10 @@
 #   --smoke               装完调技能 save 推送一条冒烟记忆
 #   --no-profile          只导出当前会话,不写 profile(计划任务与
 #                         新终端依赖 inone login 存的配置,不受此项影响)
+# token:由溯源页「凭证管理」签发、可随时吊销;安装时交互输入(不回显)
+#   或预置环境变量 INONE_MEMORY_TOKEN,已存凭据(同服务)自动复用。本机
+#   持久化只在 ~/.inone/config.json(600)——永不写 profile / 命令行
+#   (--token 参数已移除:会进 shell history 与 ps)。
 # 前置:bash + curl 或 wget + python 3(技能本体即 python 脚本,零第三方依赖)。
 
 set -euo pipefail
@@ -43,8 +47,6 @@ usage() {
 
 选项:
   --url <地址>          inone 服务地址(缺省 = 已存配置同服务地址,再缺省交互输入)
-  --token <token>       INONE_MEMORY_TOKEN(优先交互输入不回显;留空 = 沿用
-                        已存凭据或服务端未设鉴权)
   --agent-name <名>     记账归因名(缺省 = 沿用现有 INONE_AGENT_NAME)
   --dist-clone <路径>   分发目录(缺省 ~/inone-memory-dist)
   --dist-remote <url>   git 兜底:HTTP 不可用且无本地文件时自动 git clone 的远端地址
@@ -52,6 +54,11 @@ usage() {
   --smoke               装完调技能 save 推送一条冒烟记忆
   --no-profile          只导出当前会话,不写 profile(计划任务与
                         新终端依赖 inone login 存的配置,不受此项影响)
+
+token:由溯源页「凭证管理」签发、可随时吊销;安装时交互输入(不回显)
+      或预置环境变量 INONE_MEMORY_TOKEN,已存凭据(同服务)自动复用。
+      本机持久化只在 ~/.inone/config.json(600)——永不写 profile / 命令行
+      (--token 参数已移除:会进 shell history 与 ps)。
 USAGE
 }
 
@@ -67,7 +74,6 @@ NO_PROFILE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --url) URL="${2-}"; shift 2 ;;
-    --token) TOKEN="${2-}"; shift 2 ;;
     --agent-name) AGENT_NAME="${2-}"; shift 2 ;;
     --dist-clone) DIST_CLONE="${2-}"; shift 2 ;;
     --dist-remote) DIST_REMOTE="${2-}"; shift 2 ;;
@@ -75,7 +81,9 @@ while [ $# -gt 0 ]; do
     --smoke) SMOKE=1; shift ;;
     --no-profile) NO_PROFILE=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    *) printf '未知参数:%s\n' "$1" >&2; exit 2 ;;
+    *) printf '未知参数:%s\n' "$1" >&2
+       [ "$1" = "--token" ] && printf '提示:--token 已移除(会进 shell history/ps)——token 改为交互输入(不回显)、预置环境变量 INONE_MEMORY_TOKEN,或沿用 inone login 已存凭据\n' >&2
+       exit 2 ;;
   esac
 done
 
@@ -234,10 +242,12 @@ else
     if [ -n "$AGENT_NAME" ]; then
       printf 'export INONE_AGENT_NAME="%s"\n' "$AGENT_NAME"
     fi
-    if [ -n "$TOKEN" ]; then
-      printf 'export INONE_MEMORY_TOKEN="%s"\n' "$TOKEN"
-    else
-      printf '# INONE_MEMORY_TOKEN 未写入(服务端未设鉴权;需要时改用\n#   inone login 或补一行 export)\n'
+    # token 永不落 profile(明文与集中密钥管理冲突):持久化只走 inone
+    # login 存的 ~/.inone/config.json;集中密钥(chezmoi+age 等)把
+    # INONE_MEMORY_TOKEN 放 ~/.config/shell/secrets.env,在位则随标记块 source
+    printf '# INONE_MEMORY_TOKEN 不落 profile:凭据在 ~/.inone/config.json(inone login 写入)\n'
+    if [ -r "$HOME/.config/shell/secrets.env" ]; then
+      printf '[ -r "$HOME/.config/shell/secrets.env" ] && . "$HOME/.config/shell/secrets.env"\n'
     fi
     # 全局命令目录上 PATH(标记块内,重跑幂等替换;多列一次 PATH 无害)
     printf 'export PATH="$HOME/.local/bin:$PATH"\n'
@@ -357,7 +367,7 @@ if [ "$SMOKE" -eq 1 ]; then
       --evidence "setup.sh --smoke,时间 $(date '+%Y-%m-%d %H:%M')"; then
     note "冒烟成功:溯源页 $URL/ 记忆 tab 审核子视图应立即可见"
   else
-    printf '  ⚠ 冒烟推送失败(检查 --url/--token;技能与配置已就位,不影响安装)\n'
+    printf '  ⚠ 冒烟推送失败(检查 --url 与 token 供给;技能与配置已就位,不影响安装)\n'
   fi
 fi
 
