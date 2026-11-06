@@ -73,8 +73,16 @@ link_one "opencode" "$HOME/.config/opencode/AGENTS.md"  "$ROOT/AGENTS.md"
 link_one "zcode"    "$HOME/.zcode/AGENTS.md"            "$ROOT/AGENTS.md"
 
 # ---- 状态栏接入：一份渲染器，Claude Code / Qoder / Qoder-CN 共用 ----
-statusline_src="$ROOT/scripts/statusline.js"
-statusline_cmd="node \"$statusline_src\""
+statusline_abs="$ROOT/scripts/statusline.js"
+statusline_rel="${ROOT#"$HOME"/}"
+if [[ "$ROOT" == "$HOME"/* && "$statusline_rel" != *[[:space:]]* ]]; then
+  # 引号内 ~ 不展开，因此用不带引号的 ~ 路径
+  statusline_src="~/$statusline_rel/scripts/statusline.js"
+  statusline_cmd="node $statusline_src"
+else
+  statusline_src="$statusline_abs"
+  statusline_cmd="node \"$statusline_src\""
+fi
 
 update_statusline_json() {
   local file="$1" cmd="$2" tmp
@@ -116,8 +124,8 @@ wire_statusline() {
     printf '  - %-10s 未安装（%s 不存在），跳过状态栏\n' "$name" "$dir"
     return 0
   fi
-  if [[ ! -e "$statusline_src" ]]; then
-    printf 'Error: 仓库源文件缺失: %s\n' "$statusline_src" >&2
+  if [[ ! -e "$statusline_abs" ]]; then
+    printf 'Error: 仓库源文件缺失: %s\n' "$statusline_abs" >&2
     failed+=("$name")
     return 1
   fi
