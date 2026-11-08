@@ -117,7 +117,23 @@ class SwapTest(_SwapTest):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("dry-run", result.stdout)
         self.assertIn("备份路径（将创建）", result.stdout)
+        # 已存在受管文件 → [更新]；缺失受管产物（角色/脚本）→ [新增]
         self.assertIn("[更新] scripts/plan-status.py", result.stdout)
+        self.assertIn("[新增] .qoder/agents/helm.md", result.stdout)
+        self.assertIn("[新增] scripts/crew-state.py", result.stdout)
+        self.assertIn("[新增] scripts/crew-lint.py", result.stdout)
+        self.assertFalse(self.backup.exists())
+        self.assertEqual(snapshot_tree(self.root), before)
+
+    def test_dry_run_reports_new_docs(self):
+        # 受管 docs 缺失时必须报 [新增]，且仍零写入
+        for rel in ("docs/crew-rules.md", "docs/crew-acceptance.md"):
+            (self.root / rel).unlink()
+        before = snapshot_tree(self.root)
+        result = self.swap("--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for rel in ("docs/crew-rules.md", "docs/crew-acceptance.md"):
+            self.assertIn(f"[新增] {rel}", result.stdout)
         self.assertFalse(self.backup.exists())
         self.assertEqual(snapshot_tree(self.root), before)
 
@@ -172,7 +188,8 @@ class SwapTest(_SwapTest):
             )
 
         for token in ("替换完成", "备份路径：", "变更文件：", "回滚命令：",
-                      "[更新] scripts/plan-status.py", "[新增] .qoder/agents/helm.md"):
+                      "[更新] scripts/plan-status.py", "[新增] .qoder/agents/helm.md",
+                      "[新增] scripts/crew-state.py"):
             self.assertIn(token, result.stdout)
 
     def test_rollback_restores_every_managed_file_bytewise(self):

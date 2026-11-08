@@ -85,6 +85,8 @@ list_managed_files() {
   for name in "${MANAGED_SCRIPTS[@]}"; do
     [[ -f "$root/scripts/$name" ]] && printf '%s\n' "scripts/$name"
   done
+  # 末尾命中判断可能为假；显式返回 0，避免 set -e 提前终止 diff 的合并列举。
+  return 0
 }
 
 # reference=替换后（沙箱/期望）树，target=替换前（项目）树。
