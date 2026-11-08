@@ -114,6 +114,7 @@ bash scripts/update-all.sh                                           # 更新 + 
 | [nextlevelbuilder/ui-ux-pro-max-skill](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill) | ui-ux-pro-max |
 | [OthmanAdi/planning-with-files](https://github.com/OthmanAdi/planning-with-files) | planning-with-files |
 | [microsoft/playwright-cli](https://github.com/microsoft/playwright-cli) | playwright-cli |
+| [herdrdev/herdr](https://github.com/herdrdev/herdr) | herdr |
 | [wshobson/agents](https://github.com/wshobson/agents) | e2e-testing-patterns |
 | [humanlayer/skills](https://github.com/humanlayer/skills) | show-me |
 | [anthropics/skills](https://github.com/anthropics/skills) | frontend-design |

@@ -85,6 +85,13 @@ $Repos = [ordered]@{
     ref    = "main"
     skills = [ordered]@{ "engineering/playwright-cli" = "skills/playwright-cli" }
   }
+  "herdr" = @{
+    url    = "https://github.com/herdrdev/herdr.git"
+    ref    = "master"
+    # 大仓库只拉技能子目录：blob 按需下载，避免为一个技能拖整仓源码
+    sparse = "skills/herdr"
+    skills = [ordered]@{ "engineering/herdr" = "skills/herdr" }
+  }
   "humanlayer-skills" = @{
     url    = "https://github.com/humanlayer/skills.git"
     ref    = "main"
@@ -111,21 +118,26 @@ $Repos = [ordered]@{
   }
 }
 
-function Update-Repo([string]$name, [string]$url, [string]$ref) {
+function Update-Repo([string]$name, [string]$url, [string]$ref, [string]$Sparse) {
   $dest = Join-Path $ReposDir $name
   $gitArgs = @()
   if (-not $NoProxy) { $gitArgs += @("-c", "http.proxy=$Proxy", "-c", "https.proxy=$Proxy") }
   if (Test-Path (Join-Path $dest ".git")) {
     Write-Host "[$name] 更新到 $ref 最新…" -ForegroundColor Cyan
     git @gitArgs -C $dest fetch --depth 1 origin $ref
-    git -C $dest reset --hard FETCH_HEAD
-    git -C $dest clean -fdq
+    git @gitArgs -C $dest reset --hard FETCH_HEAD
+    git @gitArgs -C $dest clean -fdq
   } else {
     if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
     Write-Host "[$name] 首次克隆…" -ForegroundColor Cyan
-    git @gitArgs clone --depth 1 --branch $ref $url $dest
+    if ($Sparse) { git @gitArgs clone --depth 1 --branch $ref --filter=blob:none --sparse $url $dest }
+    else { git @gitArgs clone --depth 1 --branch $ref $url $dest }
   }
   if ($LASTEXITCODE -ne 0) { throw "[$name] git 失败（检查代理 $Proxy 或用 -NoProxy）" }
+  if ($Sparse) {
+    git @gitArgs -C $dest sparse-checkout set $Sparse
+    if ($LASTEXITCODE -ne 0) { throw "[$name] sparse-checkout 失败" }
+  }
 }
 
 # 只删联接本身，不动目标内容
@@ -161,7 +173,7 @@ if (Test-Path $LocalDir) {
 foreach ($kv in $Repos.GetEnumerator()) {
   $r = $kv.Value
   try {
-    Update-Repo $kv.Key $r.url $r.ref
+    Update-Repo $kv.Key $r.url $r.ref $r.sparse
     foreach ($s in $r.skills.GetEnumerator()) {
       Add-Junction (Join-Path $SkillsDir $s.Key) (Join-Path (Join-Path $ReposDir $kv.Key) $s.Value)
     }

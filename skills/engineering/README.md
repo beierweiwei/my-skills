@@ -17,4 +17,5 @@
 - **nextlevelbuilder/ui-ux-pro-max-skill**：ui-ux-pro-max
 - **anthropics/skills**：frontend-design
 - **microsoft/playwright-cli**：playwright-cli
+- **herdrdev/herdr**：herdr
 - **wshobson/agents**：e2e-testing-patterns

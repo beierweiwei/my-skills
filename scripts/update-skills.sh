@@ -39,7 +39,7 @@ done
 mkdir -p "$REPOS_DIR" "$SKILLS_DIR" "$PLUGINS_DIR"
 
 update_repo() {
-  local name="$1" url="$2" ref="$3" dest="$REPOS_DIR/$1"
+  local name="$1" url="$2" ref="$3" sparse="${4:-}" dest="$REPOS_DIR/$1"
   local -a git_args=(git)
   if ((NO_PROXY_MODE == 0)); then
     git_args+=( -c "http.proxy=$PROXY" -c "https.proxy=$PROXY" )
@@ -48,13 +48,17 @@ update_repo() {
   if [[ -d "$dest/.git" ]]; then
     printf '[%s] updating to %s...\n' "$name" "$ref"
     "${git_args[@]}" -C "$dest" fetch --depth 1 origin "$ref" || return 1
-    git -C "$dest" reset --hard FETCH_HEAD || return 1
-    git -C "$dest" clean -fdq || return 1
+    "${git_args[@]}" -C "$dest" reset --hard FETCH_HEAD || return 1
+    "${git_args[@]}" -C "$dest" clean -fdq || return 1
   else
     [[ ! -e "$dest" ]] || rm -rf -- "$dest"
     printf '[%s] cloning...\n' "$name"
-    "${git_args[@]}" clone --depth 1 --branch "$ref" "$url" "$dest" || return 1
+    local -a clone_args=(clone --depth 1 --branch "$ref")
+    # 大仓库只拉指定子目录：blob 按需下载，避免为一个技能拖整仓源码
+    [[ -n "$sparse" ]] && clone_args+=(--filter=blob:none --sparse)
+    "${git_args[@]}" "${clone_args[@]}" "$url" "$dest" || return 1
   fi
+  [[ -z "$sparse" ]] || "${git_args[@]}" -C "$dest" sparse-checkout set "$sparse" || return 1
 }
 
 link_entry() {
@@ -116,8 +120,8 @@ EOF
 fi
 
 update_and_link() {
-  local name="$1" url="$2" ref="$3" entries="$4"
-  update_repo "$name" "$url" "$ref" || { failed+=("$name"); return; }
+  local name="$1" url="$2" ref="$3" entries="$4" sparse="${5:-}"
+  update_repo "$name" "$url" "$ref" "$sparse" || { failed+=("$name"); return; }
   while IFS=$'\t' read -r skill path; do
     [[ -n "$skill" ]] || continue
     link_entry "$SKILLS_DIR/$skill" "$REPOS_DIR/$name/$path" || failed+=("skill:$skill")
@@ -129,6 +133,7 @@ update_and_link caveman https://github.com/JuliusBrussee/caveman.git main $'prod
 update_and_link ui-ux-pro-max-skill https://github.com/nextlevelbuilder/ui-ux-pro-max-skill.git main $'engineering/ui-ux-pro-max\t.claude/skills/ui-ux-pro-max'
 update_and_link planning-with-files https://github.com/OthmanAdi/planning-with-files.git master $'productivity/planning-with-files\tskills/planning-with-files'
 update_and_link playwright-cli https://github.com/microsoft/playwright-cli.git main $'engineering/playwright-cli\tskills/playwright-cli'
+update_and_link herdr https://github.com/herdrdev/herdr.git master $'engineering/herdr\tskills/herdr' skills/herdr
 update_and_link humanlayer-skills https://github.com/humanlayer/skills.git main $'productivity/show-me\tplugins/show-me/skills/show-me'
 update_and_link wshobson-agents https://github.com/wshobson/agents.git main $'engineering/e2e-testing-patterns\tplugins/developer-essentials/skills/e2e-testing-patterns'
 update_and_link anthropics-skills https://github.com/anthropics/skills.git main $'engineering/frontend-design\tskills/frontend-design'
