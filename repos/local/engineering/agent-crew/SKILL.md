@@ -1,6 +1,7 @@
 ---
 name: agent-crew
 description: 多 agent 编排体系一键启用与日常编排（Herdr 运行时 + 角色船员 + plan 工作记忆 + 派生看板）。Use when 需要在目标项目启用多 agent 协作编排、初始化角色与总舵、拆任务派活收口、维护 portfolio 多流 plan、生成进度看板，或搭建 Captain/总舵/大副/船员分工体系；触发词：编排、总舵、大副、副舵、船员、crew、herdr、派活、看板、portfolio。
+version: 2.0.0
 ---
 
 # agent-crew：多 Agent 编排体系
@@ -8,6 +9,10 @@ description: 多 agent 编排体系一键启用与日常编排（Herdr 运行时
 把「一人 + 多 Agent 船员」的协作编排装进目标项目：角色模板（Captain 人 / 总舵 Helm / 大副 First Mate / Builder / Reviewer / Planner / Runner / Scout）、Herdr 运行时封装脚本、plan-with-files 工作记忆与派生看板。装完后的运行规则全部落在项目内（`AGENTS.md` 编排节 + 角色文件 + plan 骨架），本技能目录只提供语料与脚本。
 
 **术语与机制正文**：[references/orchestration-guide.md](references/orchestration-guide.md)（角色/分层/拓扑/端到端流程/三道门/上下文契约）；命令速查：[references/herdr-cheatsheet.md](references/herdr-cheatsheet.md)；plan 字段与看板：[references/plan-discipline.md](references/plan-discipline.md)。
+
+**规则与验收正文**：技能内为 [references/crew-rules.md](references/crew-rules.md)（D/R/W/O/F/P/G/S/X）与 [references/crew-acceptance.md](references/crew-acceptance.md)（A1–A5）；安装到项目后以项目内 `docs/crew-rules.md`、`docs/crew-acceptance.md` 副本为准。模板/角色只写编号指针，`{{crew_rules}}` / `{{crew_acceptance}}` 由 init 渲染为这两份文档的路径。
+
+**版本**：本技能版本见 frontmatter（`python3 scripts/crew-lint.py --version` 可解析），变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 何时用 / 不适用
 
@@ -28,20 +33,23 @@ description: 多 agent 编排体系一键启用与日常编排（Herdr 运行时
 
 ## init 做什么（行为契约）
 
-- **只读检测**：git 仓、既有 `.qoder/agents/`、`.opencode/`、`scripts/plan-status.py`、`.planning/`（含 `*portfolio*` 目录）、`AGENTS.md`、术语文档（默认 `CONTEXT.md`，文档名可配置）、`docs/`、planning-with-files 是否安装、python3 ≥3.10。
+- **只读检测**：git 仓、既有 `.qoder/agents/`、`.opencode/`、`scripts/`（v1/v2 脚本）、`.planning/`（含 `*portfolio*` 目录与 `orchestration.json` 的 `skillVersion` 版本戳）、`AGENTS.md`、术语文档（默认 `CONTEXT.md`，文档名可配置）、`docs/`、planning-with-files 是否安装、python3 ≥3.10。
 - **生成（只写清单内路径，清单外零写入）**：
   1. `.planning/orchestration.json`（单一参数载体：文档名/看板落点/portfolio 目录/决策清单/红线等，全部有默认值）；
   2. 角色模板渲染：`.qoder/agents/` 7 份、`.opencode/agent/firstmate.md`、`.opencode/skills/firstmate-dispatch/`；
-  3. 脚本落项目 `scripts/`（start-agent / start-helm / agent-watch / worktree-watch / herdr-events / plan-status）；
-  4. portfolio 目录三文件骨架（`task_plan.md` / `findings.md` / `progress.md`；目录见配置 `portfolioDir`，默认 `.planning/portfolio`）；
-  5. `AGENTS.md` 编排节（标记节定界：无则追加、有则替换节内内容，原内容不动）；
-  6. 术语文档不存在才生成骨架。
-- **幂等**：重复执行零副作用——一致则跳过；不一致的已存在产物**默认不覆盖**，列冲突清单给双方路径，`--force` 才覆盖（仅限本技能产物路径）。
+  3. 脚本落项目 `scripts/`：start-agent / start-helm / agent-watch / worktree-watch / herdr-events / plan-status / crew-state / crew-guard / crew-ticket / crew-msg / pane-audit / crew-lint；
+  4. 规则与验收正文副本：`docs/crew-rules.md`、`docs/crew-acceptance.md`（references 安装副本，供 `{{crew_rules}}` / `{{crew_acceptance}}` 渲染解析）；
+  5. 工单模板副本：`templates/_templates/ticket.md`（五段：目标 / 现状入口 / 验收断言 / 边界规则 / 回执要求）；
+  6. portfolio 目录三文件骨架（`task_plan.md` / `findings.md` / `progress.md`；目录见配置 `portfolioDir`，默认 `.planning/portfolio`）；
+  7. `AGENTS.md` 编排节（标记节定界：无则追加、有则替换节内内容，原内容不动）；
+  8. 术语文档不存在才生成骨架。
+- **版本与感知**：init 把已安装技能版本写入 `.planning/orchestration.json` 的 `skillVersion`；`--check` 对比安装版与源版（SKILL.md frontmatter），源已变更时提示「需重跑 update-all」；失败项汇总，`--only-failed` 只重跑失败项，不静默跳过。
+- **幂等**：重复执行零副作用——一致则跳过；不一致的已存在产物**默认不覆盖**，列冲突清单给双方路径，`--force` 才覆盖（仅限本技能产物路径）；`skillVersion` 只随实际安装版本更新。
 - **交互边界**：agent 执行（stdin 非 tty）零交互——已有 `*portfolio*` 目录默认沿用、关键产物冲突默认不覆盖并列冲突清单；仅人工终端（tty）跑 init 才出现沿用/新建问答。
 
 ## 项目参数（orchestration.json）
 
-init 后所有项目差异集中在 `<项目>/.planning/orchestration.json`：项目名、portfolio 目录、看板落点/标题、需求/验收/术语文档名（无需求文档体系的项目可映射为其既有 PRD/issue 路径）、必须找 Captain 的决策清单、项目红线、原始数据目录、总舵 agent 名（`helm.agentName`，默认派生 `helm-<项目名>`，同机多项目各自唯一）、总舵 tab 标签与期望模型。改配置后重跑 init 重渲染（或手改已渲染文件）。
+init 后所有项目差异集中在 `<项目>/.planning/orchestration.json`：项目名、portfolio 目录、看板落点/标题、需求/验收/术语文档名（无需求文档体系的项目可映射为其既有 PRD/issue 路径）、必须找 Captain 的决策清单、项目红线、原始数据目录、总舵 agent 名（`helm.agentName`，默认派生 `helm-<项目名>`，同机多项目各自唯一）、总舵 tab 标签与期望模型；`skillVersion` 为 init 写入的安装版本戳（勿手改）。改配置后重跑 init 重渲染（或手改已渲染文件）。
 
 ## 日常编排导航
 
@@ -52,6 +60,12 @@ init 后所有项目差异集中在 `<项目>/.planning/orchestration.json`：�
 | 实现/评审/写文档/调研/杂活 | 各 crew | 各角色文件（Qoder `.qoder/agents/`，opencode `.opencode/agent/`） |
 | 记进度、记决策、记错误 | 各 plan owner | portfolio 三文件 + 各流 plan（目录见配置 `portfolioDir`） |
 | 看全局进度 | Captain/编排者 | 派生看板（`python3 scripts/plan-status.py --write` 生成，勿手改；Current Phase 由脚本自动推导，Deviation 已解决条目行内标「已解决（YYYY-MM-DD）」自动折叠；plan 可选「业务链」节点视图由看板自动置顶渲染，写法见 references/plan-discipline.md §4） |
+| 看任务/工位状态与事件历史 | 编排者/副舵 | `python3 scripts/crew-state.py status` / `history`（规则 S1–S4；plan 仍是任务状态真源，脚本不写 plan） |
+| 写/读/推送回执 | 各 crew / 副舵 | `python3 scripts/crew-msg.py write / ls / read / push`（R1–R4；文件为真源，推送失败不影响回执） |
+| 声明占用、暂存、提交自检、收口核验 | worker / 副舵 | `python3 scripts/crew-ticket.py claim / release / stage / precommit / close`（O1–O3、F1–F2；stage 只暂存声明文件） |
+| 自动值守叫醒 | 编排者 | `python3 scripts/crew-guard.py`（G1–G5；单实例、两轮去抖、正常零输出） |
+| 技能资产自检（行数/编号/指针/重复句） | 技能维护者 | `python3 scripts/crew-lint.py`（全绿低输出；有违规非零退出） |
+| 查规则与验收正文 | 所有角色 | 项目 `docs/crew-rules.md`（D/R/W/O/F/P/G/S/X）、`docs/crew-acceptance.md`（A1–A5）；技能内 references 为源版 |
 | 排查 Herdr 操作问题 | 任何人 | [references/herdr-cheatsheet.md](references/herdr-cheatsheet.md) |
 | 工位/tab 回收（收口关闭、保留窗、空 tab、交接 pane 清单） | 各段 owner（副舵核对） | [references/orchestration-guide.md](references/orchestration-guide.md) §5.10；项目侧 `python3 scripts/pane-audit.py`（dry-run 默认，`--apply` 才关） |
 | 编排漏洞/流程问题上报 | 任何角色 | portfolio 目录下 `feedback.md`（场景/问题/影响/建议/状态） |
