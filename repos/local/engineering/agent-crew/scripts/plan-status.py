@@ -4,9 +4,15 @@
 用法:
     python3 scripts/plan-status.py            # 打印 Markdown 看板
     python3 scripts/plan-status.py --write    # 同时写入看板文件（默认 docs/进度追踪.md，可配置）
+    python3 scripts/plan-status.py --check-fresh
+                                              # 校验看板是否落后于 plan/配置（过期列明来源并非零退出）
+    python3 scripts/plan-status.py --lint     # create-time lint（Phase 标题/单 Status/Next Step/裸编号）
     python3 scripts/plan-status.py --selftest # 对当前 plan 跑一遍解析断言
     python3 scripts/plan-status.py --archive docs/历史/进度追踪-截至20260101.md --write
                                               # 一次性在看板头部写入归档链接（显式动作）
+
+刷新时机：收口回执后立即 --write；guard 每 5 分钟 --write；
+交接第 0 步 --write 后接 --check-fresh。
 
 配置：`<仓根>/.planning/orchestration.json`（单一参数载体，键见 templates/project.config.json）。
 可配置项：board.path / board.title / board.archive（空=不写归档链接行）/
@@ -33,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
 import json
 import re
 import sys
@@ -44,7 +51,13 @@ SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 
 PHASE_RE = re.compile(r"^### Phase\s+\d+\s*[:：]\s*(.+?)\s*$")
 STATUS_RE = re.compile(r"\*\*Status:\*\*\s+(pending|in_progress|complete)")
+STATUS_MARK_RE = re.compile(r"\*\*Status:\s*\*\*")
 PLAN_REF_RE = re.compile(r"^\s*-\s*plan:\s*`([^`]+)`")
+# 派生看板源指纹（--check-fresh）：写入时把各 plan 内容哈希与配置哈希藏进 HTML 注释。
+BOARD_VERSION = "v1"
+FINGERPRINT_RE = re.compile(r"^<!--\s*plan-sources:\s*(.*?)\s*-->$")
+CONFIG_REL = ".planning/orchestration.json"
+WRITE_HINT = "请运行 `python3 scripts/plan-status.py --write` 重刷看板"
 
 HEALTH_DONE, HEALTH_WIP, HEALTH_BLOCKED = "🟢", "🟡", "🔴"
 # 看板「当前阶段」自动推导（S7-b1 缺陷1）：一律取 Phases 中首个 Status≠complete 的阶段名，
@@ -305,6 +318,216 @@ def load_plans(root: Path) -> list[Plan]:
     return [parse_plan(p, root) for p in sorted((root / ".planning").glob("*/task_plan.md"))]
 
 
+# —— --check-fresh：看板源指纹（plan 内容哈希 + 配置哈希 + 生成器版本）——
+# 新鲜度以内容指纹为准：只 touch 不改内容的 plan 不误报；看板缺指纹（旧版生成/手工替换）视为过期，
+# 此时用 mtime 兜底列出晚于看板的 plan，保证「哪个 plan 更新」可定位。
+
+def _sha12(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()[:12]
+
+
+def _fingerprint_parts(plans: list[Plan], cfg: dict) -> tuple[str, str, dict[str, str]]:
+    cfg_hash = _sha12(json.dumps(cfg, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+    sources = {p.rel: _sha12(p.path.read_bytes()) for p in plans}
+    return BOARD_VERSION, cfg_hash, sources
+
+
+def fingerprint_line(plans: list[Plan], cfg: dict) -> str:
+    version, cfg_hash, sources = _fingerprint_parts(plans, cfg)
+    parts = [f"{version} {cfg_hash}"]
+    parts += [f"{digest} {rel}" for rel, digest in sorted(sources.items())]
+    return "<!-- plan-sources: " + " | ".join(parts) + " -->"
+
+
+def parse_fingerprint(board_text: str) -> tuple[str, str, dict[str, str]] | None:
+    for line in board_text.splitlines():
+        m = FINGERPRINT_RE.match(line.strip())
+        if not m:
+            continue
+        parts = [part for part in m.group(1).split(" | ") if part]
+        head = parts[0].split(" ", 1) if parts else []
+        if len(head) != 2:
+            return None
+        sources = {}
+        for part in parts[1:]:
+            digest, _, rel = part.partition(" ")
+            if not rel:
+                return None
+            sources[rel] = digest
+        return head[0], head[1], sources
+    return None
+
+
+def check_fresh(root: Path, cfg: dict, plans: list[Plan]) -> int:
+    """校验派生看板是否反映当前 plan/配置；过期时列明哪个源已变化并非零退出。"""
+    board_path = root / cfg["board"]["path"]
+    try:
+        board_rel = board_path.relative_to(root).as_posix()
+    except ValueError:
+        board_rel = str(board_path)
+    if not board_path.is_file():
+        print(f"[过期] 看板不存在：{board_rel}；{WRITE_HINT}。", file=sys.stderr)
+        return 1
+    embedded = parse_fingerprint(board_path.read_text(encoding="utf-8"))
+    version, cfg_hash, sources = _fingerprint_parts(plans, cfg)
+    if embedded is None:
+        print(f"[过期] 看板缺少源指纹（旧版生成或被手工替换），无法校验；{WRITE_HINT}。",
+              file=sys.stderr)
+        board_mtime = board_path.stat().st_mtime
+        for plan in plans:
+            if plan.path.stat().st_mtime > board_mtime:
+                print(f"  - {plan.rel}（mtime 晚于看板）", file=sys.stderr)
+        return 1
+    old_version, old_cfg_hash, old_sources = embedded
+    issues = []
+    if old_version != version:
+        issues.append(f"看板生成器版本变化（{old_version} → {version}）")
+    if old_cfg_hash != cfg_hash:
+        issues.append(f"配置已更新：{CONFIG_REL}")
+    for rel, digest in sorted(sources.items()):
+        if rel not in old_sources:
+            issues.append(f"{rel}（新增 plan）")
+        elif old_sources[rel] != digest:
+            issues.append(f"{rel}（plan 已更新）")
+    for rel in sorted(old_sources):
+        if rel not in sources:
+            issues.append(f"{rel}（plan 已移除）")
+    if issues:
+        print("[过期] 派生看板落后于源，以下内容已变化：", file=sys.stderr)
+        for issue in issues:
+            print(f"  - {issue}", file=sys.stderr)
+        print(f"{WRITE_HINT}。", file=sys.stderr)
+        return 1
+    print(f"看板新鲜：{board_rel} 与 {len(sources)} 个 plan 一致。")
+    return 0
+
+
+# —— create-time lint（--lint）：只报结构问题，不改 plan ——
+# 规则：### Phase N: 标题格式 / 每 Phase 恰一行 **Status:** / Next Step ≤10 条 /
+#       Phase 项为 - [ ]|- [x] 形式 / 禁止裸编号（编号后无任务描述）；HTML 注释整段跳过。
+
+@dataclass
+class LintIssue:
+    rel: str
+    line: int
+    rule: str
+    message: str
+
+    def format(self) -> str:
+        return f"{self.rel}:{self.line}: [{self.rule}] {self.message}"
+
+
+BARE_ID_RE = re.compile(r"^(?:[A-Za-z]{1,3}\d+|\d+(?:[.\-]\d+)*)[：:。，,.]?$")
+
+
+def _todo_body(text: str) -> str:
+    return re.sub(r"^-\s*(?:\[(?:x|X| )\]\s*)?", "", text).strip()
+
+
+def _lint_file(path: Path, root: Path) -> list[LintIssue]:
+    rel = path.relative_to(root).as_posix()
+    issues: list[LintIssue] = []
+
+    def add(line_no: int, rule: str, message: str) -> None:
+        issues.append(LintIssue(rel, line_no, rule, message))
+
+    section, section_line = None, 0
+    phase: tuple[str, int] | None = None
+    phase_status: list[int] = []
+    next_step: list[int] = []
+    in_comment = False
+
+    def close_phase() -> None:
+        nonlocal phase, phase_status
+        if phase is None:
+            return
+        name, head_line = phase
+        if not phase_status:
+            add(head_line, "Status 行", f"Phase「{name}」缺少 **Status:** 行（应恰好 1 个）")
+        elif len(phase_status) > 1:
+            for line_no in phase_status[1:]:
+                add(line_no, "Status 行",
+                    f"Phase「{name}」出现 {len(phase_status)} 个 **Status:** 行（应恰好 1 个）")
+        phase, phase_status = None, []
+
+    def close_next_step() -> None:
+        nonlocal next_step
+        if len(next_step) > 10:
+            add(section_line, "Next Step 条数",
+                f"Next Step 共 {len(next_step)} 条（上限 10 条），第 11 条在第 {next_step[10]} 行")
+        next_step = []
+
+    for line_no, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        stripped = raw.strip()
+        if in_comment:
+            if "-->" in stripped:
+                in_comment = False
+            continue
+        if stripped.startswith("<!--"):
+            if "-->" not in stripped:
+                in_comment = True
+            continue
+        if stripped.startswith("## "):
+            close_phase()
+            if section == "Next Step":
+                close_next_step()
+            section, section_line = stripped[3:].strip(), line_no
+            continue
+        if re.match(r"^###\s+[Pp]hase", stripped):
+            close_phase()
+            m = PHASE_RE.match(stripped)
+            if not m:
+                add(line_no, "Phase 标题",
+                    f"Phase 标题格式应为「### Phase N: 名称」，实际：{stripped}")
+                continue
+            phase, phase_status = (m.group(1), line_no), []
+            continue
+        if not stripped:
+            continue
+        if section == "Next Step":
+            next_step.append(line_no)
+            body = _todo_body(stripped)
+            if BARE_ID_RE.match(body):
+                add(line_no, "裸编号", f"编号后必须跟任务描述：{body}")
+            continue
+        if phase is None:
+            continue
+        if STATUS_MARK_RE.search(stripped):
+            phase_status.append(line_no)
+            continue
+        if stripped.startswith("-"):
+            if re.match(r"^-\s*\[(?:x|X| )\]\s*\S", stripped):
+                body = _todo_body(stripped)
+                if BARE_ID_RE.match(body):
+                    add(line_no, "裸编号", f"编号后必须跟任务描述：{body}")
+                continue
+            if re.match(r"^-\s*(?:plan|owner):\s*\S", stripped):
+                continue
+            add(line_no, "Phase 项格式", f"Phase 项须为「- [ ]」/「- [x]」形式，实际：{stripped}")
+    close_phase()
+    if section == "Next Step":
+        close_next_step()
+    return issues
+
+
+def lint_plans(plans: list[Plan]) -> list[LintIssue]:
+    issues: list[LintIssue] = []
+    for plan in plans:
+        issues.extend(_lint_file(plan.path, plan.root))
+    return issues
+
+
+def run_lint(plans: list[Plan]) -> int:
+    issues = lint_plans(plans)
+    if issues:
+        for issue in issues:
+            print(issue.format(), file=sys.stderr)
+        print(f"lint 失败：{len(issues)} 处问题（{len(plans)} 个 plan）。", file=sys.stderr)
+        return 1
+    print(f"lint ok：{len(plans)} 个 plan 无结构问题。")
+    return 0
+
+
 def _section(plan: Plan, name: str) -> str:
     return " ".join(line.strip() for line in plan.sections.get(name, []) if line.strip())
 
@@ -343,6 +566,7 @@ def render(plans: list[Plan], cfg: dict, archive: str | None = None) -> str:
         "",
         f"> **自动生成，勿手改**（`python3 scripts/plan-status.py --write`，生成于 {now}）。",
         "> 唯一真源：`.planning/*/task_plan.md`。",
+        fingerprint_line(plans, cfg),
     ]
     if archive:
         out.append(f"> 历史全文见 `{archive}`。")
@@ -401,6 +625,16 @@ def render(plans: list[Plan], cfg: dict, archive: str | None = None) -> str:
         # 回退：逐流列出仍在推进的流，不合并（stream 无语义 P 字段，P0 以"仍有未完成阶段"近似）。
         derived = [s for s in streams if s[1] and s[1].complete < s[1].total and _next_step_lines(s[1])]
         out += [f"- 自动推导：{name}" for name, _, _ in derived] or ["—"]
+
+    # 最近完成（写法规约 ≤10 条，新的在上）：只渲染 portfolio 节，超出截断并注明总数。
+    recent = [l.strip() for l in portfolio.sections.get("最近完成", []) if l.strip()]
+    out += ["", "## 最近完成", ""]
+    if recent:
+        out += [_todo_line(l) for l in recent[:10]]
+        if len(recent) > 10:
+            out += ["", f"> 共 {len(recent)} 条，仅显示最近 10 条。"]
+    else:
+        out.append("—")
 
     out += ["", "## 流表", "", STREAM_TABLE_HEADER, "|---|---|---|---|"]
     out += rows
@@ -496,10 +730,26 @@ def selftest(plans: list[Plan], cfg: dict) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="从 .planning/*/task_plan.md 派生 Markdown 进度看板（只读 .planning）。"
+        description="从 .planning/*/task_plan.md 派生 Markdown 进度看板（只读 .planning）。",
+        epilog=(
+            "刷新时机：收口回执后立即执行 --write；guard 每 5 分钟执行 --write；"
+            "交接第 0 步执行 --write 后接 --check-fresh。"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--write", action="store_true", help="写入看板文件（路径读配置 board.path）")
     parser.add_argument("--selftest", action="store_true", help="对当前 plan 跑解析断言")
+    parser.add_argument(
+        "--check-fresh",
+        action="store_true",
+        help="校验看板是否落后于各 plan/配置（过期列明来源并非零退出；新鲜时单行输出）",
+    )
+    parser.add_argument(
+        "--lint",
+        action="store_true",
+        help="create-time lint：Phase 标题格式/单 Status 行/Next Step ≤10/Phase 项格式/裸编号"
+             "（失败按 文件:行号 列出并非零退出）",
+    )
     parser.add_argument("--root", help="目标仓根目录（默认：cwd 向上找 .planning）")
     parser.add_argument(
         "--archive",
@@ -513,6 +763,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.selftest:
         selftest(plans, cfg)
         return 0
+    if args.lint:
+        return run_lint(plans)
+    if args.check_fresh:
+        return check_fresh(root, cfg, plans)
 
     board = render(plans, cfg, archive=args.archive)
     if args.write:
