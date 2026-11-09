@@ -318,6 +318,8 @@ class Doctor:
             entries.append({"path": path, "runtime": "qoder", "custom": True})
         oc_dir = self.root / ".opencode/agent"
         for path in sorted(oc_dir.glob("*.md")):
+            if path.name.startswith("crew-"):
+                continue  # managed 组合基础代理，不是项目角色
             custom = path.name.startswith("custom-")
             entries.append({"path": path, "runtime": "opencode", "custom": custom})
         for entry in entries:
@@ -1008,13 +1010,54 @@ class Doctor:
                 problems.append(f"{role_id}: basePointersPresent=false")
             if not report["composedSha256"]:
                 problems.append(f"{role_id}: 缺 composedSha256")
-            if entry["runtime"] == "qoder" and "Read" not in dispatch_lib.qoder_tools(outcome):
-                problems.append(
-                    f"{role_id}: Qoder 角色未允许 Read（B2 initialPrompt 不可用，配置错误）")
+
         if problems:
             return Result("role.compose", "fail", "；".join(problems[:20]),
                           evidence={"roles": len(entries)})
         return Result("role.compose", "pass", f"{len(entries)} 个角色组合通过（append-only，无残留 token）")
+
+    def check_role_composed(self) -> Result:
+        config = self.config() or {}
+        manifest = self.manifest() or {}
+        roles = config.get("roles") if isinstance(config.get("roles"), dict) else {}
+        enabled = roles.get("enabled") if isinstance(roles.get("enabled"), list) else list(CORE_IDS)
+        manifest_entries = {
+            str(item.get("path")): item
+            for item in (manifest.get("composedAgents") or [])
+            if isinstance(item, dict)
+        }
+        problems: list[str] = []
+        checked = 0
+        for runtime in ("qoder", "opencode"):
+            for role in enabled:
+                try:
+                    dispatch_lib.locate_role(self.root, str(role), runtime)
+                except Exception:  # noqa: BLE001
+                    continue
+                rel = (Path(".qoder/agents/crew") / f"{role}.md" if runtime == "qoder"
+                       else Path(".opencode/agent") / f"crew-{role}.md")
+                path = self.root / rel
+                if not path.is_file():
+                    problems.append(f"缺少组合基础代理：{rel.as_posix()}")
+                    continue
+                entry = manifest_entries.get(rel.as_posix())
+                if not entry:
+                    problems.append(f"manifest 未登记组合基础代理：{rel.as_posix()}")
+                    continue
+                text = read_text(path) or ""
+                if entry.get("sha256") and sha256_text(text) != str(
+                        entry.get("sha256")).removeprefix("sha256:"):
+                    problems.append(f"组合基础代理 hash 不一致：{rel.as_posix()}")
+                    continue
+                outcome = dispatch_lib.build_compose(self.root, str(role), runtime)
+                if not outcome.ok or outcome.composed_body not in text:
+                    problems.append(f"组合基础代理过期：{rel.as_posix()}")
+                    continue
+                checked += 1
+        if problems:
+            return Result("role.composed", "fail", "；".join(problems[:20]))
+        return Result("role.composed", "pass",
+                      f"{checked} 个组合基础代理存在且 hash/内容一致")
 
     def check_role_delivery(self) -> Result:
         crew = self.crew()
@@ -1038,7 +1081,7 @@ class Doctor:
             return Result("role.delivery", "skip", "无 start 记录")
         row = starts[-1]
         problems: list[str] = []
-        if row.get("delivery") not in {"agents-pointer", "opencode-config-dir"}:
+        if row.get("delivery") != "composed-agent":
             problems.append(f"delivery 非法：{row.get('delivery')!r}")
         if not row.get("composedSha256"):
             problems.append("缺 composedSha256")
@@ -1055,7 +1098,7 @@ class Doctor:
             prompt = row.get("promptPath")
             if prompt and not Path(str(prompt)).exists():
                 problems.append(f"promptPath 不存在：{prompt}")
-        if row.get("delivery") == "agents-pointer":
+        if row.get("delivery") == "composed-agent":
             composed = row.get("composedPath") or row.get("promptPath")
             if not composed:
                 problems.append("缺 composedPath")
@@ -1594,7 +1637,7 @@ CHECKS = [
     "docs.duplicate", "docs.pointers", "skill.source", "docs.links",
     "config.schema", "config.paths", "config.identity",
     "role.frontmatter", "role.descriptor", "role.capability", "role.inherit",
-    "role.compose", "role.delivery", "role.gates", "role.names",
+    "role.compose", "role.composed", "role.delivery", "role.gates", "role.names",
     "role.discovery.qoder", "role.discovery.opencode", "role.runtime-direct",
     "role.orphan",
     "runtime.dir", "runtime.state", "runtime.names", "runtime.lock", "runtime.worktree",
@@ -1625,6 +1668,7 @@ METHODS = {
     "role.capability": "check_role_capability",
     "role.inherit": "check_role_inherit",
     "role.compose": "check_role_compose",
+    "role.composed": "check_role_composed",
     "role.delivery": "check_role_delivery",
     "role.gates": "check_role_gates",
     "role.names": "check_role_names",

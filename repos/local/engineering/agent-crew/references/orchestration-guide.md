@@ -108,7 +108,7 @@
 
 - **两栈都完整**：技能源 `templates/agents/qoder/` 与 `templates/agents/opencode/` 各 7 个核心基类；opencode 核心角色全部 `mode: primary`，项目侧由 init 生成同名 stub。**项目不设默认 agent**，主控 tab 显式指定副舵角色。
 - 角色文件位置：Qoder `.qoder/agents/*.md`，opencode `.opencode/agent/*.md`；技能目录不同。opencode 配置/角色/技能**不热重载**，改动后重启会话。
-- **唯一入口**：两栈的启动/提示/关闭/工位变更都走 `python3 scripts/dispatch.py`；Qoder 用 `--agents` 短 JSON（prompt=最小角色名、initialPrompt 指向 composed 文件、tools 从基类映射）交付，opencode 用 `OPENCODE_CONFIG_DIR` 交付。禁止直写 `herdr agent start/prompt/close` 或 runtime `--agent` 直启（`start-*.sh` 走 dispatcher 是唯一例外）。命令与排障见 [herdr-cheatsheet.md](herdr-cheatsheet.md)。
+- **唯一入口**：两栈的启动/提示/关闭/工位变更都走 `python3 scripts/dispatch.py`；Qoder/opencode 均使用 init/upgrade 安装的 managed 组合基础代理（`crew-<role>`）启动。禁止直写 `herdr agent start/prompt/close` 或 runtime `--agent` 直启（`start-*.sh` 走 dispatcher 是唯一例外）。命令与排障见 [herdr-cheatsheet.md](herdr-cheatsheet.md)。
 
 ## 5. 端到端流程（机制）
 

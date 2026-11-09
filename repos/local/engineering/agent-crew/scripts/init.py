@@ -680,6 +680,73 @@ def role_stub_path(runtime: str, role: str) -> Path:
     return Path(".opencode/agent") / f"{role}.md"
 
 
+def composed_agent_path(runtime: str, role: str) -> Path:
+    if runtime == "qoder":
+        return Path(".qoder/agents/crew") / f"{role}.md"
+    return Path(".opencode/agent") / f"crew-{role}.md"
+
+
+def composed_agent_text(root: Path, runtime: str, role: str,
+                        skill_root: Path | None = None) -> str:
+    if dispatch_lib is None:
+        raise InitError("dispatch 模块不可用，无法生成组合基础代理")
+    try:
+        outcome = dispatch_lib.build_compose(root, role, runtime, skill_root=skill_root)
+    except Exception as exc:  # noqa: BLE001
+        raise InitError(f"组合基础代理失败（{runtime}/{role}）：{exc}") from exc
+    if not outcome.ok:
+        raise InitError(f"组合基础代理失败（{runtime}/{role}）：{outcome.errors}")
+    description = dispatch_lib.scalar(
+        outcome.base_frontmatter["fields"].get("description", "")) or role
+    if runtime == "qoder":
+        descriptor = {
+            "id": f"crew-{role}",
+            "runtime": "qoder",
+            "composed": True,
+            "managed": True,
+            "source": outcome.report.get("baseSource"),
+            "override": outcome.role_path.relative_to(root).as_posix(),
+        }
+        return (
+            "---\n"
+            f"name: crew-{role}\n"
+            f"description: {json.dumps(description, ensure_ascii=False)}\n"
+            "---\n"
+            "<!-- crew-role\n"
+            f"{json.dumps(descriptor, ensure_ascii=False)}\n"
+            "-->\n"
+            f"{outcome.composed_body}"
+        )
+    raw = outcome.base_frontmatter["raw"].strip()
+    return f"---\n{raw}\n---\n{outcome.composed_body}"
+
+
+def regenerate_composed_agents(root: Path, skill_root: Path | None = None) -> list[dict]:
+    config_path = root / CONFIG_REL
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    roles = config.get("roles") if isinstance(config.get("roles"), dict) else {}
+    enabled = roles.get("enabled") if isinstance(roles.get("enabled"), list) else ROLE_ORDER
+    generated: list[dict] = []
+    for runtime in ("qoder", "opencode"):
+        for role in enabled:
+            try:
+                dispatch_lib.locate_role(root, role, runtime)
+            except Exception:  # noqa: BLE001
+                continue
+            try:
+                text = composed_agent_text(root, runtime, role, skill_root=skill_root)
+            except InitError:
+                continue
+            rel = composed_agent_path(runtime, role)
+            target = root / rel
+            atomic_write_text(target, text)
+            generated.append({
+                "path": rel.as_posix(), "runtime": runtime, "role": role,
+                "managed": True, "sha256": sha256_text(text),
+            })
+    return generated
+
+
 def role_stub_content(runtime: str, role: str) -> str:
     spec = role_spec(role)
     title = ROLE_TITLES[role]
@@ -1001,6 +1068,26 @@ def run_check(root: Path, templates: Path, skill_version: str) -> int:
             problems.append(f"缺失 {stub['path']}")
         elif stub.get("sha256") and sha256_file_raw(path) != str(stub["sha256"]).removeprefix("sha256:"):
             modified.append(str(stub["path"]))
+        else:
+            ok += 1
+    for item in manifest.get("composedAgents", []) if isinstance(manifest.get("composedAgents"), list) else []:
+        if not isinstance(item, dict) or not item.get("path"):
+            continue
+        rel = str(item["path"])
+        path = root / rel
+        if not path.is_file():
+            problems.append(f"缺失组合基础代理 {rel}")
+            continue
+        if item.get("sha256") and sha256_text(path.read_text(encoding="utf-8")) != str(item["sha256"]).removeprefix("sha256:"):
+            stale.append(rel)
+            continue
+        try:
+            expected = composed_agent_text(root, str(item.get("runtime") or ""), str(item.get("role") or ""))
+        except InitError as exc:
+            problems.append(str(exc))
+            continue
+        if sha256_text(expected) != sha256_text(path.read_text(encoding="utf-8")):
+            stale.append(f"{rel}#composedStale")
         else:
             ok += 1
     try:
@@ -1332,6 +1419,7 @@ def _run_apply_locked(root: Path, source_dir: Path, templates: Path, skill_versi
                     if target.is_file():
                         role_stubs.append({"path": rel.as_posix(), "managed": False,
                                            "sha256": sha256_file_raw(target)})
+            composed_agents = regenerate_composed_agents(root, skill_root=source_dir)
             manifest = {
                 "manifestVersion": 1,
                 "skillVersion": skill_version,
@@ -1339,6 +1427,7 @@ def _run_apply_locked(root: Path, source_dir: Path, templates: Path, skill_versi
                 "configHash": config_hash(cfg_on_disk),
                 "entries": entries,
                 "roleStubs": role_stubs,
+                "composedAgents": composed_agents,
             }
             atomic_write_text(root / MANIFEST_REL,
                               json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")

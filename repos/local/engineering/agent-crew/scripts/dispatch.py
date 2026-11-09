@@ -5,8 +5,8 @@
   compose  组合 dry-run：读技能基类 + 项目角色文件 → 渲染 token → append-only 组合；
            输出 hash/标题/残留 token/门禁报告；只读，不写项目、不写 agent-log。
   start    启动角色：配置 → 描述符 → 继承/门禁/frontmatter 校验 → compose →
-           运行时通道交付（Qoder `--plugin-dir` + 命名空间 agent；
-           opencode `OPENCODE_CONFIG_DIR`）→ agent-log。
+           运行时使用 init/upgrade 安装的组合基础代理
+           （Qoder `crew-<role>` / opencode `crew-<role>`）→ agent-log。
   prompt / close / status / list / tab / pane  生命周期与工位操作（写 agent-log）。
 
 继承组合规则：
@@ -278,8 +278,8 @@ def _as_dict(value: object) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def token_context(root: Path, config: dict) -> dict[str, str]:
-    skill_root = resolve_skill_root(root, config)
+def token_context(root: Path, config: dict, skill_root: Path | None = None) -> dict[str, str]:
+    skill_root = skill_root or resolve_skill_root(root, config)
     doc = _as_dict(config.get("docNames"))
     board = _as_dict(config.get("board"))
     backlog = _as_dict(config.get("backlog"))
@@ -531,6 +531,7 @@ def validate_descriptor(parsed: dict, config: dict, base_gates: list[str]) -> tu
 @dataclass
 class ComposeOutcome:
     report: dict
+    root: Path | None = None
     rendered_base_body: str = ""
     rendered_overlay_body: str = ""
     composed_body: str = ""
@@ -558,7 +559,8 @@ def base_template_path(skill_root: Path, runtime: str, base_role: str) -> Path:
     return skill_root / "templates" / "agents" / runtime / f"{base_role}.md"
 
 
-def build_compose(root: Path, role_id: str, runtime: str | None) -> ComposeOutcome:
+def build_compose(root: Path, role_id: str, runtime: str | None,
+                  skill_root: Path | None = None) -> ComposeOutcome:
     report: dict = {
         "role": role_id,
         "runtime": runtime,
@@ -582,7 +584,7 @@ def build_compose(root: Path, role_id: str, runtime: str | None) -> ComposeOutco
         "warnings": [],
         "errors": [],
     }
-    outcome = ComposeOutcome(report=report, role_id=role_id, runtime=runtime)
+    outcome = ComposeOutcome(report=report, root=root, role_id=role_id, runtime=runtime)
 
     def fail(message: str) -> None:
         outcome.errors.append(message)
@@ -597,7 +599,7 @@ def build_compose(root: Path, role_id: str, runtime: str | None) -> ComposeOutco
         report["runtime"] = resolved_runtime
         report["overlayPath"] = path.relative_to(root).as_posix()
         report["overlaySha256"] = sha256_file(path)
-        report["delivery"] = "agents-pointer" if resolved_runtime == "qoder" else "opencode-config-dir"
+        report["delivery"] = "composed-agent"
 
         parsed = parse_project_role(root, path, resolved_runtime, custom)
         outcome.project_mode = scalar(parsed["frontmatter"]["fields"].get("mode", ""))
@@ -618,7 +620,7 @@ def build_compose(root: Path, role_id: str, runtime: str | None) -> ComposeOutco
         report["composedGates"] = info["gates"]
 
         if info["base_role"] and info["base_role"] in CORE_ROLES:
-            outcome.skill_root = resolve_skill_root(root, config)
+            outcome.skill_root = skill_root or resolve_skill_root(root, config)
             base_path = base_template_path(outcome.skill_root, resolved_runtime, info["base_role"])
             if not base_path.is_file():
                 fail(f"技能基类缺失：{base_path}（runtime={resolved_runtime}, role={info['base_role']}）")
@@ -651,13 +653,13 @@ def build_compose(root: Path, role_id: str, runtime: str | None) -> ComposeOutco
                     )
                 outcome.disallowed_tools = parse_list(base_fm, "disallowedTools")
 
-            tokens = token_context(root, config)
+            tokens = token_context(root, config, outcome.skill_root)
             rendered_base = render_tokens(base_body, tokens)
             rendered_overlay = render_tokens(parsed["overlay_body"], tokens)
             outcome.rendered_base_body = rendered_base
             outcome.rendered_overlay_body = rendered_overlay
         else:
-            tokens = token_context(root, config)
+            tokens = token_context(root, config, outcome.skill_root)
             rendered_base = ""
             rendered_overlay = render_tokens(parsed["overlay_body"], tokens)
             outcome.rendered_overlay_body = rendered_overlay
@@ -957,58 +959,28 @@ def cmd_compose(args: argparse.Namespace, root: Path) -> int:
     return 0 if outcome.ok else 1
 
 
-CAPABILITY_TOOLS = {
-    "read": ["Read", "Glob", "Grep"],
-    "write-code": ["Write", "Edit"],
-    "write-docs": ["Write", "Edit"],
-    "run-commands": ["Bash"],
-    "dispatch": ["Bash", "Task"],
-    "report": [],
-}
-
-
-def qoder_tools(outcome: ComposeOutcome) -> list[str]:
-    tools: set[str] = set()
-    for capability in (getattr(outcome, "capabilities", None) or []):
-        tools.update(CAPABILITY_TOOLS.get(str(capability), []))
-    for blocked in (getattr(outcome, "disallowed_tools", None) or []):
-        tools.discard(str(blocked))
-    return sorted(tools)
-
-
 def deliver_qoder(outcome: ComposeOutcome, name: str,
                   pane: str, run_dir: Path, permission_mode: str | None) -> dict:
+    run_dir.mkdir(parents=True, exist_ok=True)
     qoder_dir = run_dir / "qoder"
     qoder_dir.mkdir(parents=True, exist_ok=True)
+    composed_path = run_dir / f"{outcome.role_id}.md"
     base_path = qoder_dir / "base.md"
     overlay_path = qoder_dir / "overlay.md"
+    composed_path.write_text(outcome.composed_body, encoding="utf-8")
     base_path.write_text(outcome.rendered_base_body, encoding="utf-8")
     overlay_path.write_text(outcome.rendered_overlay_body, encoding="utf-8")
-    # B2 主路径：组合正文落 <run>/<role>.md，启动只传短 JSON + initialPrompt 短指针。
-    composed_path = run_dir / f"{outcome.role_id}.md"
-    composed_path.write_text(outcome.composed_body, encoding="utf-8")
-    tools = qoder_tools(outcome)
-    if "Read" not in tools:
+    agent_rel = Path(".qoder/agents/crew") / f"{outcome.role_id}.md"
+    agent_path = outcome.root / agent_rel
+    if not agent_path.is_file() or outcome.composed_body not in agent_path.read_text(encoding="utf-8"):
         raise DispatchError(
-            "Qoder 角色基类未允许 Read：B2 initialPrompt 指针无法读取组合正文；"
-            "请修正基类 capabilities/disallowedTools（配置错误，无回退）")
-    description = scalar(outcome.base_frontmatter["fields"].get("description", ""))
-    temp_agent = f"crew-{run_dir.name}".lower()
-    inline = {
-        temp_agent: {
-            "description": description or outcome.role_id,
-            "prompt": outcome.role_id,
-            "initialPrompt": f"你的完整角色说明在 {composed_path}；开始前先读取并遵守。",
-            "tools": tools,
-        }
-    }
+            f"组合基础代理缺失或过期：{agent_rel.as_posix()}；先运行 init --yes 或 upgrade --apply")
     argv = [
         "herdr", "agent", "start", name,
         "--kind", "qodercli",
         "--pane", pane,
         "--",
-        "--agent", temp_agent,
-        "--agents", json.dumps(inline, ensure_ascii=False),
+        "--agent", f"crew-{outcome.role_id}",
     ]
     for tool in outcome.disallowed_tools:
         argv.extend(["--disallowed-tools", tool])
@@ -1016,47 +988,36 @@ def deliver_qoder(outcome: ComposeOutcome, name: str,
         argv.extend(["--permission-mode", permission_mode])
     run_herdr(argv)
     return {
-        "delivery": "agents-pointer",
+        "delivery": "composed-agent",
         "composePath": str(run_dir),
         "promptPath": str(composed_path),
-        "composedPath": str(composed_path),
-        "agentFile": str(composed_path),
+        "composedPath": str(agent_path),
+        "agentFile": str(agent_path),
     }
 
 
 def deliver_opencode(outcome: ComposeOutcome, name: str, pane: str, run_dir: Path) -> dict:
-    config_dir = run_dir / "opencode"
-    agent_dir = config_dir / "agent"
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    composed_path = run_dir / "composed.md"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    composed_path = run_dir / f"{outcome.role_id}.md"
     composed_path.write_text(outcome.composed_body, encoding="utf-8")
-    runtime_name = f"custom-{outcome.role_id}" if outcome.custom else outcome.role_id
-    agent_file = agent_dir / f"{runtime_name}.md"
-    frontmatter_raw = outcome.base_frontmatter["raw"]
-    agent_file.write_text(
-        f"---\n{frontmatter_raw}\n---\n{outcome.composed_body}", encoding="utf-8"
-    )
-    split_output = run_herdr([
-        "herdr", "pane", "split", pane,
-        "--direction", "right",
-        "--no-focus",
-        "--env", f"OPENCODE_CONFIG_DIR={config_dir}",
-    ])
-    new_pane = parse_pane_id(split_output, "herdr pane split")
+    agent_rel = Path(".opencode/agent") / f"crew-{outcome.role_id}.md"
+    agent_path = outcome.root / agent_rel
+    if not agent_path.is_file() or outcome.composed_body not in agent_path.read_text(encoding="utf-8"):
+        raise DispatchError(
+            f"组合基础代理缺失或过期：{agent_rel.as_posix()}；先运行 init --yes 或 upgrade --apply")
     run_herdr([
         "herdr", "agent", "start", name,
         "--kind", "opencode",
-        "--pane", new_pane,
+        "--pane", pane,
         "--",
-        "--agent", runtime_name,
+        "--agent", f"crew-{outcome.role_id}",
     ])
     return {
-        "delivery": "opencode-config-dir",
+        "delivery": "composed-agent",
         "composePath": str(run_dir),
         "promptPath": str(composed_path),
-        "agentFile": str(agent_file),
-        "configDir": str(config_dir),
-        "pane": new_pane,
+        "composedPath": str(agent_path),
+        "agentFile": str(agent_path),
     }
 
 

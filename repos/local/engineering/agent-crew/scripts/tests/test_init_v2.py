@@ -77,13 +77,17 @@ class InitV2Test(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("skillVersion", out)
 
-    def test_role_project_edit_not_drift(self):
+    def test_role_project_edit_marks_composed_stale(self):
         self.run_init("--yes")
         role = self.root / ".qoder/agents/builder.md"
         role.write_text(role.read_text(encoding="utf-8") + "\n项目补充\n", encoding="utf-8")
         code, out = self.run_init("--check")
+        self.assertEqual(code, 1, out)
+        self.assertIn("composedStale", out)
+        code, out = self.run_init("--yes")
         self.assertEqual(code, 0, out)
-        self.assertIn("项目修改", out)
+        code, out = self.run_init("--check")
+        self.assertEqual(code, 0, out)
 
     def test_install_log_fields_and_result(self):
         self.run_init("--yes")

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -18,6 +19,10 @@ SKILL_DIR = Path(__file__).resolve().parent.parent.parent
 DOCTOR = SKILL_DIR / "scripts" / "doctor.py"
 DISPATCH = SKILL_DIR / "scripts" / "dispatch.py"
 INIT = SKILL_DIR / "scripts" / "init.py"
+_spec = importlib.util.spec_from_file_location("dispatch_fixture", DISPATCH)
+dispatch_mod = importlib.util.module_from_spec(_spec)
+sys.modules["dispatch_fixture"] = dispatch_mod
+_spec.loader.exec_module(dispatch_mod)
 QODER_TEMPLATES = SKILL_DIR / "templates" / "agents" / "qoder"
 OPENCODE_TEMPLATES = SKILL_DIR / "templates" / "agents" / "opencode"
 
@@ -157,6 +162,7 @@ class ProjectFixture:
         self.write_role("qoder", "builder")
         self.write_role("qoder", "reviewer")
         self.write_role("opencode", "firstmate")
+        self.composed_entries = self.write_composed_agents()
         self.write_agents()
         self.script = self.root / "scripts/dispatch.py"
         self.script.parent.mkdir(parents=True)
@@ -228,6 +234,37 @@ class ProjectFixture:
         )
         return path
 
+    def write_composed_agents(self) -> list[dict]:
+        entries: list[dict] = []
+        for runtime, role in (("qoder", "builder"), ("qoder", "reviewer"),
+                              ("opencode", "firstmate")):
+            outcome = dispatch_mod.build_compose(self.root, role, runtime)
+            if not outcome.ok:
+                continue
+            desc = dispatch_mod.scalar(
+                outcome.base_frontmatter["fields"].get("description", "")) or role
+            if runtime == "qoder":
+                rel = Path(".qoder/agents/crew") / f"{role}.md"
+                descriptor = {
+                    "id": f"crew-{role}", "runtime": "qoder", "composed": True,
+                    "managed": True, "source": outcome.report.get("baseSource"),
+                    "override": outcome.role_path.relative_to(self.root).as_posix(),
+                }
+                text = ("---\n" f"name: crew-{role}\n"
+                        f"description: {json.dumps(desc, ensure_ascii=False)}\n---\n"
+                        "<!-- crew-role\n"
+                        f"{json.dumps(descriptor, ensure_ascii=False)}\n-->\n"
+                        f"{outcome.composed_body}")
+            else:
+                rel = Path(".opencode/agent") / f"crew-{role}.md"
+                text = f"---\n{outcome.base_frontmatter['raw'].strip()}\n---\n{outcome.composed_body}"
+            path = self.root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+            entries.append({"path": rel.as_posix(), "runtime": runtime, "role": role,
+                            "managed": True, "sha256": text_sha(path)})
+        return entries
+
     def write_agents(self, block: str | None = None, outside: str = "# AGENTS\n\n项目自有内容。\n") -> None:
         if block is None:
             block = "\n".join([
@@ -257,6 +294,7 @@ class ProjectFixture:
                  "blockSha256": block_sha(agents), "renderVersion": "2.1.0"},
             ],
             "roleStubs": [],
+            "composedAgents": list(getattr(self, "composed_entries", [])),
         }
 
     def write_manifest(self, data: dict | None = None) -> None:

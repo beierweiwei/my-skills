@@ -167,6 +167,11 @@ def apply_upgrade(root: Path, confirm: bool, version: str, source_dir: Path) -> 
                     config["skillVersion"] = version
                     init_lib.atomic_write_text(
                         config_path, json.dumps(config, ensure_ascii=False, indent=2) + "\n")
+            try:
+                manifest["composedAgents"] = init_lib.regenerate_composed_agents(
+                    root, skill_root=source_dir)
+            except init_lib.InitError as exc:
+                raise UpgradeError(f"组合基础代理重建失败：{exc}") from exc
             _refresh_manifest_hashes(root, manifest)
             manifest["skillVersion"] = version
             _write_manifest(root, manifest)

@@ -8,8 +8,8 @@
 ④ 受保护标题冲突 rc=1（`## 引用`）；
 ⑤ 项目 frontmatter 权限/工具字段拒绝；
 ⑥ gates 只追加；列核心 gate → rc=1；
-⑦ Qoder 命令构造（--agents 短 JSON + initialPrompt 指针；Read 受限 fail closed）与 delivery；
-⑧ opencode 命令构造（OPENCODE_CONFIG_DIR pane + config-dir 组合 agent 文件）与 delivery；
+⑦ Qoder 命令构造（--agent crew-<role>；组合基础代理缺失/过期 fail closed）与 delivery；
+⑧ opencode 命令构造（--agent crew-<role>）与 delivery；
 ⑨ agent-log 字段（delivery/composedSha256/baseRef/overlaySha256/composePath）；
 ⑩ 项目角色文件零写入、不生成第二份角色文件；
 ⑪ fail-closed：缺 skillRoot、未知 token、extends/managed 非法、自定义角色越权。
@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -31,6 +32,10 @@ from pathlib import Path
 
 SKILL_DIR = Path(__file__).resolve().parent.parent.parent
 DISPATCH = SKILL_DIR / "scripts" / "dispatch.py"
+_spec = importlib.util.spec_from_file_location("dispatch_under_test", DISPATCH)
+dispatch_mod = importlib.util.module_from_spec(_spec)
+sys.modules["dispatch_under_test"] = dispatch_mod
+_spec.loader.exec_module(dispatch_mod)
 QODER_TEMPLATES = SKILL_DIR / "templates" / "agents" / "qoder"
 OPENCODE_TEMPLATES = SKILL_DIR / "templates" / "agents" / "opencode"
 
@@ -214,7 +219,32 @@ class DispatchTest(unittest.TestCase):
                       f"stdout={proc.stdout}\nstderr={proc.stderr}")
         return proc.returncode, report
 
+    def _write_composed(self, runtime: str, role: str) -> None:
+        outcome = dispatch_mod.build_compose(self.root, role, runtime)
+        if not outcome.ok:
+            return
+        desc = dispatch_mod.scalar(
+            outcome.base_frontmatter["fields"].get("description", "")) or role
+        if runtime == "qoder":
+            rel = Path(".qoder/agents/crew") / f"{role}.md"
+            descriptor = {
+                "id": f"crew-{role}", "runtime": "qoder", "composed": True,
+                "managed": True, "source": outcome.report.get("baseSource"),
+                "override": outcome.role_path.relative_to(self.root).as_posix(),
+            }
+            text = ("---\n" f"name: crew-{role}\n"
+                    f"description: {json.dumps(desc, ensure_ascii=False)}\n---\n"
+                    "<!-- crew-role\n" f"{json.dumps(descriptor, ensure_ascii=False)}\n-->\n"
+                    f"{outcome.composed_body}")
+        else:
+            rel = Path(".opencode/agent") / f"crew-{role}.md"
+            text = f"---\n{outcome.base_frontmatter['raw'].strip()}\n---\n{outcome.composed_body}"
+        path = self.root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
     def start(self, role: str, runtime: str, pane: str = "wX:p1") -> subprocess.CompletedProcess:
+        self._write_composed(runtime, role)
         return self.run_dispatch(
             "start", "--role", role, "--runtime", runtime, "--pane", pane, "--json",
         )
@@ -255,7 +285,7 @@ class DispatchTest(unittest.TestCase):
         self.assertEqual([], report["residualSkillRootTokens"])
         self.assertTrue(report["basePointersPresent"])
         self.assertTrue(report["composedSha256"])
-        self.assertEqual("agents-pointer", report["delivery"])
+        self.assertEqual("composed-agent", report["delivery"])
 
     def test_compose_no_section_merge_and_base_first_order(self):
         rc, _ = self.compose("builder", "qoder")
@@ -392,30 +422,23 @@ class DispatchTest(unittest.TestCase):
         self.assertEqual("wX:p1", argv[argv.index("--pane") + 1])
         self.assertNotIn("--append-system-prompt", argv)
         self.assertNotIn("--plugin-dir", argv)
-        self.assertIn("--agents", argv)
-        self.assertFalse([item for item in argv if "\n" in item], argv)
-        temp_agent = argv[argv.index("--agent") + 1]
-        inline = json.loads(argv[argv.index("--agents") + 1])
-        self.assertEqual([temp_agent], list(inline))
-        definition = inline[temp_agent]
-        self.assertEqual("builder", definition["prompt"])
-        self.assertIn("Read", definition["tools"])
-        self.assertIn("Bash", definition["tools"])
-        composed_path = Path(definition["initialPrompt"].split("在 ", 1)[1].split("；", 1)[0])
-        self.assertTrue(composed_path.is_file(), definition["initialPrompt"])
-        composed = composed_path.read_text(encoding="utf-8")
-        self.assertIn("BASE_ONLY_MARKER", composed)
-        self.assertIn("PROJECT_ONLY_MARKER", composed)
-        self.assertIn("## 职责边界", composed)
-        self.assertIn("## 项目约定", composed)
+        self.assertNotIn("--agents", argv)
+        self.assertEqual("crew-builder", argv[argv.index("--agent") + 1])
+        agent_path = self.root / ".qoder/agents/crew/builder.md"
+        self.assertTrue(agent_path.is_file())
+        agent_text = agent_path.read_text(encoding="utf-8")
+        self.assertIn("name: crew-builder", agent_text)
+        self.assertIn("BASE_ONLY_MARKER", agent_text)
+        self.assertIn("PROJECT_ONLY_MARKER", agent_text)
+        self.assertIn("## 职责边界", agent_text)
+        self.assertIn("## 项目约定", agent_text)
 
         row = self.agent_log()[-1]
         self.assertEqual("start", row["action"])
         self.assertEqual("builder", row["role"])
         self.assertEqual("qoder", row["runtime"])
-        self.assertEqual("agents-pointer", row["delivery"])
-        self.assertEqual(str(composed_path), row["composedPath"])
-        self.assertEqual(str(composed_path), row["promptPath"])
+        self.assertEqual("composed-agent", row["delivery"])
+        self.assertEqual(str(agent_path), row["composedPath"])
         self.assertEqual("base", row["policySource"])
         self.assertIn("templates/agents/qoder/builder.md", row["baseRef"])
         self.assertIn("2.1.0", row["baseRef"])
@@ -442,53 +465,38 @@ class DispatchTest(unittest.TestCase):
 
     # ---------- ⑧ opencode 命令构造 + 交付 ----------
 
-    def test_qoder_read_disallowed_fails_closed(self):
-        base = self.skill / "templates/agents/qoder/reviewer.md"
-        text = base.read_text(encoding="utf-8").replace(
-            "disallowedTools: [Write, Edit]", "disallowedTools: [Read, Write, Edit]")
-        base.write_text(text, encoding="utf-8")
-        self.write_role("qoder", "reviewer", body="# Reviewer\n## 项目补充\n项目补充。\n")
-        proc = self.start("reviewer", "qoder", pane="wX:p3")
-        self.assertEqual(1, proc.returncode)
-        self.assertIn("Read", proc.stderr)
-
-    def test_opencode_config_dir_delivery_and_composed_file(self):
+    def test_opencode_composed_agent_delivery(self):
         _, compose_report = self.compose("firstmate", "opencode")
         proc = self.start("firstmate", "opencode", pane="wX:pSRC")
         self.assertEqual(0, proc.returncode, proc.stderr)
         calls = self.herdr_calls()
-        splits = [c for c in calls if c[:2] == ["pane", "split"]]
-        self.assertEqual(1, len(splits), calls)
-        env_values = [splits[0][i + 1] for i, item in enumerate(splits[0]) if item == "--env"]
-        self.assertTrue(any(v.startswith("OPENCODE_CONFIG_DIR=") for v in env_values), splits)
+        self.assertFalse([c for c in calls if c[:2] == ["pane", "split"]], calls)
         starts = [c for c in calls if c[:2] == ["agent", "start"]]
         self.assertEqual(1, len(starts), calls)
         argv = starts[0]
         self.assertEqual("opencode", argv[argv.index("--kind") + 1])
-        self.assertEqual("wX:pNEW", argv[argv.index("--pane") + 1])
-        self.assertEqual("firstmate", argv[argv.index("--agent") + 1])
+        self.assertEqual("wX:pSRC", argv[argv.index("--pane") + 1])
+        self.assertEqual("crew-firstmate", argv[argv.index("--agent") + 1])
 
         row = self.agent_log()[-1]
-        self.assertEqual("opencode-config-dir", row["delivery"])
+        self.assertEqual("composed-agent", row["delivery"])
         self.assertEqual(compose_report["composedSha256"], row["composedSha256"])
-        compose_root = Path(row["composePath"])
-        self.assertIn(str(self.root / ".git/crew/compose"), str(compose_root))
-        agent_file = compose_root / "opencode/agent/firstmate.md"
+        agent_file = self.root / ".opencode/agent/crew-firstmate.md"
         self.assertTrue(agent_file.is_file())
         text = agent_file.read_text(encoding="utf-8")
         self.assertTrue(text.startswith("---\n"))
         frontmatter = text.split("---\n", 2)[1]
-        self.assertIn("permission:", frontmatter)  # 权限只复制基类
+        self.assertIn("permission:", frontmatter)
         self.assertIn("BASE_ONLY_MARKER", text)
         self.assertIn("PROJECT_ONLY_MARKER", text)
         self.assertLess(text.index("BASE_ONLY_MARKER"), text.index("PROJECT_ONLY_MARKER"))
         self.assertNotIn("{{", text)
         self.assertFalse(list((self.root / ".opencode/agent").rglob("*composed*")))
+        self.assertEqual(str(agent_file), row["composedPath"])
 
     # ---------- ⑩ 项目零写入 / 不生成第二份 ----------
 
-    def test_opencode_parse_real_herdr_split_envelope(self):
-        # herdr 0.9.5 实际输出：根 `id=cli:pane:split`，真实 pane 在 result.pane.pane_id
+    def test_pane_split_parse_real_herdr_envelope(self):
         real = HERDR_STUB.replace(
             '{"result": {"pane_id": "wX:pNEW"}}',
             '{"id": "cli:pane:split", "result": {"pane": {"pane_id": "wX:pREAL"}}}',
@@ -496,13 +504,14 @@ class DispatchTest(unittest.TestCase):
         stub = self.bin / "herdr"
         stub.write_text(real, encoding="utf-8")
         stub.chmod(0o755)
-        proc = self.start("firstmate", "opencode", pane="wX:pSRC")
+        proc = self.run_dispatch("pane", "split", "--pane", "wX:pSRC",
+                                 "--direction", "right")
         self.assertEqual(0, proc.returncode, proc.stderr)
-        starts = [c for c in self.herdr_calls() if c[:2] == ["agent", "start"]]
-        self.assertEqual(1, len(starts), starts)
-        self.assertEqual("wX:pREAL", starts[0][starts[0].index("--pane") + 1])
+        self.assertEqual("wX:pREAL", json.loads(proc.stdout)["pane"])
 
     def test_project_role_file_zero_write_and_no_second_copy(self):
+        self._write_composed("qoder", "builder")
+        self._write_composed("opencode", "firstmate")
         before = self.project_snapshot()
         self.assertEqual(0, self.start("builder", "qoder").returncode)
         self.assertEqual(0, self.start("firstmate", "opencode", pane="wX:pS").returncode)

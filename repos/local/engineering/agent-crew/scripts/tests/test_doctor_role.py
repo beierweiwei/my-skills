@@ -144,7 +144,7 @@ class DoctorRoleTest(unittest.TestCase):
         prompt.write_text("BASE_ONLY_MARKER\nPROJECT_ONLY_MARKER\n", encoding="utf-8")
         row = {
             "ts": "2026-11-09T00:00:00Z", "action": "start", "role": "builder",
-            "runtime": "qoder", "agent": "proj-builder", "delivery": "agents-pointer",
+            "runtime": "qoder", "agent": "proj-builder", "delivery": "composed-agent",
             "baseRef": "2.1.0:templates/agents/qoder/builder.md",
             "composedSha256": compose["composedSha256"],
             "composePath": str(run_dir), "promptPath": str(prompt),
@@ -182,7 +182,7 @@ class DoctorRoleTest(unittest.TestCase):
         composed.write_text("BASE_ONLY_MARKER\nPROJECT_ONLY_MARKER\n", encoding="utf-8")
         row = {
             "ts": "2026-11-09T00:00:00Z", "action": "start", "role": "builder",
-            "runtime": "qoder", "agent": "proj-builder", "delivery": "agents-pointer",
+            "runtime": "qoder", "agent": "proj-builder", "delivery": "composed-agent",
             "baseRef": "2.1.0:templates/agents/qoder/builder.md",
             "composedSha256": compose["composedSha256"],
             "composePath": str(run_dir), "promptPath": str(composed),
