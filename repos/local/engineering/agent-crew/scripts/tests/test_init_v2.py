@@ -77,6 +77,41 @@ class InitV2Test(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("skillVersion", out)
 
+    def test_check_pending_agents_returns_2_without_failure_line(self):
+        self.run_init("--yes")
+        agents = self.root / "AGENTS.md"
+        agents.write_text("# AGENTS\n\n项目自有内容。\n", encoding="utf-8")
+        before = agents.read_bytes()
+        code, out = self.run_init("--check")
+        self.assertEqual(code, 2, out)
+        self.assertIn("AGENTS.md 无受管标记（pending）", out)
+        self.assertNotIn("[缺失/失败]", out)
+        self.assertEqual(agents.read_bytes(), before)
+
+    def test_check_pending_takes_precedence_over_composed_stale(self):
+        self.run_init("--yes")
+        (self.root / "AGENTS.md").write_text("# AGENTS\n\n项目自有内容。\n", encoding="utf-8")
+        role = self.root / ".qoder/agents/builder.md"
+        role.write_text(role.read_text(encoding="utf-8") + "\n项目补充\n", encoding="utf-8")
+        code, out = self.run_init("--check")
+        self.assertEqual(code, 2, out)
+        self.assertIn("composedStale", out)
+        self.assertIn("AGENTS.md 无受管标记（pending）", out)
+        self.assertNotIn("[缺失/失败]", out)
+
+    def test_check_real_problem_returns_1(self):
+        self.run_init("--yes")
+        (self.root / "scripts/crew-state.py").unlink()
+        code, out = self.run_init("--check")
+        self.assertEqual(code, 1, out)
+        self.assertIn("[缺失/失败]", out)
+        self.assertIn("crew-state.py", out)
+
+    def test_check_consistent_returns_0(self):
+        self.run_init("--yes")
+        code, out = self.run_init("--check")
+        self.assertEqual(code, 0, out)
+
     def test_role_project_edit_marks_composed_stale(self):
         self.run_init("--yes")
         role = self.root / ".qoder/agents/builder.md"

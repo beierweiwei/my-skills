@@ -1032,7 +1032,7 @@ def run_check(root: Path, templates: Path, skill_version: str) -> int:
             text = (root / rel).read_text(encoding="utf-8") if (root / rel).is_file() else ""
             scan = marker_scan(text) if text else {"state": "pending", "body": ""}
             if scan["state"] == "pending":
-                problems.append("AGENTS.md 无标记（pending）")
+                pending_state = True
             elif scan["state"] == "invalid":
                 problems.append("AGENTS.md 标记非法：" + "；".join(scan["errors"]))
             elif sha256_text(scan["body"]) == str(entry.get("blockSha256") or "").removeprefix("sha256:"):
@@ -1105,13 +1105,14 @@ def run_check(root: Path, templates: Path, skill_version: str) -> int:
         print(f"[项目修改] {rel}（不判漂移）")
     print(f"检查结果：{ok} 项一致，{len(set(problems))} 项失败，"
           f"{len(set(stale))} 项过期，{len(set(modified))} 项项目修改。")
+    # 优先级：真实校验问题 > AGENTS pending > 仅漂移 > 一致。
     if problems:
-        return 1
-    if stale:
         return 1
     if pending_state:
         print("AGENTS.md 无受管标记（pending）：按 docs/crew/AGENTS-block.pending.md 插入后重跑")
         return 2
+    if stale:
+        return 1
     return 0
 
 
