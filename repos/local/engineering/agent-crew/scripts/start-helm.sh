@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 一键启动总舵（helm）。重复执行安全：已在运行则提示并退出。
 # 本脚本是 dispatch.py 的薄包装：tab create / start / prompt / pane close 全部走 dispatcher，
-# 不直接拼 herdr agent start 或 qodercli 参数。
+# 不直接拼 herdr 启动命令或 qodercli 参数。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

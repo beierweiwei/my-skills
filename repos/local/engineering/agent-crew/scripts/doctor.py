@@ -24,6 +24,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+sys.dont_write_bytecode = True  # 不在项目 scripts/ 留 __pycache__
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from crew_paths import CrewPathsError, crew_dir  # noqa: E402
 import dispatch as dispatch_lib  # noqa: E402
@@ -579,7 +580,12 @@ class Doctor:
             "references/crew-rules.md", "references/crew-acceptance.md",
             "references/plan-discipline.md", "SKILL.md",
         ))
-        if pointer_like and skill_root and str(skill_root) not in body:
+        config = self.config() or {}
+        raw_root = config.get("skillRoot")
+        accepted = {str(skill_root)} if skill_root else set()
+        if isinstance(raw_root, str) and raw_root.strip():
+            accepted.add(raw_root.strip().rstrip("/"))
+        if pointer_like and skill_root and not any(item in body for item in accepted):
             problems.append("块内指针未指向当前 skillRoot（stale）")
         stored, _ = self._manifest_block_hash()
         actual = sha256_bytes(body.encode("utf-8"))
@@ -627,6 +633,7 @@ class Doctor:
     def check_docs_pointers(self) -> Result:
         problems: list[str] = []
         files: list[Path] = []
+        config = self.config() or {}
         agents = self.root / "AGENTS.md"
         if agents.is_file():
             files.append(agents)
@@ -645,9 +652,12 @@ class Doctor:
                 "references/crew-rules.md", "references/crew-acceptance.md",
                 "references/plan-discipline.md", "SKILL.md",
             ))
-            if pointer_like and skill_root and str(skill_root) not in body:
+            raw_root = config.get("skillRoot")
+            accepted = {str(skill_root)} if skill_root else set()
+            if isinstance(raw_root, str) and raw_root.strip():
+                accepted.add(raw_root.strip().rstrip("/"))
+            if pointer_like and skill_root and not any(item in body for item in accepted):
                 problems.append("AGENTS.md 块内指针未指向当前 skillRoot（stale）")
-        config = self.config() or {}
         role_ext = ((config.get("hooks") or {}).get("roleExt")
                     if isinstance(config.get("hooks"), dict) else None)
         if isinstance(role_ext, dict):

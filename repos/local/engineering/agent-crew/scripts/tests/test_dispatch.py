@@ -94,6 +94,7 @@ class DispatchTest(unittest.TestCase):
         self._make_skill()
         self.root = self.base / "proj"
         self.root.mkdir()
+        (self.root / ".planning/portfolio").mkdir(parents=True)
         subprocess.run(["git", "init", "-q", str(self.root)], check=True)
         self.config = {
             "projectId": "proj",
@@ -407,6 +408,28 @@ class DispatchTest(unittest.TestCase):
         self.assertEqual([], self.herdr_calls())
 
     # ---------- ⑦ Qoder 命令构造 + 交付 + agent-log ----------
+
+    def test_start_rejects_invalid_config_paths_before_herdr(self):
+        cfg_path = self.root / ".planning/orchestration.json"
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        cfg["hooks"]["paths"] = {"topology": "docs/orchestration/missing.md"}
+        cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n",
+                            encoding="utf-8")
+        proc = self.run_dispatch("start", "--role", "builder", "--runtime", "qoder",
+                                 "--pane", "wX:p1", "--json")
+        self.assertEqual(1, proc.returncode)
+        self.assertIn("config.paths", proc.stderr)
+        self.assertEqual([], self.herdr_calls())
+
+    def test_list_discovers_opencode_custom_agent(self):
+        self.write_role("opencode", "process-auditor", base="reviewer", custom=True,
+                        capabilities=["read", "report"])
+        proc = self.run_dispatch("list", "--json")
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        roles = json.loads(proc.stdout)["roles"]
+        entries = [r for r in roles if r.get("id") == "process-auditor"]
+        self.assertEqual(1, len(entries), entries)
+        self.assertEqual("opencode", entries[0]["runtime"])
 
     def test_qoder_command_delivery_and_agent_log(self):
         _, compose_report = self.compose("builder", "qoder")

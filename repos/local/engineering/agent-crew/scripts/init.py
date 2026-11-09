@@ -445,8 +445,6 @@ def render_context(cfg: dict, root: Path | None = None) -> dict:
         else:
             ctx[name] = "" if value is None else str(value)
     skill_root = ctx.get("skill_root", "").rstrip("/")
-    if root is not None and skill_root and not Path(skill_root).is_absolute():
-        skill_root = str((root / skill_root).resolve())
     ctx["skill_root"] = skill_root
     ctx["crew_rules"] = f"{skill_root}/references/crew-rules.md" if skill_root else ""
     ctx["crew_acceptance"] = (

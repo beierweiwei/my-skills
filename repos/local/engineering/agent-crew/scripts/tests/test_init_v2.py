@@ -89,6 +89,26 @@ class InitV2Test(unittest.TestCase):
         code, out = self.run_init("--check")
         self.assertEqual(code, 0, out)
 
+    def test_refresh_block_keeps_relative_skill_root(self):
+        self.assertEqual(self.run_init("--yes")[0], 0)
+        cfg_path = self.root / ".planning/orchestration.json"
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        cfg["skillRoot"] = ".qoder/skills/agent-crew"
+        cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n",
+                            encoding="utf-8")
+        code, out = self.run_init("--refresh-block", "--confirm")
+        self.assertEqual(0, code, out)
+        text = (self.root / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn(".qoder/skills/agent-crew", text)
+        self.assertNotIn(str(Path(init_v2.SKILL_DIR).resolve()), text)
+        for check in ("agents.block", "docs.pointers"):
+            proc = subprocess.run(
+                [sys.executable, str(self.root / "scripts/doctor.py"), "--root",
+                 str(self.root), "--only", check, "--json"],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+
     def test_install_log_fields_and_result(self):
         self.run_init("--yes")
         line = (self.root / "docs/crew/install-log.jsonl").read_text(

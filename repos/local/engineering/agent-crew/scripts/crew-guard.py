@@ -441,6 +441,9 @@ class Guard:
         elif condition and self.consecutive >= 2:
             reason = f"有待办 {len(pending)} 条且无在跑 worker（连续 {self.consecutive} 轮）"
 
+        plan_path = pending[0].plan if pending else ""
+        if plan_path and not Path(plan_path).is_absolute():
+            plan_path = str((self.root / plan_path).resolve())
         result = {
             "pending": len(pending),
             "residual": len(residual),
@@ -449,7 +452,7 @@ class Guard:
             "consecutive": self.consecutive,
             "woke": False,
             "reason": reason,
-            "planPath": pending[0].plan if pending else "",
+            "planPath": plan_path,
             "workers": [
                 {"name": str(agent.get("name") or ""),
                  "status": str(agent.get("agent_status") or "")}

@@ -36,6 +36,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+sys.dont_write_bytecode = True  # 不在项目 scripts/ 留 __pycache__
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from crew_paths import CrewPathsError, crew_dir  # noqa: E402
 
@@ -274,6 +275,56 @@ def resolve_skill_root(root: Path, config: dict) -> Path:
     return path
 
 
+def config_preflight_errors(root: Path, config: dict) -> list[str]:
+    """start 前置校验：配置路径/hooks schema 不合法时 fail closed，不触碰 Herdr。"""
+    errors: list[str] = []
+    root_abs = root.resolve()
+    hooks = config.get("hooks")
+    if hooks is not None and not isinstance(hooks, dict):
+        errors.append("hooks.schema: hooks 必须是对象")
+        hooks = {}
+    if isinstance(hooks, dict):
+        allowed = {"paths", "roleExt", "customRoles", "gatePolicy", "projectScripts"}
+        unknown = sorted(set(hooks) - allowed)
+        if unknown:
+            errors.append(f"hooks.schema: 未知 hooks 类 {unknown}")
+        paths = hooks.get("paths")
+        if paths is not None and not isinstance(paths, dict):
+            errors.append("hooks.schema: hooks.paths 必须是对象")
+            paths = {}
+        if isinstance(paths, dict):
+            extra = sorted(set(paths) - {"topology", "projectExt"})
+            if extra:
+                errors.append(f"hooks.schema: hooks.paths 未知键 {extra}")
+            topology = paths.get("topology")
+            if topology:
+                target = (root / str(topology)).resolve()
+                if not target.is_file():
+                    errors.append(f"config.paths: paths.topology 不存在：{topology}")
+                elif not target.is_relative_to(root_abs) or ".git" in target.parts:
+                    errors.append(f"config.paths: paths.topology 越界：{topology}")
+            ext = paths.get("projectExt")
+            if ext and not (root / str(ext)).is_dir():
+                errors.append(f"config.paths: paths.projectExt 不存在：{ext}")
+        role_ext = hooks.get("roleExt")
+        if isinstance(role_ext, dict):
+            for role_id, rel in role_ext.items():
+                if not (root / str(rel)).is_file():
+                    errors.append(f"docs.pointers: roleExt 文件不存在：{rel}（{role_id}）")
+    portfolio = root / str(config.get("portfolioDir") or ".planning/portfolio")
+    if not portfolio.is_dir():
+        errors.append(f"config.paths: portfolioDir 不存在：{portfolio.relative_to(root)}")
+    board = _as_dict(config.get("board"))
+    board_path = board.get("path")
+    if board_path:
+        target = (root / str(board_path)).resolve()
+        if not target.is_relative_to(root_abs):
+            errors.append(f"config.paths: board.path 越界：{board_path}")
+        elif not target.parent.is_dir():
+            errors.append(f"config.paths: board.path 父目录不存在：{target.parent}")
+    return errors
+
+
 def _as_dict(value: object) -> dict:
     return value if isinstance(value, dict) else {}
 
@@ -460,6 +511,8 @@ def validate_descriptor(parsed: dict, config: dict, base_gates: list[str]) -> tu
         errors.append(f"{rel}: 描述符 id 非法：{role_id!r}")
     elif role_id != expected_id:
         errors.append(f"{rel}: 描述符 id={role_id!r} 必须等于文件角色名 {expected_id!r}")
+    elif custom and role_id in CORE_ROLES:
+        errors.append(f"{rel}: 自定义角色不得与核心角色同名：{role_id}")
     if descriptor.get("runtime") != runtime:
         errors.append(f"{rel}: 描述符 runtime={descriptor.get('runtime')!r} 与文件落点 {runtime} 不一致")
 
@@ -1022,6 +1075,14 @@ def deliver_opencode(outcome: ComposeOutcome, name: str, pane: str, run_dir: Pat
 
 
 def cmd_start(args: argparse.Namespace, root: Path) -> int:
+    config = load_config(root)
+    preflight = config_preflight_errors(root, config)
+    if preflight:
+        if args.json:
+            print_json({"errors": preflight})
+        for error in preflight:
+            print(f"[拒绝] {error}", file=sys.stderr)
+        return 1
     outcome = build_compose(root, args.role, args.runtime)
     if not outcome.ok:
         if args.json:
@@ -1031,7 +1092,6 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
         return 1
     runtime = outcome.runtime
     assert runtime is not None
-    config = load_config(root)
     errors = ensure_role_enabled(config, args.role, outcome.custom)
     if runtime == "opencode":
         mode = outcome.project_mode
@@ -1184,6 +1244,7 @@ def discover_roles(root: Path) -> list[dict]:
         ("qoder", False, ".qoder/agents/*.md"),
         ("qoder", True, ".qoder/agents/custom/*.md"),
         ("opencode", False, ".opencode/agent/*.md"),
+        ("opencode", True, ".opencode/agent/custom-*.md"),
     ]
     for runtime, custom, pattern in patterns:
         for path in sorted(root.glob(pattern)):

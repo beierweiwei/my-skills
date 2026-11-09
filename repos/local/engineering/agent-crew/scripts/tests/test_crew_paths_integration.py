@@ -71,7 +71,7 @@ class CrewPathsIntegrationTest(unittest.TestCase):
                    "--once", "--json")
         payload = json.loads(proc.stdout)
         self.assertEqual(payload["crewDir"], str(self.crew))
-        self.assertEqual(payload["planPath"], ".planning/flow/task_plan.md")
+        self.assertEqual(payload["planPath"], str((self.worktree / ".planning/flow/task_plan.md").resolve()))
         self.assertGreaterEqual(payload["pending"], 1)
         self.assertIn("wake", payload)
         self.assertFalse((self.worktree / ".git/crew").exists())
