@@ -303,6 +303,9 @@ class DispatchTest(unittest.TestCase):
         rc, report = self.compose("builder", "qoder")
         self.assertEqual(1, rc)
         self.assertIn("引用", report["protectedHeadingConflicts"])
+        started = self.start("builder", "qoder")
+        self.assertEqual(1, started.returncode)
+        self.assertEqual([], self.herdr_calls())
 
     def test_non_protected_duplicate_heading_warns_but_passes(self):
         self.write_role(
@@ -349,6 +352,8 @@ class DispatchTest(unittest.TestCase):
         rc, report = self.compose("builder", "qoder")
         self.assertEqual(1, rc)
         self.assertTrue(any("permission" in err for err in report["errors"]), report)
+        started = self.start("builder", "qoder")
+        self.assertEqual(1, started.returncode)
         self.assertEqual([], self.herdr_calls())
 
     # ---------- ⑥ gates ----------
@@ -367,6 +372,9 @@ class DispatchTest(unittest.TestCase):
         rc, report = self.compose("builder", "qoder")
         self.assertEqual(1, rc)
         self.assertTrue(any("核心 gate" in err for err in report["errors"]), report)
+        started = self.start("builder", "qoder")
+        self.assertEqual(1, started.returncode)
+        self.assertEqual([], self.herdr_calls())
 
     # ---------- ⑦ Qoder 命令构造 + 交付 + agent-log ----------
 
