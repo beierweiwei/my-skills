@@ -56,11 +56,11 @@ python scripts/inone_memory.py ls     --source notes --prefix 杂项/ --limit 50
 
 ## 任务收尾:效用回报(记忆与知识)
 
-对**取用过**的记忆/知识顺手报三态(helped=帮上忙 / unused=没用到 / harmful=帮倒忙 + 一句话理由)——越用越准的反馈信号,只进统计,不改任何条目/文件;没有值得报的就跳过,不凑数:
+对**取用过**的记忆/知识顺手报三态(helped=帮上忙 / unused=没用到 / harmful=帮倒忙 + 一句话理由)——越用越准的反馈信号,只进统计,不改任何条目/文件;没有值得报的就跳过,不凑数。**收尾回报带 `--task` 一句话任务摘要**(当时在做什么任务;溯源页运营面三态明细的「当时任务」列靠它,不带则显示 —):
 
 ```bash
-python scripts/inone_memory.py report --id 12 --outcome helped --reason "按它避开了坑"
-python scripts/inone_memory.py report --kpath wiki/entities/H.md --outcome helped --reason "全文直接可用"
+python scripts/inone_memory.py report --id 12 --outcome helped --reason "按它避开了坑" --task "工单5 运营面重构"
+python scripts/inone_memory.py report --kpath wiki/entities/H.md --outcome helped --reason "全文直接可用" --task "排查 Hindsight 对接"
 ```
 
 记忆部分过时:先 `save` 推实测修正条目(证据=会话经历),再对新条目 `report --outcome helped --supersedes <旧条目id>`(只挂建议不改写,退役由用户终审);可另对旧条目报 `harmful`。

@@ -1501,8 +1501,10 @@ def main(argv: list[str] | None = None) -> int:
     report.add_argument("--supersedes", default=None, metavar="OLD_ENTRY_ID",
                         help="取代建议:指向被修正的旧条目(仅记录,不改写旧条目;"
                              "旧条目退役由用户终审)")
-    report.add_argument("--task-context", default=None, metavar="TEXT",
-                        help="任务上下文(可选)")
+    report.add_argument("--task", "--task-context", dest="task_context",
+                        default=None, metavar="TEXT",
+                        help="当时任务摘要(可选;--task 是 --task-context 的短别名,"
+                             "运营面三态明细「当时任务」列的数据源)")
     report.add_argument("--agent", default=os.environ.get("INONE_AGENT_NAME") or "unknown",
                         help="回报方标识(进事件审计;缺省读 INONE_AGENT_NAME)")
     report.set_defaults(func=_report)
