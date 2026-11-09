@@ -54,6 +54,8 @@ RUNTIME_DIRECT_PATTERNS = (
     re.compile(r"opencode\s+run\b[^\n]*\s--agent\b"),
     re.compile(r"opencode\s+--agent\b"),
 )
+THIRD_PARTY_DIRS = frozenset({".venv", "site-packages", "node_modules"})
+ARCHIVED_DOCS_PREFIX = "docs/历史/"
 
 
 def utc_now() -> str:
@@ -367,6 +369,12 @@ class Doctor:
             if entry.get("path") == "AGENTS.md":
                 return entry.get("blockSha256"), entry.get("renderVersion")
         return None, None
+
+    def _skip_scan_path(self, path: Path, archived: bool = False) -> bool:
+        rel = path.relative_to(self.root).as_posix()
+        if any(part in THIRD_PARTY_DIRS for part in Path(rel).parts):
+            return True
+        return archived and rel.startswith(ARCHIVED_DOCS_PREFIX)
 
     # ================= A. manifest =================
 
@@ -766,8 +774,10 @@ class Doctor:
             files.append(self.root / "AGENTS.md")
         docs = self.root / "docs"
         if docs.is_dir():
-            files.extend(sorted(docs.rglob("*.md")))
-        files.extend(entry["path"] for entry in self.role_entries())
+            files.extend(sorted(path for path in docs.rglob("*.md")
+                                if not self._skip_scan_path(path, archived=True)))
+        files.extend(entry["path"] for entry in self.role_entries()
+                     if not self._skip_scan_path(entry["path"]))
         broken: list[str] = []
         for path in files:
             text = read_text(path) or ""
@@ -1235,14 +1245,15 @@ class Doctor:
         agents = self.root / "AGENTS.md"
         if agents.is_file():
             files.append(agents)
-        docs = self.root / "docs"
-        if docs.is_dir():
-            files.extend(sorted(docs.rglob("*.md")))
+        for rel in ("docs/orchestration", "docs/crew"):
+            base = self.root / rel
+            if base.is_dir():
+                files.extend(sorted(path for path in base.rglob("*.md") if path.is_file()))
         files.extend(entry["path"] for entry in self.role_entries())
         custom = self.root / "scripts/custom"
         if custom.is_dir():
             files.extend(sorted(path for path in custom.rglob("*") if path.is_file()))
-        return files
+        return [path for path in files if not self._skip_scan_path(path)]
 
     def check_role_runtime_direct(self) -> Result:
         hits: list[str] = []

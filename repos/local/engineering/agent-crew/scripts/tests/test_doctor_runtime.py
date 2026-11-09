@@ -152,6 +152,61 @@ class DoctorRuntimeTest(unittest.TestCase):
         self.assertEqual(1, rc, report)
         self.assertIn("agent start", self.fx.item(report, "role.runtime-direct")["detail"])
 
+    def test_role_runtime_direct_flags_agents(self):
+        self.fx.write_agents(outside="# AGENTS\n\nherdr agent start foo\n")
+        rc, report = self.fx.doctor_json("--only", "role.runtime-direct")
+        self.assertEqual(1, rc, report)
+        item = self.fx.item(report, "role.runtime-direct")
+        self.assertEqual("fail", item["status"], item)
+        self.assertIn("AGENTS.md", item["detail"])
+        self.assertIn("agent start", item["detail"])
+
+    def test_role_runtime_direct_ignores_unscoped_docs(self):
+        for rel, command in (
+            ("docs/编排系统.md", "herdr agent start foo"),
+            ("docs/业务落地方案/需求0/需求.md", "herdr tab create foo"),
+            ("docs/crew/只读示例.md", "herdr agent list"),
+        ):
+            path = self.fx.root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"# 文档\n\n{command}\n", encoding="utf-8")
+        rc, report = self.fx.doctor_json("--only", "role.runtime-direct")
+        self.assertEqual(0, rc, report)
+        self.assertEqual("pass", self.fx.item(report, "role.runtime-direct")["status"])
+
+    def test_role_runtime_direct_ignores_third_party_dirs(self):
+        for rel in (
+            "docs/orchestration/.venv/lib/site-packages/pkg/README.md",
+            "docs/crew/node_modules/pkg/README.md",
+            "scripts/custom/.venv/tool.py",
+        ):
+            path = self.fx.root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("herdr agent prompt foo\n", encoding="utf-8")
+        rc, report = self.fx.doctor_json("--only", "role.runtime-direct")
+        self.assertEqual(0, rc, report)
+        self.assertEqual("pass", self.fx.item(report, "role.runtime-direct")["status"])
+
+    def test_role_runtime_direct_flags_role_file(self):
+        path = self.fx.role_path("qoder", "builder")
+        path.write_text(path.read_text(encoding="utf-8") + "\nherdr agent close crew-builder\n",
+                        encoding="utf-8")
+        rc, report = self.fx.doctor_json("--only", "role.runtime-direct")
+        self.assertEqual(1, rc, report)
+        item = self.fx.item(report, "role.runtime-direct")
+        self.assertEqual("fail", item["status"], item)
+        self.assertIn(".qoder/agents/builder.md", item["detail"])
+
+    def test_role_runtime_direct_flags_custom_scripts(self):
+        path = self.fx.root / "scripts/custom/ops.sh"
+        path.parent.mkdir(parents=True)
+        path.write_text("herdr pane split foo\n", encoding="utf-8")
+        rc, report = self.fx.doctor_json("--only", "role.runtime-direct")
+        self.assertEqual(1, rc, report)
+        item = self.fx.item(report, "role.runtime-direct")
+        self.assertEqual("fail", item["status"], item)
+        self.assertIn("scripts/custom/ops.sh", item["detail"])
+
     def test_upgrade_scripts_warn_then_pass(self):
         rc, report = self.fx.doctor_json("--only", "upgrade.scripts")
         self.assertEqual(0, rc, report)
