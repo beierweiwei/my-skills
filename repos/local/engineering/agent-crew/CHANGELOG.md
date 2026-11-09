@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.1.6 — 2026-11-10
+
+### 新增
+
+- `crew-guard.py` 快速叫醒：run_once 记录上一轮 working 数；当「上一轮 working>0、本轮 working=0、且存在 pending」时立即叫醒，不再等连续 2 轮；连续 idle（上一轮也为 0）仍按原 2 轮去抖，冷却与 blocked 优先级不变。
+- helm 模板（`templates/agents/qoder/helm.md`、`templates/agents/opencode/helm.md`）动作清单各补两条：每轮开工检查并消费 `<crew-dir>/guard.wake`；长 prompt/含反引号等特殊字符派单先落临时文件，再用 `"$(cat <file>)"` 传递（BUG-010）。
+
 ## 2.1.5 — 2026-11-10
 
 ### 修复

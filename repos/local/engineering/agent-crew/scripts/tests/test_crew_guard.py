@@ -249,6 +249,56 @@ class WakeConditionTest(GuardTestBase):
         self.assertNotIn("T2", message)
         self.assertNotIn("T3", message)
 
+    def test_working_to_idle_with_pending_wakes_immediately(self):
+        self.write_fixture()
+        self.agents = [{"name": "worker-1", "agent_status": "working"}]
+        guard = self.make_guard()
+
+        first = guard.run_once()
+        self.assertFalse(first["woke"])
+        self.assertEqual(first["consecutive"], 0)
+        self.assertEqual(guard.prev_working, 1)
+
+        self.agents = [{"name": "worker-1", "agent_status": "idle"}]
+        second = guard.run_once()
+        self.assertTrue(second["woke"])
+        self.assertEqual(second["consecutive"], 1)
+        self.assertIn("上一轮 1 个 working 已转 idle", self.prompt_calls[0][1])
+        self.assertIn("T1 可执行任务", self.prompt_calls[0][1])
+
+        # 冷却内不再重复叫醒
+        third = guard.run_once()
+        self.assertFalse(third["woke"])
+        self.assertEqual(len(self.prompt_calls), 1)
+        self.assertTrue(any("冷却中" in line for line in self.logs))
+
+    def test_working_to_idle_without_pending_does_not_wake(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.agents = [{"name": "worker-1", "agent_status": "working"}]
+        guard = self.make_guard()
+        self.assertFalse(guard.run_once()["woke"])
+
+        self.agents = [{"name": "worker-1", "agent_status": "idle"}]
+        result = guard.run_once()
+        self.assertFalse(result["woke"])
+        self.assertEqual(result["consecutive"], 0)
+        self.assertEqual(self.prompt_calls, [])
+
+    def test_consecutive_idle_with_pending_keeps_two_round_debounce(self):
+        self.write_fixture()
+        self.agents = [{"name": "worker-1", "agent_status": "idle"}]
+        guard = self.make_guard()
+
+        first = guard.run_once()
+        self.assertFalse(first["woke"])
+        self.assertEqual(first["consecutive"], 1)
+        self.assertEqual(guard.prev_working, 0)
+
+        second = guard.run_once()
+        self.assertTrue(second["woke"])
+        self.assertEqual(second["consecutive"], 2)
+        self.assertIn("连续 2 轮", self.prompt_calls[0][1])
+
     def test_pending_and_no_running_needs_two_consecutive_rounds(self):
         self.write_fixture()
         self.agents = [{"name": "worker-1", "agent_status": "idle"}]

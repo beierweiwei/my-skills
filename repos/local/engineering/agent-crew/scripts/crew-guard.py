@@ -12,6 +12,7 @@
 - portfolio Backlog 中 T 行且阻塞列无 待 C / blocked / 已完成（complete/done）；
 - 已完成 Phase 的残留 `[ ]` 只记日志，不叫醒。
 在跑口径：Herdr agent_status == working，排除总舵自身与 Captain*；blocked 单独叫醒。
+快速叫醒：上一轮有 working、本轮全部转 idle 且有待办时立即叫醒（仍受 10 分钟冷却）。
 
 用法：
   python3 scripts/crew-guard.py                 # 每 120s 一轮
@@ -355,6 +356,7 @@ class Guard:
     run_status: Callable[[Path, str], tuple[int, str]] = run_plan_status
     log_fn: Callable[[str], None] | None = None
     consecutive: int = field(default=0, init=False)
+    prev_working: int = field(default=0, init=False)
     last_wake_at: float | None = field(default=None, init=False)
     last_write_at: float | None = field(default=None, init=False)
 
@@ -455,6 +457,12 @@ class Guard:
         for todo in residual:
             self.log(f"已完成 Phase 残留 [ ]（仅记日志）：{todo.label}")
 
+        current_working = len(running)
+        prev_working = self.prev_working
+        # worker 从 working 全部转 idle 且仍有待办：立即叫醒，不等连续 2 轮
+        fast_wake = prev_working > 0 and current_working == 0 and bool(pending)
+        self.prev_working = current_working
+
         condition = bool(pending) and not running
         if condition:
             self.consecutive += 1
@@ -467,6 +475,11 @@ class Guard:
                 str(agent.get("name") or agent.get("pane_id") or "?") for agent in blocked
             )
             reason = f"worker 卡住（blocked）：{names}"
+        elif condition and fast_wake:
+            reason = (
+                f"有待办 {len(pending)} 条且无在跑 worker"
+                f"（上一轮 {prev_working} 个 working 已转 idle）"
+            )
         elif condition and self.consecutive >= 2:
             reason = f"有待办 {len(pending)} 条且无在跑 worker（连续 {self.consecutive} 轮）"
 
@@ -520,7 +533,8 @@ class Guard:
 
 def build_parser() -> argparse.ArgumentParser:
     epilog = """\
-叫醒口径：有待办 + 无在跑 worker 连续 2 轮；冷却 10 分钟；blocked 单独叫醒；
+叫醒口径：有待办 + 无在跑 worker 连续 2 轮；若上一轮有 working、本轮全部转 idle
+则立即叫醒（仍受 10 分钟冷却）；blocked 单独叫醒；
 排除总舵自身与 Captain*（按 agent 名）；blocked 判定排除测试探针（agent 名
 s9-/probe-/test- 前缀，或 cwd 在 /tmp 下），真实 blocked 仍叫醒。优先 herdr agent prompt <helm>；总舵 pane
 聚焦时写 <crew-dir>/guard.wake + 通知。叫醒时执行 plan-status.py --check-fresh；
