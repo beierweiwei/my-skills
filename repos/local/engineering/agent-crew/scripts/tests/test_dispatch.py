@@ -325,6 +325,20 @@ class DispatchTest(unittest.TestCase):
         self.assertFalse(report["basePointersPresent"])
         self.assertTrue(any("规则指针" in err for err in report["errors"]), report)
 
+    def test_base_upgrade_propagates_without_project_change(self):
+        before = sha256_file(self.role_path("qoder", "builder"))
+        skill2 = self.base / "skill2"
+        shutil.copytree(self.skill, skill2)
+        upgraded = skill2 / "templates/agents/qoder/builder.md"
+        upgraded.write_text(upgraded.read_text(encoding="utf-8")
+                            + "\n## 升级说明\nV2_ONLY_MARKER\n", encoding="utf-8")
+        self.config["skillRoot"] = str(skill2)
+        self.write_config()
+        rc, report = self.compose("builder", "qoder")
+        self.assertEqual(0, rc, report)
+        self.assertIn("升级说明", report["baseHeadings"])
+        self.assertEqual(before, sha256_file(self.role_path("qoder", "builder")))
+
     # ---------- ⑤ 权限字段拒绝 ----------
     def test_project_frontmatter_permission_rejected(self):
         path = self.role_path("qoder", "builder")
