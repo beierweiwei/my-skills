@@ -66,6 +66,42 @@ PORTFOLIO_PLAN = """# Task Plan: 总览
 | C1 | 待拍板 | P1 | - | - |
 """
 
+BACKLOG_DONE_PORTFOLIO = """# Task Plan: 总览
+
+## Backlog
+
+| # | 目标 | P | 依赖 | 阻塞 |
+|---|---|---|---|---|
+| T1 | 中文已完成 | P1 | - | 已完成 |
+| T2 | 英文 done | P1 | - | done |
+| T3 | 英文 Complete | P1 | - | Complete |
+| T4 | 英文 completed | P1 | - | completed |
+"""
+
+BACKLOG_WAITING_PORTFOLIO = """# Task Plan: 总览
+
+## Backlog
+
+| # | 目标 | P | 依赖 | 阻塞 |
+|---|---|---|---|---|
+| T1 | 待 Captain | P1 | - | 待 Captain |
+| T2 | 留 Captain | P1 | - | 留 Captain |
+| T3 | 待 C1 | P1 | - | 待 C1 |
+"""
+
+BACKLOG_MIXED_PORTFOLIO = """# Task Plan: 总览
+
+## Backlog
+
+| # | 目标 | P | 依赖 | 阻塞 |
+|---|---|---|---|---|
+| T1 | 未完成主线 | P1 | - | - |
+| T2 | 待拍板 | P1 | - | 待 C1 |
+| T3 | 已完成任务 | P1 | - | 已完成 |
+| T4 | 边界词 | P1 | - | incomplete |
+| T5 | 中文未完成 | P1 | - | 未完成 |
+"""
+
 RESIDUAL_ONLY_STREAM = """# Task Plan: Done
 
 ## Phases
@@ -173,6 +209,18 @@ class TodoScanTest(GuardTestBase):
         self.assertFalse(any(text.startswith("C1") for text in texts))
         self.assertEqual([todo.text for todo in residual], ["残留待办B"])
 
+    def test_backlog_completed_rows_are_skipped(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=BACKLOG_DONE_PORTFOLIO)
+        pending, residual = cg.scan_todos(self.root)
+        self.assertEqual(pending, [])
+        self.assertEqual(residual, [])
+
+    def test_backlog_waiting_captain_rows_are_skipped(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=BACKLOG_WAITING_PORTFOLIO)
+        pending, residual = cg.scan_todos(self.root)
+        self.assertEqual(pending, [])
+        self.assertEqual(residual, [])
+
     def test_comment_examples_are_ignored(self):
         self.write_fixture(
             stream=(
@@ -187,6 +235,20 @@ class TodoScanTest(GuardTestBase):
 
 
 class WakeConditionTest(GuardTestBase):
+    def test_backlog_unfinished_rows_still_wake(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=BACKLOG_MIXED_PORTFOLIO)
+        self.agents = [{"name": "worker-1", "agent_status": "idle"}]
+        guard = self.make_guard()
+
+        self.assertFalse(guard.run_once()["woke"])
+        self.assertTrue(guard.run_once()["woke"])
+        message = self.prompt_calls[0][1]
+        self.assertIn("T1 未完成主线", message)
+        self.assertIn("T4 边界词", message)
+        self.assertIn("T5 中文未完成", message)
+        self.assertNotIn("T2", message)
+        self.assertNotIn("T3", message)
+
     def test_pending_and_no_running_needs_two_consecutive_rounds(self):
         self.write_fixture()
         self.agents = [{"name": "worker-1", "agent_status": "idle"}]

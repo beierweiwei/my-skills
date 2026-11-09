@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.1.5 — 2026-11-10
+
+### 修复
+
+- BUG-013：`crew-guard.py` 的 `_parse_backlog` 跳过阻塞列已完成的 T 行——中文按子串「已完成」判定；英文 `complete`/`completed`/`done` 不区分大小写且按 ASCII 字母词边界匹配（`incomplete`/`undone` 不误命中）；已完成项不再计入 pending，避免 guard 对已完成 Backlog 误叫醒。
+
 ## 2.1.4 — 2026-11-10
 
 ### 新增

@@ -9,7 +9,7 @@
 
 待办口径（decisions §1）：
 - 活跃流 plan 中 Phase Status ≠ complete 的未勾选 `[ ]`（排除含 ⏸ / 待 Captain / 留 Captain）；
-- portfolio Backlog 中 T 行且阻塞列无 待 C / blocked；
+- portfolio Backlog 中 T 行且阻塞列无 待 C / blocked / 已完成（complete/done）；
 - 已完成 Phase 的残留 `[ ]` 只记日志，不叫醒。
 在跑口径：Herdr agent_status == working，排除总舵自身与 Captain*；blocked 单独叫醒。
 
@@ -46,6 +46,8 @@ PHASE_RE = re.compile(r"^### Phase\s+\d+\s*[:：]\s*(.+?)\s*$")
 STATUS_RE = re.compile(r"\*\*Status:\*\*\s+(pending|in[ _]progress|complete)")
 TODO_RE = re.compile(r"^\s*-\s*\[\s\]\s*(.+)$")
 PAUSE_MARKS = ("⏸", "待 Captain", "留 Captain")
+# 英文完成态按词边界判定：避免 incomplete / undone 误命中 complete / done
+DONE_RE = re.compile(r"(?<![a-z])(?:complete|completed|done)(?![a-z])")
 COOLDOWN_SECONDS = 600
 WRITE_INTERVAL_SECONDS = 300
 PROBE_NAME_PREFIXES = ("s9-", "probe-", "test-")
@@ -226,6 +228,8 @@ def _parse_backlog(root: Path, path: Path, rel: str, pending: list[Todo]) -> Non
         if any(mark in blocker for mark in ("待 C", "待 Captain", "留 Captain")):
             continue
         if "blocked" in blocker.lower():
+            continue
+        if "已完成" in blocker or DONE_RE.search(blocker.lower()):
             continue
         pending.append(Todo(rel, "Backlog", " ".join(cells[:2]).strip()))
 
