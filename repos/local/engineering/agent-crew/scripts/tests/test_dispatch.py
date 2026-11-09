@@ -314,6 +314,17 @@ class DispatchTest(unittest.TestCase):
         self.assertIn("职责边界", report["duplicateHeadings"])
         self.assertTrue(report["warnings"], report)
 
+    def test_base_rule_pointers_required(self):
+        base = self.skill / "templates/agents/qoder/builder.md"
+        text = base.read_text(encoding="utf-8")
+        start = text.index("## 引用")
+        end = text.index("## 职责边界")
+        base.write_text(text[:start] + text[end:], encoding="utf-8")
+        rc, report = self.compose("builder", "qoder")
+        self.assertEqual(1, rc)
+        self.assertFalse(report["basePointersPresent"])
+        self.assertTrue(any("规则指针" in err for err in report["errors"]), report)
+
     # ---------- ⑤ 权限字段拒绝 ----------
     def test_project_frontmatter_permission_rejected(self):
         path = self.role_path("qoder", "builder")
