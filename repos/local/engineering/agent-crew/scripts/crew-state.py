@@ -6,13 +6,13 @@
 工位：starting -> working -> blocked/done -> closed；
       blocked <-> working；idle ≠ done；done 需回执；只有 closed 才删注册表记录。
 真源：plan 仍是任务状态真源；本脚本只校验门禁、追加事件、重放派生状态，不写 .planning。
-事件：<root>/.git/crew/events.jsonl，一行一事件；应用状态可完全由日志重放重建。
+事件：<git-common-dir>/crew/events.jsonl，一行一事件；应用状态可完全由日志重放重建。
 幂等：幂等键 = <kind>:<id>:<目标状态>:<revision>；同键重复 transition 返回 0 且不追加事件。
 并发：flock 排他锁 + 单次写入 + fsync；崩溃留下的末尾半行/损坏行由 recover 清理。
 门禁：工单/回执/占用/评审/抽验/归档工件由脚本检查；正常路径低输出。
 退出码：0 成功（含幂等重复）；2 非法迁移或门禁不满足；3 事件日志损坏（先 recover）。
 
-工件约定（均在 <root>/.git/crew/）：
+工件约定（均在 <git-common-dir>/crew/，由 crew_paths.crew_dir 解析）：
   tickets/<id>.json   工单：goal|目标、acceptance|验收断言、boundary|边界规则（非空）
   inbox/*.json        回执：task、status(done|blocked|captain|ack)、changed_files[]、
                       evidence[]、work_slot
@@ -46,6 +46,10 @@ import sys
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.dont_write_bytecode = True  # 不在项目 scripts/ 留 __pycache__
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from crew_paths import CrewPathsError, crew_dir  # noqa: E402
 
 TASK_FLOW = {
     "backlog": {"ready", "cancelled"},
@@ -91,13 +95,16 @@ def resolve_root(value: str | None) -> Path:
     for cand in (cur, *cur.parents):
         if (cand / ".git").exists():
             return cand
-    raise SystemExit("crew-state: 未找到 .git，请用 --root <仓根> 指定")
+    return cur  # 非 git：crew_paths 回退 <root>/.crew
 
 
 class Crew:
     def __init__(self, root: Path):
         self.root = root
-        self.dir = root / ".git" / "crew"
+        try:
+            self.dir = crew_dir(root)
+        except CrewPathsError as exc:
+            raise SystemExit(f"crew-state: 运行时目录解析失败：{exc}") from exc
         self.log = self.dir / "events.jsonl"
         self.lock = self.dir / "lock"
 

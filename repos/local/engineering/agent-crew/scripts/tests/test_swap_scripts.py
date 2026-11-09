@@ -121,19 +121,21 @@ class SwapTest(_SwapTest):
         self.assertIn("[更新] scripts/plan-status.py", result.stdout)
         self.assertIn("[新增] .qoder/agents/helm.md", result.stdout)
         self.assertIn("[新增] scripts/crew-state.py", result.stdout)
-        self.assertIn("[新增] scripts/crew-lint.py", result.stdout)
+        self.assertIn("[新增] scripts/dispatch.py", result.stdout)
+        self.assertNotIn("scripts/crew-lint.py", result.stdout)
+        self.assertIn("pending", result.stdout)
         self.assertFalse(self.backup.exists())
         self.assertEqual(snapshot_tree(self.root), before)
 
-    def test_dry_run_reports_new_docs(self):
-        # 受管 docs 缺失时必须报 [新增]，且仍零写入
+    def test_dry_run_reports_no_rule_copies(self):
+        # v2.1 不再安装规则副本；缺 docs 也不应出现在变更清单
         for rel in ("docs/crew-rules.md", "docs/crew-acceptance.md"):
             (self.root / rel).unlink()
         before = snapshot_tree(self.root)
         result = self.swap("--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr)
         for rel in ("docs/crew-rules.md", "docs/crew-acceptance.md"):
-            self.assertIn(f"[新增] {rel}", result.stdout)
+            self.assertNotIn(f"[新增] {rel}", result.stdout)
         self.assertFalse(self.backup.exists())
         self.assertEqual(snapshot_tree(self.root), before)
 
@@ -173,14 +175,18 @@ class SwapTest(_SwapTest):
         self.assertEqual(
             (self.root / "scripts/plan-status.py").read_text(encoding="utf-8"), skill_source
         )
-        self.assertNotEqual(
+        # 项目角色文件项目自有：v2.1 永不覆盖，既有 builder 保持原样
+        self.assertEqual(
             (self.root / ".qoder/agents/builder.md").read_text(encoding="utf-8"),
             OLD_FILES[".qoder/agents/builder.md"],
         )
-        self.assertTrue((self.root / ".qoder/agents/helm.md").is_file())  # 新增受管角色
+        self.assertTrue((self.root / ".qoder/agents/helm.md").is_file())  # 缺失才生成 stub
         agents = (self.root / "AGENTS.md").read_text(encoding="utf-8")
-        self.assertIn("agent-crew:orchestration:start", agents)
-        self.assertIn("自定义项目规则", agents)  # 标记节外内容保留
+        self.assertNotIn("agent-crew:orchestration:start", agents)  # 无标记 → pending 零写入
+        self.assertIn("自定义项目规则", agents)
+        pending = self.root / "docs/crew/AGENTS-block.pending.md"
+        self.assertTrue(pending.is_file())
+        self.assertIn("agent-crew:orchestration:start", pending.read_text(encoding="utf-8"))
 
         for rel in UNMANAGED:
             self.assertEqual(

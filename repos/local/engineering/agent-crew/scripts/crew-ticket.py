@@ -43,6 +43,10 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 
+sys.dont_write_bytecode = True  # 不在项目 scripts/ 留 __pycache__
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from crew_paths import CrewPathsError, crew_dir  # noqa: E402
+
 EXIT_OK, EXIT_REJECT, EXIT_FAIL = 0, 2, 3
 SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv", ".planning"}
 HINT_LIMIT = 20
@@ -66,28 +70,13 @@ def resolve_root(value: str | None) -> Path:
     raise SystemExit("crew-ticket: 未找到 .git，请用 --root <仓根> 指定")
 
 
-def git_common_dir(root: Path) -> Path:
-    try:
-        proc = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--git-common-dir"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError as exc:
-        raise Failure(f"git unavailable: {exc}") from exc
-    if proc.returncode == 0 and proc.stdout.strip():
-        path = Path(proc.stdout.strip())
-        if not path.is_absolute():
-            path = root / path
-        return path.resolve()
-    return (root / ".git").resolve()
-
-
 class Context:
     def __init__(self, root: Path):
         self.root = root
-        self.crew = git_common_dir(root) / "crew"
+        try:
+            self.crew = crew_dir(root)
+        except CrewPathsError as exc:
+            raise Failure(f"crew dir unavailable: {exc}") from exc
         self.occupancy = self.crew / "occupancy.json"
         self.inbox = self.crew / "inbox"
         self.lock = self.crew / "occupancy.lock"

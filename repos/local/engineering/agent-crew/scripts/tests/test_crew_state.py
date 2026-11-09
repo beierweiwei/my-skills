@@ -29,7 +29,8 @@ class CrewStateTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
-        (self.root / ".git").mkdir()
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True,
+                       capture_output=True)
 
     def tearDown(self):
         self._tmp.cleanup()

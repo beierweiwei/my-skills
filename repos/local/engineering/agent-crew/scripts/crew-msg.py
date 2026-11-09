@@ -50,6 +50,10 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.dont_write_bytecode = True  # 不在项目 scripts/ 留 __pycache__
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from crew_paths import CrewPathsError, crew_dir  # noqa: E402
+
 SENDER_RUNTIMES = ("qoder", "opencode", "claude", "codex")
 STATUSES = ("done", "blocked", "captain")
 RECEIPT_FIELDS = (
@@ -104,20 +108,11 @@ def validate_receipt_id(receipt_id: str) -> None:
         )
 
 
-def default_crew_dir() -> Path:
-    proc = subprocess.run(
-        ["git", "rev-parse", "--git-common-dir"],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if proc.returncode == 0 and proc.stdout.strip():
-        path = Path(proc.stdout.strip())
-        if not path.is_absolute():
-            path = Path.cwd() / path
-    else:
-        path = Path.cwd() / ".git"
-    return (path / "crew").resolve()
+def default_crew_dir(root: Path | None = None) -> Path:
+    try:
+        return crew_dir(root or Path.cwd())
+    except CrewPathsError as exc:
+        raise CrewMsgError(f"运行时目录解析失败：{exc}") from exc
 
 
 def inbox_dir(crew_dir: Path) -> Path:

@@ -38,6 +38,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+sys.dont_write_bytecode = True  # 不在项目 scripts/ 留 __pycache__
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from crew_paths import CrewPathsError, crew_dir as resolve_crew_dir  # noqa: E402
+
 PHASE_RE = re.compile(r"^### Phase\s+\d+\s*[:：]\s*(.+?)\s*$")
 STATUS_RE = re.compile(r"\*\*Status:\*\*\s+(pending|in[ _]progress|complete)")
 TODO_RE = re.compile(r"^\s*-\s*\[\s\]\s*(.+)$")
@@ -91,20 +95,11 @@ def resolve_root(explicit: str | None) -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def default_crew_dir() -> Path:
-    proc = subprocess.run(
-        ["git", "rev-parse", "--git-common-dir"],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if proc.returncode == 0 and proc.stdout.strip():
-        path = Path(proc.stdout.strip())
-        if not path.is_absolute():
-            path = Path.cwd() / path
-    else:
-        path = Path.cwd() / ".git"
-    return (path / "crew").resolve()
+def default_crew_dir(root: Path) -> Path:
+    try:
+        return resolve_crew_dir(root)
+    except CrewPathsError as exc:
+        raise SystemExit(f"crew-guard: 运行时目录解析失败：{exc}") from exc
 
 
 def resolve_helm_name(root: Path, explicit: str | None) -> str:
@@ -454,6 +449,12 @@ class Guard:
             "consecutive": self.consecutive,
             "woke": False,
             "reason": reason,
+            "planPath": pending[0].plan if pending else "",
+            "workers": [
+                {"name": str(agent.get("name") or ""),
+                 "status": str(agent.get("agent_status") or "")}
+                for agent in workers
+            ],
         }
         if not reason:
             return result
@@ -506,6 +507,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--helm", help="总舵 herdr agent 名（默认读配置 helm.agentName 或派生）")
     parser.add_argument("--interval", type=int, default=120, help="轮询秒数（默认 120）")
     parser.add_argument("--once", action="store_true", help="只跑一轮（测试/人工抽查）")
+    parser.add_argument("--json", action="store_true",
+                        help="配合 --once 输出 JSON（crewDir/planPath/pending/workers/wake）")
     return parser
 
 
@@ -515,7 +518,7 @@ def main(argv: list[str] | None = None) -> int:
         print("error: --interval 必须为正数", file=sys.stderr)
         return 1
     root = resolve_root(args.root)
-    crew_dir = Path(args.crew_dir) if args.crew_dir else default_crew_dir()
+    crew_dir = Path(args.crew_dir) if args.crew_dir else default_crew_dir(root)
     try:
         lock = acquire_lock(crew_dir)
     except OSError as exc:
@@ -535,7 +538,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         if args.once:
-            guard.run_once()
+            result = guard.run_once()
+            if args.json:
+                payload = {
+                    "crewDir": str(crew_dir),
+                    "planPath": result.get("planPath", ""),
+                    "pending": result.get("pending", 0),
+                    "workers": result.get("workers", []),
+                    "wake": bool(result.get("woke")),
+                }
+                print(json.dumps(payload, ensure_ascii=False))
             return 0
         guard.run_forever()
     except KeyboardInterrupt:

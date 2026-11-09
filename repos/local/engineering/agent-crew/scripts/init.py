@@ -1,168 +1,130 @@
 #!/usr/bin/env python3
-"""agent-crew init：检测目标仓 → 渲染模板 → 生成编排资产 → 输出三态核对清单（幂等）。
+"""init.py — agent-crew v2.1 安装 / bootstrap / 受管块刷新（幂等）。
 
-用法（在目标项目仓根，或用 --root 指定）:
-    python3 <skill>/scripts/init.py                 # 交互默认直通，冲突默认不覆盖
-    python3 <skill>/scripts/init.py --yes           # 零交互（沿用检测到的既有目录）
-    python3 <skill>/scripts/init.py --force         # 冲突时覆盖（仅限本技能管理的产物路径）
+行为契约（arch-proposal-v1 §7/§8、role-path-contract、impl-plan slice C）：
+- 只安装必要脚本、AGENTS 受管块、配置、项目角色 stub、portfolio/CONTEXT/topology 骨架；
+  不复制规则/验收/机制/plan 纪律，不安装 crew-lint，不安装第二份角色文件。
+- 项目角色 stub 仅在文件缺失时生成（发现字段 + crew-role 描述符 + 最小正文）；
+  已存在文件永不覆盖，`--force` 对 AGENTS/角色一律拒绝（rc=1、零写入、零新备份）。
+- AGENTS 无标记：零写入 AGENTS，生成 docs/crew/AGENTS-block.pending.md 并返回 2；
+  重复/嵌套/围栏/半对/其他标记行：fail closed（rc=1、零写入）。
+- manifest（docs/crew/manifest.json）只登记 kind:file 受管脚本 + kind:block AGENTS 块
+  + roleStubs + configHash；install-log.jsonl append-only。
+- 锁：<common>/crew/init.lock（crew_paths.crew_dir）；并发第二个实例 rc=2 并记 locked。
+- 原子写：同目录 temp + fsync + rename；覆盖受管脚本前备份到
+  <common>/crew/backups/<UTC>/ + backup-manifest.json。
+- `--refresh-block [--confirm]` 只重渲染 AGENTS 受管块；无 --confirm rc=2 且零写入；
+  --confirm 后块外与 orchestration.json 字节不变，manifest 更新 blockSha256/renderVersion/configHash。
 
-行为契约（设计 §3.2）:
-  检测（只读）: git 仓 / 既有产物 / planning-with-files / python3 版本；
-  生成: orchestration.json → 角色模板渲染 → 脚本落 scripts/ → portfolio 三文件骨架
-        → AGENTS.md 编排节（标记节定界）→ CONTEXT.md（不存在才生成）；
-  幂等: 渲染结果与已存在产物一致 → skip（不重写）；不一致 → 默认不覆盖并列入冲突清单，
-        --force 才覆盖；portfolio 骨架缺失文件按文件粒度补齐；
-  边界: 只写下方 MANIFEST 内路径，清单外零写入。
-
-模板缺失（如角色模板由并行流水线后续产出）→ 报警告跳过，不发明内容。
-退出码: 0=成功无冲突；2=存在未处理冲突。
+退出码：0 成功；1 校验/拒绝；2 待人工（pending/冲突/锁）；3 环境缺失。
 """
 
 from __future__ import annotations
 
 import argparse
+import fcntl
 import fnmatch
 import hashlib
 import json
+import os
 import re
-import shutil
 import subprocess
 import sys
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.dont_write_bytecode = True  # 不在项目 scripts/ 留 __pycache__（doctor runtime.worktree）
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from crew_paths import CrewPathsError, crew_dir  # noqa: E402
+
+try:  # dispatch 与 init 同目录安装；缺失时用内置角色表兜底
+    import dispatch as dispatch_lib  # noqa: E402
+except Exception:  # noqa: BLE001
+    dispatch_lib = None  # type: ignore[assignment]
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 TEMPLATES = SKILL_DIR / "templates"
 
 MARK_START = "<!-- agent-crew:orchestration:start -->"
 MARK_END = "<!-- agent-crew:orchestration:end -->"
-
-# SKILL.md frontmatter 无 version 时的内置版本（Phase 3.1 补 frontmatter 后以文件为准）
-SKILL_VERSION_FALLBACK = "2.0.0"
+MARK_PREFIX = "<!-- agent-crew:orchestration:"
+SKILL_VERSION_FALLBACK = "2.1.0"
 
 CONFIG_REL = Path(".planning/orchestration.json")
-CREW_RULES_REL = Path("docs/crew-rules.md")
-CREW_ACCEPTANCE_REL = Path("docs/crew-acceptance.md")
-CREW_RULE_SOURCES = [
-    (SKILL_DIR / "references" / "crew-rules.md", CREW_RULES_REL, "规则正文 crew-rules.md"),
-    (SKILL_DIR / "references" / "crew-acceptance.md", CREW_ACCEPTANCE_REL,
-     "验收正文 crew-acceptance.md"),
+MANIFEST_REL = Path("docs/crew/manifest.json")
+INSTALL_LOG_REL = Path("docs/crew/install-log.jsonl")
+PENDING_REL = Path("docs/crew/AGENTS-block.pending.md")
+DEFAULT_TOPOLOGY_REL = Path("docs/orchestration/topology.md")
+BLOCK_LINE_LIMIT = 150
+
+ROLE_ORDER = ["helm", "firstmate", "builder", "planner", "reviewer", "runner", "scout"]
+ROLE_TITLES = {
+    "helm": "Helm（总舵）",
+    "firstmate": "First Mate（大副）",
+    "builder": "Builder",
+    "planner": "Planner",
+    "reviewer": "Reviewer",
+    "runner": "Runner",
+    "scout": "Scout",
+}
+FALLBACK_ROLES: dict[str, dict] = {
+    "helm": {"capabilities": ["read", "dispatch"],
+             "gates": ["three-human-gates", "no-merge", "no-push"], "lifecycle": "persistent"},
+    "firstmate": {"capabilities": ["read", "write-docs", "dispatch"],
+                  "gates": ["three-human-gates", "no-merge", "no-push"], "lifecycle": "persistent"},
+    "builder": {"capabilities": ["read", "write-code", "run-commands"],
+                "gates": ["three-human-gates", "review-required"], "lifecycle": "keep-until"},
+    "planner": {"capabilities": ["read", "write-docs"],
+                "gates": ["three-human-gates"], "lifecycle": "one-shot"},
+    "reviewer": {"capabilities": ["read", "report"],
+                 "gates": ["three-human-gates", "report-only"], "lifecycle": "one-shot"},
+    "runner": {"capabilities": ["read", "run-commands"],
+               "gates": ["three-human-gates", "data-safety"], "lifecycle": "one-shot"},
+    "scout": {"capabilities": ["read", "report"],
+              "gates": ["three-human-gates", "report-only"], "lifecycle": "one-shot"},
+}
+
+# 受管脚本清单（不安装 crew-lint.py；不含 swap/rollback 历史脚本）
+SCRIPT_MANIFEST = [
+    "init.py",
+    "dispatch.py",
+    "doctor.py",
+    "upgrade.py",
+    "crew_paths.py",
+    "start-agent.sh",
+    "start-helm.sh",
+    "helm_agent_name.py",
+    "agent-watch.py",
+    "worktree-watch.py",
+    "herdr-events.py",
+    "plan-status.py",
+    "crew-state.py",
+    "crew-guard.py",
+    "crew-ticket.py",
+    "crew-msg.py",
+    "pane-audit.py",
 ]
+COPY_BASENAMES = ("crew-rules.md", "crew-acceptance.md",
+                  "orchestration-guide.md", "plan-discipline.md")
 
+DEFAULT_ROLES = {"enabled": list(ROLE_ORDER), "instances": {}}
+DEFAULT_HOOKS = {
+    "paths": {"topology": DEFAULT_TOPOLOGY_REL.as_posix()},
+    "roleExt": {},
+    "customRoles": [],
+    "gatePolicy": {"appendGates": []},
+    "projectScripts": [],
+}
 
-def strip_marker_lines(text: str) -> str:
-    """剥掉 agent-crew 标记行（阻断2 修复；R1 复用于收敛 post 段孤儿标记）。
-
-    标记由代码常量 MARK_START/MARK_END 统一包裹；模板自带标记（含带说明的 start
-    变体，如「<!-- agent-crew:orchestration:start（本节由…） -->」）与旧双层形态
-    残留的孤儿标记行一律剥离，防止双层标记导致二跑恒冲突、--force 持续膨胀。
-    按 "\\n" 切分拼接（非 splitlines）：非标记行连同行尾换行结构原样保留，
-    对无标记文本是恒等变换——套在标记节后的 post 段上不会误伤正常仓。
-    """
-    kept = [
-        line for line in text.split("\n")
-        if not line.strip().startswith("<!-- agent-crew:orchestration:")
-    ]
-    return "\n".join(kept)
-
-
-def read_skill_version(skill_dir: Path | None = None) -> str:
-    """读 SKILL.md frontmatter 的 version；缺失/损坏时用内置常量。"""
-    path = (skill_dir or SKILL_DIR) / "SKILL.md"
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return SKILL_VERSION_FALLBACK
-    if not text.startswith("---"):
-        return SKILL_VERSION_FALLBACK
-    end = text.find("\n---", 3)
-    if end == -1:
-        return SKILL_VERSION_FALLBACK
-    match = re.search(r"^version:\s*(.+?)\s*$", text[3:end], re.MULTILINE)
-    if not match:
-        return SKILL_VERSION_FALLBACK
-    value = match.group(1).strip().strip("'\"")
-    return value or SKILL_VERSION_FALLBACK
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-class InitReportError(Exception):
-    """上次 init 失败记录损坏。"""
-
-
-def init_report_path(root: Path) -> Path:
-    """失败记录落点：有 git 用 .git/crew/init-report.json，否则 .planning/。"""
-    proc = subprocess.run(
-        ["git", "rev-parse", "--git-common-dir"], cwd=root,
-        capture_output=True, text=True, check=False,
-    )
-    if proc.returncode == 0 and proc.stdout.strip():
-        path = Path(proc.stdout.strip())
-        if not path.is_absolute():
-            path = root / path
-        return path / "crew" / "init-report.json"
-    return root / ".planning" / ".agent-crew-init.json"
-
-
-def read_init_report(root: Path) -> list[str] | None:
-    """返回上次失败路径列表；无记录返回 None；记录损坏抛 InitReportError。"""
-    path = init_report_path(root)
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise InitReportError(f"{path}：{exc}") from exc
-    if not isinstance(data, dict) or not isinstance(data.get("failed"), list):
-        raise InitReportError(f"{path}：缺少 failed 列表")
-    paths: list[str] = []
-    for entry in data["failed"]:
-        if isinstance(entry, str):
-            paths.append(entry)
-        elif isinstance(entry, dict) and isinstance(entry.get("path"), str):
-            paths.append(entry["path"])
-    return paths
-
-
-def write_init_report(root: Path, failed: list[Item], warnings: list[str],
-                      skill_version: str) -> None:
-    """写失败/冲突项；无失败且从未有记录时不落空文件，内容未变化时零写入。"""
-    path = init_report_path(root)
-    payload = [
-        {"path": item.target.as_posix(), "status": item.status, "note": item.note}
-        for item in failed
-    ]
-    current = None
-    if path.exists():
-        try:
-            current = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            current = None
-    if not payload and current is None:
-        return
-    if (
-        isinstance(current, dict)
-        and current.get("failed") == payload
-        and current.get("skillVersion") == skill_version
-    ):
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data = {
-        "version": 1,
-        "skillVersion": skill_version,
-        "updatedAt": utc_now(),
-        "failed": payload,
-        "warnings": warnings,
-    }
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-# 内置默认（与 templates/project.config.json 同源同改；模板在位时以模板为准）
 DEFAULT_CONFIG: dict = {
+    "schemaVersion": 1,
+    "projectId": "",
     "projectName": "",
+    "skillRoot": "",
+    "skillVersion": "",
     "portfolioDir": ".planning/portfolio",
     "board": {"path": "docs/进度追踪.md", "title": "进度追踪（派生看板）", "archive": ""},
     "portfolioMatch": "*portfolio*",
@@ -185,12 +147,15 @@ DEFAULT_CONFIG: dict = {
     ],
     "dataDir": "data/raw/",
     "aopReference": "",
-    "helm": {"tabLabel": "总舵", "expectedModel": ""},
+    "helm": {"tabLabel": "总舵", "expectedModel": "", "agentName": ""},
+    "roles": DEFAULT_ROLES,
+    "hooks": DEFAULT_HOOKS,
 }
 
-# 配置键 → 模板占位符（完整对照见 templates/project.config.json 的 _placeholders）
 PLACEHOLDERS: list[tuple[tuple[str, ...], str]] = [
+    (("projectId",), "project_id"),
     (("projectName",), "project_name"),
+    (("skillRoot",), "skill_root"),
     (("portfolioDir",), "portfolio_dir"),
     (("board", "path"), "board_path"),
     (("board", "title"), "board_title"),
@@ -208,28 +173,16 @@ PLACEHOLDERS: list[tuple[tuple[str, ...], str]] = [
     (("aopReference",), "aop_reference"),
     (("helm", "tabLabel"), "helm_tab_label"),
     (("helm", "expectedModel"), "helm_expected_model"),
-    (("topic",), "topic"),  # 工单主题 slug 模板；未配置时渲染为字面 <topic>
+    (("topic",), "topic"),
 ]
 
-# init 管理并拷贝到目标仓 scripts/ 的脚本（不含 init.py 自身与 tests/）
-SCRIPT_MANIFEST = [
-    "start-agent.sh",
-    "start-helm.sh",
-    "helm_agent_name.py",
-    "agent-watch.py",
-    "worktree-watch.py",
-    "herdr-events.py",
-    "plan-status.py",
-    "crew-state.py",
-    "crew-guard.py",
-    "crew-ticket.py",
-    "crew-msg.py",
-    "pane-audit.py",
-    "crew-lint.py",
-]
+EMPTY_FALLBACK: dict[str, str] = {
+    "topic": "<topic>",
+    "doc_req_path": "<需求文档路径>",
+    "aop_reference": "（未配置——按 AOP 六维自审并记入 plan Decisions）",
+}
 
 PORTFOLIO_PLAN_TEMPLATE = "plans/portfolio-task_plan.md"
-
 FINDINGS_SKELETON = """# Findings
 
 > 调研与中间结论记录；只增不改，过时内容标注「历史（截至日期）」。
@@ -238,7 +191,6 @@ FINDINGS_SKELETON = """# Findings
 
 （空）
 """
-
 PROGRESS_SKELETON = """# Progress（编排台账）
 
 > 里程碑 / 进展 / 自动驾驶里程记录（时间、事项、决定、证据、待 Captain 项）。
@@ -247,18 +199,22 @@ PROGRESS_SKELETON = """# Progress（编排台账）
 
 （空）
 """
-
 AGENT_SKELETON_HEADER = "# AGENTS\n"
+
+
+class InitLocked(Exception):
+    """另一个 init 持有锁。"""
+
+
+class InitError(Exception):
+    """输入/状态错误，按 rc=1 退出。"""
 
 
 @dataclass
 class Item:
-    """一个产物的核对状态。"""
-    target: Path          # 目标仓内的相对路径（posix 显示）
-    status: str = "新建"   # 新建 / 追加 / 跳过 / 冲突 / 警告
+    target: Path
+    status: str = "新建"   # 新建/覆盖/跳过/冲突/待插入/拒绝
     note: str = ""
-    rendered: str = ""    # 渲染后内容（冲突报告用）
-    src: str = ""         # 技能侧源路径（冲突清单人工比对用，建议14）
 
 
 @dataclass
@@ -273,7 +229,140 @@ class Report:
             self.conflicts.append(item)
 
 
-# ---------- 配置 ----------
+# ---------------------------------------------------------------------------
+# 基础工具
+# ---------------------------------------------------------------------------
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def read_skill_version(skill_dir: Path | None = None) -> str:
+    path = (skill_dir or SKILL_DIR) / "SKILL.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return SKILL_VERSION_FALLBACK
+    if not text.startswith("---"):
+        return SKILL_VERSION_FALLBACK
+    end = text.find("\n---", 3)
+    if end == -1:
+        return SKILL_VERSION_FALLBACK
+    match = re.search(r"^version:\s*(.+?)\s*$", text[3:end], re.MULTILINE)
+    if not match:
+        return SKILL_VERSION_FALLBACK
+    return match.group(1).strip().strip("'\"") or SKILL_VERSION_FALLBACK
+
+
+def atomic_write(path: Path, data: bytes, mode: int | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+
+
+def atomic_write_text(path: Path, text: str, mode: int | None = None) -> None:
+    atomic_write(path, text.encode("utf-8"), mode=mode)
+
+
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def sha256_text(text: str) -> str:
+    normalized = text.replace("\r\n", "\n")
+    if not normalized.endswith("\n"):
+        normalized += "\n"
+    return sha256_bytes(normalized.encode("utf-8"))
+
+
+def sha256_file_raw(path: Path) -> str:
+    return sha256_bytes(path.read_bytes())
+
+
+def config_hash(config: dict) -> str:
+    data = {key: value for key, value in config.items()
+            if not key.startswith("_") and key != "skillVersion"}
+    payload = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return sha256_bytes(payload.encode("utf-8"))
+
+
+def project_slug(name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return slug or "project"
+
+
+def strip_marker_lines(text: str) -> str:
+    kept = [line for line in text.split("\n")
+            if not line.strip().startswith(MARK_PREFIX)]
+    return "\n".join(kept)
+
+
+def marker_scan(text: str) -> dict:
+    """返回 {'state': missing|pending|ok|invalid, 'body', 'errors', 'lines'}。"""
+    lines = text.splitlines()
+    in_fence = False
+    starts: list[int] = []
+    ends: list[int] = []
+    others: list[tuple[int, str]] = []
+    fenced: list[int] = []
+    indented: list[int] = []
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            continue
+        if not stripped.startswith(MARK_PREFIX):
+            continue
+        if stripped == MARK_START:
+            starts.append(index)
+        elif stripped == MARK_END:
+            ends.append(index)
+        else:
+            others.append((index + 1, stripped))
+            continue
+        if in_fence:
+            fenced.append(index + 1)
+        if line != stripped:
+            indented.append(index + 1)
+    if not starts and not ends and not others:
+        return {"state": "pending", "body": "", "errors": [], "starts": [], "ends": []}
+    errors: list[str] = []
+    if len(starts) != 1 or len(ends) != 1:
+        errors.append(f"标记必须恰好一对（start={len(starts)}, end={len(ends)}）")
+    elif starts[0] >= ends[0]:
+        errors.append("start 必须在 end 之前")
+    if others:
+        errors.append(f"出现其他 agent-crew:orchestration 标记行：{others}")
+    if fenced:
+        errors.append(f"标记位于代码围栏内：{fenced}")
+    if indented:
+        errors.append(f"标记前有缩进：{indented}")
+    if errors:
+        return {"state": "invalid", "body": "", "errors": errors,
+                "starts": starts, "ends": ends}
+    start, end = starts[0], ends[0]
+    body_lines = [line.rstrip() for line in lines[start + 1:end]]
+    while body_lines and not body_lines[0]:
+        body_lines.pop(0)
+    while body_lines and not body_lines[-1]:
+        body_lines.pop()
+    if not body_lines:
+        return {"state": "invalid", "body": "", "errors": ["块体为空"],
+                "starts": starts, "ends": ends}
+    return {"state": "ok", "body": "\n".join(body_lines) + "\n", "errors": [],
+            "starts": starts, "ends": ends}
+
 
 def _deep_merge(base: dict, override: dict) -> dict:
     out = dict(base)
@@ -285,30 +374,64 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return out
 
 
-def load_defaults() -> dict:
-    """默认值母本 = templates/project.config.json（缺 _ 键）；缺失时用内置 DEFAULT_CONFIG。"""
-    path = TEMPLATES / "project.config.json"
+def load_defaults(templates: Path | None = None) -> dict:
+    path = (templates or TEMPLATES) / "project.config.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        data = {k: v for k, v in data.items() if not k.startswith("_")}
+        data = {key: value for key, value in data.items() if not key.startswith("_")}
         return _deep_merge(DEFAULT_CONFIG, data)
     except (OSError, ValueError):
-        return dict(DEFAULT_CONFIG)
+        return json.loads(json.dumps(DEFAULT_CONFIG))
 
 
-# 空值兜底渲染（阻断3 / 建议11）：这些占位符空值直通会产出病句或失效示例，渲染为提示文案。
-EMPTY_FALLBACK: dict[str, str] = {
-    # 工单主题 slug 未配置 → 字面 <topic>（保留模板语义可见，b2 占位符集第 9 项）
-    "topic": "<topic>",
-    # 正文文档路径未配置 → 字面占位（防「读␣␣并执行」式坏文案）
-    "doc_req_path": "<需求文档路径>",
-    # AOP 总纲真源未配置 → 按 b2 回执 §4 约定文案兜底（防「以␣␣为唯一真源」病句）
-    "aop_reference": "（未配置——按 AOP 六维自审并记入 plan Decisions）",
-}
+def _scrub_hooks(cfg: dict) -> None:
+    hooks = cfg.get("hooks")
+    if not isinstance(hooks, dict):
+        cfg["hooks"] = json.loads(json.dumps(DEFAULT_HOOKS))
+        return
+    paths = hooks.get("paths")
+    if not isinstance(paths, dict):
+        paths = {}
+    paths = {key: value for key, value in paths.items()
+             if key in {"topology", "projectExt"}}
+    paths.setdefault("topology", DEFAULT_TOPOLOGY_REL.as_posix())
+    hooks["paths"] = paths
+    for key, default in (("roleExt", {}), ("customRoles", []),
+                         ("gatePolicy", {"appendGates": []}), ("projectScripts", [])):
+        hooks.setdefault(key, json.loads(json.dumps(default)))
 
 
-def render_context(cfg: dict) -> dict:
-    """配置值 → 占位符渲染上下文；列表渲染为多行「- 条目」；空值按 EMPTY_FALLBACK 兜底。"""
+def _script_relative_root(root: Path, source_dir: Path | None = None) -> str:
+    source = (source_dir or SKILL_DIR).resolve()
+    try:
+        rel = source.relative_to(root.resolve())
+    except ValueError:
+        return str(source)
+    return rel.as_posix()
+
+
+def resolve_source(root: Path) -> Path:
+    """源解析：外部技能副本优先自身目录；安装副本（项目 scripts/）用配置 skillRoot。"""
+    own = Path(__file__).resolve().parent.parent
+    if own != root.resolve() and (own / "SKILL.md").is_file() and (own / "scripts").is_dir():
+        return own
+    path = root / CONFIG_REL
+    if path.is_file():
+        try:
+            config = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            config = {}
+        raw = config.get("skillRoot") if isinstance(config, dict) else None
+        if isinstance(raw, str) and raw.strip():
+            candidate = Path(raw).expanduser()
+            if not candidate.is_absolute():
+                candidate = (root / candidate).resolve()
+            if candidate.is_dir():
+                return candidate
+    return SKILL_DIR
+
+
+def render_context(cfg: dict, root: Path | None = None) -> dict:
     ctx: dict[str, str] = {}
     for keys, name in PLACEHOLDERS:
         value: object = cfg
@@ -321,8 +444,14 @@ def render_context(cfg: dict) -> dict:
             ctx[name] = "\n".join(f"- {item}" for item in value)
         else:
             ctx[name] = "" if value is None else str(value)
-    ctx["crew_rules"] = CREW_RULES_REL.as_posix()
-    ctx["crew_acceptance"] = CREW_ACCEPTANCE_REL.as_posix()
+    skill_root = ctx.get("skill_root", "").rstrip("/")
+    if root is not None and skill_root and not Path(skill_root).is_absolute():
+        skill_root = str((root / skill_root).resolve())
+    ctx["skill_root"] = skill_root
+    ctx["crew_rules"] = f"{skill_root}/references/crew-rules.md" if skill_root else ""
+    ctx["crew_acceptance"] = (
+        f"{skill_root}/references/crew-acceptance.md" if skill_root else ""
+    )
     return ctx
 
 
@@ -330,16 +459,14 @@ _SENTENCE_PUNCT = set("。；，、！？")
 
 
 def _splice_list_token(text: str, token: str, value: str) -> str:
-    """列表占位符句中渲染时断行（建议6，模板不动）：前有同行文字→值前断行；
-    后接同行文字→值后断行；纯句读标点附着末条（「决定：{{x}}。」→ 末条自然收句）。"""
     parts: list[str] = []
     idx = 0
-    for m in re.finditer(re.escape(token), text):
-        line_start = text.rfind("\n", 0, m.start()) + 1
-        before = text[line_start:m.start()]
-        nl = text.find("\n", m.end())
-        line_end = nl if nl != -1 else len(text)
-        tail = text[m.end():line_end].strip()
+    for match in re.finditer(re.escape(token), text):
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        before = text[line_start:match.start()]
+        newline = text.find("\n", match.end())
+        line_end = newline if newline != -1 else len(text)
+        tail = text[match.end():line_end].strip()
         pre = "\n" if before.strip() else ""
         if tail and all(ch in _SENTENCE_PUNCT for ch in tail):
             post = tail
@@ -347,7 +474,7 @@ def _splice_list_token(text: str, token: str, value: str) -> str:
             post = "\n" + tail
         else:
             post = ""
-        parts.append(text[idx:m.start()])
+        parts.append(text[idx:match.start()])
         parts.append(pre + value + post)
         idx = line_end
     parts.append(text[idx:])
@@ -361,591 +488,954 @@ def apply_template(text: str, ctx: dict) -> str:
             continue
         rendered = str(value)
         if "\n" in rendered:
-            # 列表值（多行「- 条目」）句中渲染会打碎 Markdown 列表结构，改走断行拼接
             text = _splice_list_token(text, token, rendered)
         else:
             text = text.replace(token, rendered)
     return text
 
 
-# ---------- 检测（只读） ----------
+# ---------------------------------------------------------------------------
+# 锁 / 日志 / 备份
+# ---------------------------------------------------------------------------
+
+def _crew_dir(root: Path) -> Path:
+    try:
+        return crew_dir(root)
+    except CrewPathsError as exc:
+        raise InitError(f"运行时目录解析失败：{exc}") from exc
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def acquire_owner(root: Path) -> Path | None:
+    """整个 init/refresh 期间的并发属主（pid 文件）；存活则拒绝，崩溃遗留可回收。"""
+    crew = _crew_dir(root)
+    crew.mkdir(parents=True, exist_ok=True)
+    path = crew / "init.owner.json"
+    for _ in range(2):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            pid = None
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                pid = int(data.get("pid"))
+            except (OSError, ValueError, TypeError):
+                pid = None
+            if pid and pid != os.getpid() and _pid_alive(pid):
+                return None
+            try:
+                path.unlink()
+            except OSError:
+                return None
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({"pid": os.getpid(), "startedAt": utc_now()}) + "\n")
+        return path
+    return None
+
+
+def release_owner(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+@contextmanager
+def init_lock(root: Path):
+    crew = _crew_dir(root)
+    crew.mkdir(parents=True, exist_ok=True)
+    lock_path = crew / "init.lock"
+    handle = lock_path.open("a+", encoding="utf-8")
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise InitLocked(str(exc)) from exc
+        yield
+    finally:
+        if handle.closed is False:
+            try:
+                lock_path.unlink(missing_ok=True)  # 持锁删除：其他实例非阻塞退出
+            except OSError:
+                pass
+        handle.close()
+
+
+def append_install_log(root: Path, entry: dict) -> None:
+    path = root / INSTALL_LOG_REL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(line)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def create_backup(root: Path, action: str, paths: list[Path],
+                  extra: dict | None = None) -> str | None:
+    existing = [path for path in paths if path.is_file()]
+    if not existing:
+        return None
+    crew = _crew_dir(root)
+    base = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup_id = base
+    counter = 1
+    while (crew / "backups" / backup_id).exists():
+        backup_id = f"{base}-{counter}"
+        counter += 1
+    directory = crew / "backups" / backup_id
+    files: list[dict] = []
+    for path in existing:
+        rel = path.relative_to(root).as_posix()
+        target = directory / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(path.read_bytes())
+        files.append({"path": rel, "sha256": sha256_file_raw(path),
+                      "size": path.stat().st_size})
+    payload = {
+        "schemaVersion": 1,
+        "backupId": backup_id,
+        "action": action,
+        "createdAt": utc_now(),
+        "root": str(root),
+        "files": files,
+    }
+    if extra:
+        payload.update(extra)
+    atomic_write_text(directory / "backup-manifest.json",
+                      json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+    return backup_id
+
+
+def read_manifest(root: Path) -> dict | None:
+    path = root / MANIFEST_REL
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+# ---------------------------------------------------------------------------
+# 配置
+# ---------------------------------------------------------------------------
+
+def load_config(root: Path, templates: Path | None = None) -> tuple[dict, dict | None]:
+    """返回合并后的配置与磁盘原值；损坏时抛 InitError（不静默覆盖）。"""
+    defaults = load_defaults(templates)
+    path = root / CONFIG_REL
+    if not path.exists():
+        return defaults, None
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise InitError(f"配置损坏（{path}）：{exc}；先修复或删除后重跑") from exc
+    if not isinstance(existing, dict):
+        raise InitError(f"配置必须是 JSON 对象：{path}")
+    merged = _deep_merge(defaults, existing)
+    return merged, existing
+
+
+def prepare_config(root: Path, cfg: dict, existing: dict | None, skill_version: str,
+                   source_dir: Path | None = None) -> dict:
+    cfg = json.loads(json.dumps(cfg))
+    cfg["projectName"] = cfg.get("projectName") or root.name
+    cfg["projectId"] = cfg.get("projectId") or project_slug(cfg["projectName"])
+    cfg["skillRoot"] = cfg.get("skillRoot") or _script_relative_root(
+        root, source_dir or SKILL_DIR)
+    cfg["skillVersion"] = skill_version
+    roles = cfg.get("roles")
+    if not isinstance(roles, dict) or not isinstance(roles.get("enabled"), list) \
+            or not roles.get("enabled"):
+        cfg["roles"] = json.loads(json.dumps(DEFAULT_ROLES))
+    _scrub_hooks(cfg)
+    return cfg
+
+
+# ---------------------------------------------------------------------------
+# 角色 stub / 脚本 / AGENTS
+# ---------------------------------------------------------------------------
+
+def role_spec(role: str) -> dict:
+    if dispatch_lib is not None:
+        spec = dispatch_lib.CORE_ROLES.get(role)
+        if spec:
+            return spec
+    return FALLBACK_ROLES[role]
+
+
+def role_stub_path(runtime: str, role: str) -> Path:
+    if runtime == "qoder":
+        return Path(".qoder/agents") / f"{role}.md"
+    return Path(".opencode/agent") / f"{role}.md"
+
+
+def role_stub_content(runtime: str, role: str) -> str:
+    spec = role_spec(role)
+    title = ROLE_TITLES[role]
+    descriptor = {
+        "id": role,
+        "runtime": runtime,
+        "extends": f"skill:{role}",
+        "managed": False,
+        "capabilities": list(spec["capabilities"]),
+        "gates": [],
+        "lifecycle": spec["lifecycle"],
+        "prompt": role_stub_path(runtime, role).as_posix(),
+    }
+    description = (
+        f"{title}（{runtime} 项目角色 {role}：权限与动作基类由技能提供，正文追加项目指令）"
+    )
+    if runtime == "qoder":
+        frontmatter = (
+            "---\n"
+            f"name: {role}\n"
+            f"description: {description}\n"
+            "---\n"
+        )
+    else:
+        frontmatter = (
+            "---\n"
+            f"description: {description}\n"
+            "mode: primary\n"
+            "---\n"
+        )
+    body = (
+        "<!-- crew-role\n"
+        + json.dumps(descriptor, ensure_ascii=False)
+        + "\n-->\n"
+        f"# {title}\n\n"
+        f"项目角色 {role} / {runtime}：只在此追加项目自有指令；不要新增 `## 引用` 等受保护标题。\n"
+    )
+    return frontmatter + body
+
+
+def script_source(name: str, source_dir: Path | None = None) -> Path:
+    return (source_dir or SKILL_DIR) / "scripts" / name
+
+
+def render_agents_section(templates: Path, ctx: dict) -> str:
+    path = templates / "AGENTS-编排节.md"
+    if not path.exists():
+        raise InitError(f"未找到模板 {path}")
+    raw = apply_template(path.read_text(encoding="utf-8"), ctx)
+    body = strip_marker_lines(raw).strip("\n")
+    if not body:
+        raise InitError("AGENTS 编排节渲染为空")
+    section = f"{MARK_START}\n{body}\n{MARK_END}"
+    return section
+
+
+def rendered_agents_text(current: str | None, section: str) -> str:
+    if current is None:
+        return AGENT_SKELETON_HEADER + "\n" + section + "\n"
+    pre = current.split(MARK_START, 1)[0]
+    post = current.split(MARK_END, 1)[1]
+    return pre + section + post
+
+
+def pending_text(section: str) -> str:
+    indented = "\n".join("    " + line if line else line for line in section.splitlines())
+    return f"""# AGENTS.md 编排节待插入（pending）
+
+> init 检测到 `AGENTS.md` 存在但没有 agent-crew 受管标记：按契约零写入 AGENTS，只生成本文件。
+> 完成下面三步后重跑 `python3 scripts/init.py`，由 init 接管受管块。
+
+## 第一步：插到哪
+
+- 打开项目根目录 `AGENTS.md`。
+- 选择编排规则应处的位置：通常在项目自有规则之后、文档/命令清单之前；不要插进代码块或已有标记内。
+
+## 第二步：插什么
+
+把下面整段（含 start/end 标记各一行、行首无缩进）插入 `AGENTS.md`：
+
+```markdown
+{section}
+```
+
+## 第三步：插完怎么验
+
+- 重跑 `python3 scripts/init.py --check`：不再提示 pending。
+- 跑 `python3 scripts/doctor.py --root . --only agents.markers --json`：恰好一对标记。
+- 跑 `python3 scripts/doctor.py --root . --only agents.block --json`：块体非空、≤{BLOCK_LINE_LIMIT} 行、无未解析 token。
+"""
+
+
+# ---------------------------------------------------------------------------
+# 检测
+# ---------------------------------------------------------------------------
 
 def detect(root: Path, report: Report) -> None:
     if sys.version_info < (3, 10):
-        report.warnings.append(
-            f"python3 版本过低（{sys.version_info.major}.{sys.version_info.minor}）："
-            "agent-watch/herdr-events/plan-status 需 ≥3.10，请升级后重跑 init。"
-        )
+        report.warnings.append("python3 版本过低：需要 ≥3.10。")
     probe = subprocess.run(
         ["git", "rev-parse", "--show-toplevel"], cwd=root,
         capture_output=True, text=True, check=False,
     )
     if probe.returncode != 0:
         report.warnings.append(
-            "非 git 仓：worktree-watch/agent-watch 状态文件依赖 .git/，监听不可用；"
-            "建议 git init 后重跑 init 补齐。plan-status 不受影响（只读 .planning）。"
-        )
-    pwf = Path.home() / ".qoder-cn" / "skills" / "planning-with-files" / "scripts" / "init-session.sh"
-    if not pwf.exists():
-        report.warnings.append(
-            "未检测到 planning-with-files 技能：流 plan 日常创建依赖它"
-            "（在 my-skills 仓执行 bash scripts/install-skills.sh --skill planning-with-files）；"
-            "本次 init 已直接生成骨架文件，不影响启动。"
+            "非 git 仓：运行时状态落 <root>/.crew；worktree-watch/agent-watch 监听不可用。"
         )
 
 
-def find_portfolio_dirs(root: Path, pattern: str) -> list[Path]:
-    planning = root / ".planning"
-    if not planning.is_dir():
-        return []
-    return sorted(
-        p for p in planning.iterdir()
-        if p.is_dir() and fnmatch.fnmatch(p.name, pattern)
-    )
-
-
-# ---------- 写入 helper（清单外零写入的单一通道） ----------
-
-def write_product(root: Path, rel: Path, content: str, report: Report, force: bool,
-                  label: str, src: str = "", only: set[Path] | None = None) -> None:
-    """写入一个受管产物：一致→跳过；不一致→冲突（--force 才覆盖）。src=技能侧源路径。
-    only 非空时只处理集合内路径（--only-failed）。"""
-    if only is not None and rel not in only:
-        return
-    target = root / rel
-    if target.exists():
-        current = target.read_text(encoding="utf-8")
-        if current == content:
-            report.add(Item(target=rel, status="跳过", note=label))
-            return
-        if not force:
-            report.add(Item(
-                target=rel, status="冲突", note=label, rendered=content, src=src,
-            ))
-            return
-        action = "冲突（--force 覆盖）"
-    else:
-        action = "新建"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
-    report.add(Item(target=rel, status=action, note=label))
-
-
-def script_products(report: Report | None = None) -> list[tuple[Path, str, str, str]]:
-    products: list[tuple[Path, str, str, str]] = []
-    for name in SCRIPT_MANIFEST:
-        src = SKILL_DIR / "scripts" / name
-        if not src.exists():
-            if report is not None:
-                report.warnings.append(f"技能脚本缺失：scripts/{name}（技能安装不完整？）")
+def forbidden_copies(root: Path, skill_root: str) -> list[str]:
+    skill_path = Path(skill_root)
+    if not skill_path.is_absolute():
+        skill_path = (root / skill_path).resolve()
+    copies: list[str] = []
+    for path in root.rglob("*"):
+        if not path.is_file():
             continue
-        products.append((
-            Path("scripts") / name,
-            src.read_text(encoding="utf-8"),
-            f"脚本 {name}",
-            str(src),
-        ))
+        rel = path.relative_to(root).as_posix()
+        if rel.startswith((".git/", ".planning/")):
+            continue
+        try:
+            path.resolve().relative_to(skill_path)
+            continue
+        except ValueError:
+            pass
+        if path.name in COPY_BASENAMES:
+            copies.append(rel)
+    return sorted(set(copies))
+
+
+# ---------------------------------------------------------------------------
+# --refresh-block
+# ---------------------------------------------------------------------------
+
+def refresh_block(root: Path, templates: Path, skill_version: str, confirm: bool) -> int:
+    agents_path = root / "AGENTS.md"
+    if not agents_path.is_file():
+        print("refresh-block: AGENTS.md 不存在；先跑 init", file=sys.stderr)
+        return 2
+    current = agents_path.read_text(encoding="utf-8")
+    scan = marker_scan(current)
+    if scan["state"] == "invalid":
+        print("refresh-block: 标记非法，拒绝写入：" + "；".join(scan["errors"]), file=sys.stderr)
+        return 1
+    if scan["state"] == "pending":
+        print("refresh-block: AGENTS.md 无受管标记；先按 pending 指引插入", file=sys.stderr)
+        return 2
+    manifest = read_manifest(root)
+    if manifest is None:
+        print("refresh-block: 缺少 manifest；先跑 init", file=sys.stderr)
+        return 1
+    try:
+        cfg, _ = load_config(root, templates)
+        cfg = prepare_config(root, cfg, None, skill_version,
+                             source_dir=resolve_source(root))
+    except InitError as exc:
+        print(f"refresh-block: {exc}", file=sys.stderr)
+        return 1
+    if not cfg.get("skillRoot"):
+        print("refresh-block: 配置缺 skillRoot", file=sys.stderr)
+        return 1
+    ctx = render_context(cfg, root)
+    try:
+        section = render_agents_section(templates, ctx)
+    except InitError as exc:
+        print(f"refresh-block: {exc}", file=sys.stderr)
+        return 1
+    new_body = marker_scan(section)["body"]
+    if new_body == scan["body"]:
+        print("refresh-block: 块内容已是最新，无需重渲染")
+        return 0
+    if not confirm:
+        print("refresh-block: 检测到块内容变化（未写入）。确认后重跑 --refresh-block --confirm。")
+        import difflib
+        diff = difflib.unified_diff(
+            scan["body"].splitlines(), new_body.splitlines(),
+            fromfile="AGENTS.md#block(current)", tofile="AGENTS.md#block(rendered)", lineterm="",
+        )
+        for line in list(diff)[:80]:
+            print(line)
+        return 2
+    try:
+        with init_lock(root):
+            current = agents_path.read_text(encoding="utf-8")
+            scan = marker_scan(current)
+            if scan["state"] != "ok":
+                print("refresh-block: 锁内复检标记失败", file=sys.stderr)
+                return 1
+            pre = current.split(MARK_START, 1)[0]
+            post = current.split(MARK_END, 1)[1]
+            atomic_write_text(agents_path, pre + section + post)
+            updated = agents_path.read_text(encoding="utf-8")
+            body = marker_scan(updated)["body"]
+            config_on_disk = json.loads((root / CONFIG_REL).read_text(encoding="utf-8"))
+            entries = [entry for entry in manifest.get("entries", [])
+                       if isinstance(entry, dict)]
+            block_entries = [entry for entry in entries if entry.get("kind") == "block"]
+            if block_entries:
+                block_entries[0].update({
+                    "path": "AGENTS.md",
+                    "marker": "agent-crew:orchestration",
+                    "blockSha256": sha256_text(body),
+                    "renderVersion": skill_version,
+                })
+            else:
+                entries.append({
+                    "kind": "block",
+                    "path": "AGENTS.md",
+                    "marker": "agent-crew:orchestration",
+                    "blockSha256": sha256_text(body),
+                    "renderVersion": skill_version,
+                })
+            manifest["entries"] = entries
+            manifest["configHash"] = config_hash(config_on_disk)
+            manifest["skillVersion"] = skill_version
+            atomic_write_text(root / MANIFEST_REL,
+                              json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+            append_install_log(root, {
+                "ts": utc_now(),
+                "action": "refresh-block",
+                "operator": os.environ.get("USER") or "unknown",
+                "projectId": manifest.get("projectId"),
+                "skillVersion": skill_version,
+                "configHash": manifest["configHash"],
+                "root": str(root),
+                "result": "ok",
+                "files": [{"path": "AGENTS.md", "kind": "block", "status": "refreshed",
+                           "beforeSha": sha256_text(scan["body"]),
+                           "afterSha": sha256_bytes(body.encode("utf-8"))}],
+                "conflicts": [],
+                "next": "",
+            })
+    except InitLocked:
+        print("refresh-block: 另一个 init/upgrade 正在运行（locked）", file=sys.stderr)
+        return 2
+    print("refresh-block: 已重渲染 AGENTS 受管块（块外未动）")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# --check
+# ---------------------------------------------------------------------------
+
+def run_check(root: Path, templates: Path, skill_version: str) -> int:
+    config_path = root / CONFIG_REL
+    agents_path = root / "AGENTS.md"
+    if not config_path.is_file():
+        state = "pending" if agents_path.is_file() else "missing"
+        print(f"未安装（{state}）：缺少 {CONFIG_REL.as_posix()}")
+        return 2
+    manifest = read_manifest(root)
+    if manifest is None:
+        print(f"未安装：缺少 {MANIFEST_REL.as_posix()}")
+        return 2
+    problems: list[str] = []
+    stale: list[str] = []
+    modified: list[str] = []
+    pending_state = False
+    ok = 0
+
+    def check_file_entry(entry: dict) -> None:
+        nonlocal ok
+        rel = str(entry.get("path") or "")
+        path = root / rel
+        if not path.is_file():
+            problems.append(f"缺失 {rel}")
+            return
+        if sha256_text_file_matches(path, entry.get("sha256")):
+            ok += 1
+        else:
+            stale.append(rel)
+
+    entries = manifest.get("entries")
+    if not isinstance(entries, list):
+        problems.append("manifest entries 非法")
+        entries = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            problems.append("manifest entry 非对象")
+            continue
+        if entry.get("kind") == "file":
+            check_file_entry(entry)
+        elif entry.get("kind") == "block":
+            rel = str(entry.get("path") or "AGENTS.md")
+            text = (root / rel).read_text(encoding="utf-8") if (root / rel).is_file() else ""
+            scan = marker_scan(text) if text else {"state": "pending", "body": ""}
+            if scan["state"] == "pending":
+                problems.append("AGENTS.md 无标记（pending）")
+            elif scan["state"] == "invalid":
+                problems.append("AGENTS.md 标记非法：" + "；".join(scan["errors"]))
+            elif sha256_text(scan["body"]) == str(entry.get("blockSha256") or "").removeprefix("sha256:"):
+                ok += 1
+            else:
+                stale.append(f"{rel}#block")
+    if not agents_path.is_file():
+        pending_state = True
+    else:
+        scan_agents = marker_scan(agents_path.read_text(encoding="utf-8"))
+        if scan_agents["state"] == "pending":
+            pending_state = True
+        elif scan_agents["state"] == "invalid":
+            problems.append("AGENTS.md 标记非法：" + "；".join(scan_agents["errors"]))
+    config_hash_stored = manifest.get("configHash")
+    try:
+        config_on_disk = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        problems.append(f"配置损坏：{exc}")
+        config_on_disk = {}
+    if config_hash_stored and config_hash(config_on_disk) != str(config_hash_stored).removeprefix("sha256:"):
+        stale.append(f"{CONFIG_REL.as_posix()}#configHash")
+    config_version = config_on_disk.get("skillVersion")
+    if config_version != skill_version:
+        stale.append(f"{CONFIG_REL.as_posix()}#skillVersion({config_version}→{skill_version})")
+    for stub in manifest.get("roleStubs", []) if isinstance(manifest.get("roleStubs"), list) else []:
+        if not isinstance(stub, dict) or not stub.get("path"):
+            continue
+        path = root / str(stub["path"])
+        if not path.is_file():
+            problems.append(f"缺失 {stub['path']}")
+        elif stub.get("sha256") and sha256_file_raw(path) != str(stub["sha256"]).removeprefix("sha256:"):
+            modified.append(str(stub["path"]))
+        else:
+            ok += 1
+    try:
+        cfg, _ = load_config(root, templates)
+        cfg = prepare_config(root, cfg, None, skill_version,
+                             source_dir=resolve_source(root))
+        copies = forbidden_copies(root, str(cfg.get("skillRoot") or ""))
+        if copies:
+            problems.append("项目内出现规则/技能源副本：" + ", ".join(copies))
+    except InitError as exc:
+        problems.append(str(exc))
+    for rel in sorted(set(problems)):
+        print(f"[缺失/失败] {rel}")
+    for rel in sorted(set(stale)):
+        print(f"[过期] {rel}")
+    for rel in sorted(set(modified)):
+        print(f"[项目修改] {rel}（不判漂移）")
+    print(f"检查结果：{ok} 项一致，{len(set(problems))} 项失败，"
+          f"{len(set(stale))} 项过期，{len(set(modified))} 项项目修改。")
+    if problems:
+        return 1
+    if stale:
+        return 1
+    if pending_state:
+        print("AGENTS.md 无受管标记（pending）：按 docs/crew/AGENTS-block.pending.md 插入后重跑")
+        return 2
+    return 0
+
+
+def sha256_text_file_matches(path: Path, stored: str | None) -> bool:
+    if not stored:
+        return False
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return sha256_text(text) == str(stored).removeprefix("sha256:")
+
+
+# ---------------------------------------------------------------------------
+# --only-failed 记录
+# ---------------------------------------------------------------------------
+
+def init_report_path(root: Path) -> Path:
+    try:
+        return _crew_dir(root) / "init-report.json"
+    except InitError:
+        return root / ".planning" / ".agent-crew-init.json"
+
+
+def read_init_report(root: Path) -> list[str] | None:
+    path = init_report_path(root)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise InitError(f"上次 init 记录损坏：{exc}") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("failed"), list):
+        raise InitError(f"上次 init 记录损坏：{path}")
+    return [entry if isinstance(entry, str) else entry.get("path")
+            for entry in data["failed"]
+            if isinstance(entry, str) or isinstance(entry, dict)]
+
+
+def write_init_report(root: Path, failed: list[Item]) -> None:
+    path = init_report_path(root)
+    payload = [{"path": item.target.as_posix(), "status": item.status, "note": item.note}
+               for item in failed]
+    if not payload:
+        if path.exists():
+            path.unlink()
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, json.dumps({"version": 1, "updatedAt": utc_now(),
+                                        "failed": payload}, ensure_ascii=False, indent=2) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# init 主流程
+# ---------------------------------------------------------------------------
+
+def _portfolio_rel(root: Path, cfg: dict) -> Path:
+    configured = Path(str(cfg.get("portfolioDir") or ".planning/portfolio"))
+    pattern = str(cfg.get("portfolioMatch") or "*portfolio*")
+    planning = root / ".planning"
+    if planning.is_dir():
+        matches = sorted(p for p in planning.iterdir()
+                         if p.is_dir() and fnmatch.fnmatch(p.name, pattern))
+        if matches and configured not in [p.relative_to(root) for p in matches]:
+            return matches[0].relative_to(root)
+    return configured
+
+
+def _generate_skeletons(root: Path, templates: Path, cfg: dict, ctx: dict) -> dict[Path, str]:
+    products: dict[Path, str] = {}
+    portfolio = _portfolio_rel(root, cfg)
+    plan_tpl = templates / PORTFOLIO_PLAN_TEMPLATE
+    if plan_tpl.exists():
+        products[portfolio / "task_plan.md"] = apply_template(
+            plan_tpl.read_text(encoding="utf-8"), ctx)
+    products[portfolio / "findings.md"] = FINDINGS_SKELETON
+    products[portfolio / "progress.md"] = PROGRESS_SKELETON
+    context_tpl = templates / "CONTEXT-骨架.md"
+    if context_tpl.exists():
+        products[Path("CONTEXT.md")] = apply_template(
+            context_tpl.read_text(encoding="utf-8"), ctx)
+    topology_rel = Path(str((cfg.get("hooks") or {}).get("paths", {}).get("topology")
+                            or DEFAULT_TOPOLOGY_REL))
+    topology_tpl = templates / "project" / "topology.md"
+    if topology_tpl.exists():
+        # 红线/人工门唯一落点是 AGENTS 受管块；topology 只留指针，避免跨文档重复句
+        topology_ctx = dict(ctx)
+        topology_ctx["red_lines"] = "项目红线与人工门以 `AGENTS.md` 受管块为准（唯一落点）。"
+        products[topology_rel] = apply_template(
+            topology_tpl.read_text(encoding="utf-8"), topology_ctx)
     return products
 
 
-def gen_scripts(root: Path, report: Report, force: bool,
-                only: set[Path] | None = None) -> None:
-    for rel, content, label, src in script_products(report):
+def run_apply(root: Path, source_dir: Path, templates: Path, skill_version: str,
+              force: bool, only: set[Path] | None, dry_run: bool) -> int:
+    owner = None if dry_run else acquire_owner(root)
+    if not dry_run and owner is None:
+        try:
+            append_install_log(root, {
+                "ts": utc_now(), "action": "init", "result": "locked",
+                "operator": os.environ.get("USER") or "unknown",
+                "skillVersion": skill_version, "root": str(root),
+            })
+        except OSError:
+            pass
+        print("错误：另一个 init/upgrade 正在运行（locked）", file=sys.stderr)
+        return 2
+    try:
+        return _run_apply_locked(root, source_dir, templates, skill_version, force,
+                                 only, dry_run)
+    finally:
+        release_owner(owner)
+
+
+def _run_apply_locked(root: Path, source_dir: Path, templates: Path, skill_version: str,
+                      force: bool, only: set[Path] | None, dry_run: bool) -> int:
+    report = Report()
+    detect(root, report)
+    try:
+        cfg, existing = load_config(root, templates)
+        cfg = prepare_config(root, cfg, existing, skill_version, source_dir=source_dir)
+    except InitError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 1
+    ctx = render_context(cfg, root)
+
+    # 预检 AGENTS 标记
+    agents_path = root / "AGENTS.md"
+    current_agents = agents_path.read_text(encoding="utf-8") if agents_path.is_file() else None
+    scan = marker_scan(current_agents) if current_agents is not None else {
+        "state": "missing", "body": "", "errors": []
+    }
+    if scan["state"] == "invalid":
+        print("错误：AGENTS.md 标记非法，fail closed（零写入）：" + "；".join(scan["errors"]),
+              file=sys.stderr)
+        return 1
+    try:
+        section = render_agents_section(templates, ctx)
+    except InitError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 1
+    rendered_body = marker_scan(section)["body"]
+
+    # --force 拒绝项目自有漂移（AGENTS 块 / 项目角色）
+    manifest_before = read_manifest(root)
+    known_stubs = {
+        str(stub.get("path")): str(stub.get("sha256") or "").removeprefix("sha256:")
+        for stub in (manifest_before or {}).get("roleStubs", [])
+        if isinstance(stub, dict)
+    }
+    if force:
+        if scan["state"] == "ok" and scan["body"] != rendered_body:
+            print("错误：--force 不覆盖 AGENTS 受管块（块漂移需人工确认或 --refresh-block --confirm）",
+                  file=sys.stderr)
+            return 1
+        for runtime in ("qoder", "opencode"):
+            for role in ROLE_ORDER:
+                rel = role_stub_path(runtime, role)
+                path = root / rel
+                if path.is_file() and known_stubs.get(rel.as_posix()) \
+                        and sha256_file_raw(path) != known_stubs[rel.as_posix()]:
+                    print(f"错误：--force 不覆盖项目角色文件：{rel.as_posix()}（项目自有）",
+                          file=sys.stderr)
+                    return 1
+
+    # 计划（dry-run 与 apply 共用）
+    actions: list[tuple[Path, str, str, str | None]] = []  # rel, status, note, content
+
+    def plan_write(rel: Path, content: str, note: str) -> None:
         if only is not None and rel not in only:
+            return
+        target = root / rel
+        if target.exists():
+            try:
+                same = target.read_text(encoding="utf-8") == content
+            except OSError:
+                same = False
+            if same:
+                actions.append((rel, "跳过", note, None))
+            elif rel.suffix in {".py", ".sh"}:
+                actions.append((rel, "覆盖" if force else "冲突", note, content))
+            else:
+                actions.append((rel, "跳过", note + "（已存在，不重建）", None))
+        else:
+            actions.append((rel, "新建", note, content))
+
+    # 脚本
+    for name in SCRIPT_MANIFEST:
+        src = script_source(name, source_dir)
+        if not src.exists():
+            report.warnings.append(f"技能脚本缺失：scripts/{name}")
             continue
-        write_product(root, rel, content, report, force, label, src=src, only=only)
-        if rel.suffix == ".sh":
+        plan_write(Path("scripts") / name, src.read_text(encoding="utf-8"), f"脚本 {name}")
+
+    # 项目角色 stub（仅缺失时）
+    for runtime in ("qoder", "opencode"):
+        for role in ROLE_ORDER:
+            rel = role_stub_path(runtime, role)
+            if only is not None and rel not in only:
+                continue
             target = root / rel
             if target.exists():
-                target.chmod(0o755)
+                actions.append((rel, "跳过", "项目角色（已存在，永不覆盖）", None))
+            else:
+                actions.append((rel, "新建", f"项目角色 stub（{runtime}/{role}）",
+                                role_stub_content(runtime, role)))
 
-
-def role_products(templates: Path, ctx: dict) -> list[tuple[Path, str, str, str]]:
-    mapping = [
-        (templates / "agents" / "qoder", Path(".qoder") / "agents", "角色"),
-        (templates / "agents" / "opencode", Path(".opencode") / "agent", "角色"),
-        (templates / "skills" / "firstmate-dispatch",
-         Path(".opencode") / "skills" / "firstmate-dispatch", "副舵派活 SOP"),
-    ]
-    products: list[tuple[Path, str, str, str]] = []
-    for src_dir, dst_dir, label in mapping:
-        if not src_dir.is_dir():
-            continue
-        for src in sorted(src_dir.glob("*.md")):
-            products.append((
-                dst_dir / src.name,
-                apply_template(src.read_text(encoding="utf-8"), ctx),
-                f"{label} {src.name}",
-                str(src),
-            ))
-    return products
-
-
-def rule_doc_products(report: Report | None = None) -> list[tuple[Path, str, str, str]]:
-    products: list[tuple[Path, str, str, str]] = []
-    for src, rel, label in CREW_RULE_SOURCES:
-        if not src.exists():
-            if report is not None:
-                report.warnings.append(f"规则正文缺失：{src}（技能安装不完整？）")
-            continue
-        products.append((rel, src.read_text(encoding="utf-8"), label, str(src)))
-    return products
-
-
-# ---------- 各生成步骤 ----------
-
-def gen_config(root: Path, cfg: dict, report: Report, force: bool,
-               portfolio_dir: str | None = None, skill_version: str = "",
-               only: set[Path] | None = None) -> dict:
-    """落 orchestration.json；已存在读用现值合并，并维护 skillVersion 版本戳。
-
-    portfolio_dir 非空时为「沿用既有 portfolio 目录」的选择结果：合并后强制
-    portfolioDir 回到沿用路径（阻断4：配置/渲染/start-helm 三处一致），与文件
-    现值不同则回写修正（二跑一致时不回写，保持幂等）。
-    only 非空时只处理集合内路径（--only-failed），但仍返回合并后的配置供渲染。
-    """
-    path = root / CONFIG_REL
-    selected = only is None or CONFIG_REL in only
-    if path.exists():
+    # 配置 / 骨架
+    config_text = json.dumps(cfg, ensure_ascii=False, indent=2) + "\n"
+    config_path = root / CONFIG_REL
+    if config_path.exists():
         try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-        except ValueError:
-            existing = None
-        broken = not isinstance(existing, dict)
-        if broken:
-            # 建议10：损坏配置显式警告，不再静默降级；不覆盖用户文件
-            report.warnings.append(
-                f"配置文件损坏（{path}），已用内置默认值；请修复或删除后重跑。"
-            )
-            merged = _deep_merge(cfg, {})
-            merged["skillVersion"] = skill_version
-            if selected:
-                report.add(Item(target=CONFIG_REL, status="跳过",
-                                note="已存在但损坏，已按内置默认值处理；版本戳未写入"))
-            return merged
-        merged = _deep_merge(cfg, existing)
-        updates: dict = {}
-        if portfolio_dir is not None and merged.get("portfolioDir") != portfolio_dir:
-            merged["portfolioDir"] = portfolio_dir
-            updates["portfolioDir"] = portfolio_dir
-        installed = existing.get("skillVersion")
-        if installed != skill_version:
-            merged["skillVersion"] = skill_version
-            updates["skillVersion"] = skill_version
-            if selected:
-                report.warnings.append(
-                    f"源已变更（已安装 skillVersion={installed if installed else '缺失'}，"
-                    f"源={skill_version}）：需重跑 update-all 后重跑 init。"
-                )
-        if not selected:
-            return merged
-        if updates:
-            data = dict(existing)
-            data.update(updates)
-            path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-                            encoding="utf-8")
-            note = "已存在，读用现值；" + "、".join(f"{key} 已更新" for key in updates)
-        else:
-            diffs = sorted(
-                k for k in set(existing) | set(cfg)
-                if not k.startswith("_") and existing.get(k) != cfg.get(k)
-            )
-            note = (f"已存在，读用现值；与默认值差异键：{', '.join(diffs)}"
-                    if diffs else "已存在，读用现值")
-        report.add(Item(target=CONFIG_REL, status="跳过", note=note))
-        return merged
-    cfg = dict(cfg)
-    cfg["projectName"] = cfg.get("projectName") or root.resolve().name
-    cfg["skillVersion"] = skill_version
-    if selected:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        report.add(Item(target=CONFIG_REL, status="新建"))
-    return cfg
-
-
-def gen_role_templates(root: Path, templates: Path, ctx: dict, report: Report, force: bool,
-                       only: set[Path] | None = None) -> None:
-    mapping = [
-        templates / "agents" / "qoder",
-        templates / "agents" / "opencode",
-        templates / "skills" / "firstmate-dispatch",
-    ]
-    for rel, content, label, src in role_products(templates, ctx):
-        if only is not None and rel not in only:
-            continue
-        write_product(root, rel, content, report, force, label, src=src, only=only)
-    if not any(path.is_dir() for path in mapping):
-        report.warnings.append(
-            "未找到角色模板（templates/agents/）：本产物跳过。"
-            "模板由技能资产提供；若你是技能开发者请检查 templates 目录完整性。"
-        )
-
-
-def portfolio_products(portfolio_rel: Path, templates: Path, ctx: dict,
-                       report: Report | None = None) -> list[tuple[Path, str, str]]:
-    plan_tpl = templates / PORTFOLIO_PLAN_TEMPLATE
-    targets: list[tuple[Path, str, str]] = []
-    if plan_tpl.exists():
-        targets.append((
-            portfolio_rel / "task_plan.md",
-            apply_template(plan_tpl.read_text(encoding="utf-8"), ctx),
-            "portfolio task_plan 骨架",
-        ))
-    elif report is not None:
-        report.warnings.append(
-            f"未找到模板 {PORTFOLIO_PLAN_TEMPLATE}：portfolio 的 task_plan.md 跳过（findings/progress 仍生成）。"
-        )
-    targets += [
-        (portfolio_rel / "findings.md", FINDINGS_SKELETON, "portfolio findings 骨架"),
-        (portfolio_rel / "progress.md", PROGRESS_SKELETON, "portfolio progress 骨架"),
-    ]
-    return targets
-
-
-def gen_portfolio(root: Path, portfolio_rel: Path, templates: Path, ctx: dict,
-                  report: Report, force: bool, only: set[Path] | None = None) -> None:
-    """portfolio 三文件：已存在即跳过（用户业务内容，不比对不重建），缺失才按文件粒度补齐。"""
-    for rel, content, label in portfolio_products(portfolio_rel, templates, ctx, report):
+            same = config_path.read_text(encoding="utf-8") == config_text
+        except OSError:
+            same = False
+        actions.append((CONFIG_REL, "跳过" if same else "新建",
+                        "配置（保留用户值；更新 skillVersion/补齐新键）" if not same else "配置",
+                        None if same else config_text))
+    else:
+        actions.append((CONFIG_REL, "新建", "配置", config_text))
+    for rel, content in _generate_skeletons(root, templates, cfg, ctx).items():
         if only is not None and rel not in only:
             continue
         target = root / rel
-        if target.exists():
-            report.add(Item(target=rel, status="跳过", note=f"{label}（已存在，不重建）"))
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
-        report.add(Item(target=rel, status="新建", note=label))
+        actions.append((rel, "跳过" if target.exists() else "新建",
+                        "骨架（已存在不重建）" if target.exists() else "骨架", None if target.exists() else content))
 
-
-def build_agents_section(templates: Path, ctx: dict) -> tuple[str | None, str]:
-    tpl = templates / "AGENTS-编排节.md"
-    if not tpl.exists():
-        return None, "未找到模板 AGENTS-编排节.md：AGENTS.md 编排节跳过。"
-    raw = apply_template(tpl.read_text(encoding="utf-8"), ctx)
-    section_body = strip_marker_lines(raw).strip("\n")  # 阻断2：先剥模板自带标记，代码常量统一包裹
-    return f"{MARK_START}\n{section_body}\n{MARK_END}", ""
-
-
-def expected_agents_text(templates: Path, ctx: dict, current: str | None) -> tuple[str | None, str]:
-    """按 init 的合并规则计算 AGENTS.md 期望全文；模板缺失时返回 (None, 警告)。"""
-    section, warning = build_agents_section(templates, ctx)
-    if section is None:
-        return None, warning
-    if current is None:
-        return AGENT_SKELETON_HEADER + "\n" + section + "\n", ""
-    if MARK_START in current and MARK_END in current:
-        pre = current.split(MARK_START, 1)[0]
-        # R1：post 段收敛孤儿标记行——旧双层形态的第二个 end 落在首个 end 之后，
-        # 不收敛会与干净渲染结果自洽，--force 一次后仍残留 end×2 且永不再提示。
-        post = strip_marker_lines(current.split(MARK_END, 1)[1])
-        return pre + section + post, ""
-    return current.rstrip("\n") + "\n\n" + section + "\n", ""
-
-
-def gen_agents_section(root: Path, templates: Path, ctx: dict, report: Report, force: bool,
-                       only: set[Path] | None = None) -> None:
-    rel = Path("AGENTS.md")
-    if only is not None and rel not in only:
-        return
-    target = root / rel
-    current = target.read_text(encoding="utf-8") if target.exists() else None
-    merged, warning = expected_agents_text(templates, ctx, current)
-    if merged is None:
-        report.warnings.append(warning)
-        return
-    if current is None:
-        write_product(root, rel, merged, report, force,
-                      "AGENTS.md（最小骨架+编排节）", only=only)
-        return
-    if merged == current:
-        report.add(Item(target=rel, status="跳过", note="编排节内容一致"))
-    elif MARK_START in current and MARK_END in current:
-        if not force:
-            report.add(Item(target=rel, status="冲突",
-                            note="编排节已有标记且内容与渲染结果不一致", rendered=merged,
-                            src=str(templates / "AGENTS-编排节.md")))
+    # AGENTS
+    if only is None or Path("AGENTS.md") in only:
+        if scan["state"] == "missing":
+            actions.append((Path("AGENTS.md"), "新建", "AGENTS.md（骨架+受管块）",
+                            rendered_agents_text(None, section)))
+        elif scan["state"] == "pending":
+            actions.append((PENDING_REL, "新建", "AGENTS 无标记：生成 pending（AGENTS 零写入）",
+                            pending_text(section)))
+        elif scan["body"] == rendered_body:
+            actions.append((Path("AGENTS.md"), "跳过", "AGENTS 受管块一致", None))
         else:
-            target.write_text(merged, encoding="utf-8")
-            report.add(Item(target=rel, status="冲突（--force 覆盖）",
-                            note="编排节按标记定界替换，节外内容未动"))
-    else:
-        target.write_text(merged, encoding="utf-8")
-        report.add(Item(target=rel, status="追加",
-                        note="编排节已追加（标记节定界，原内容未动）"))
+            actions.append((Path("AGENTS.md"), "冲突",
+                            "AGENTS 受管块与渲染不一致（人工确认后 --refresh-block --confirm）", None))
 
+    pending = scan["state"] == "pending"
+    conflicts = [action for action in actions if action[1] == "冲突"]
 
-def gen_context(root: Path, templates: Path, ctx: dict, report: Report, force: bool,
-                only: set[Path] | None = None) -> None:
-    rel = Path("CONTEXT.md")
-    if only is not None and rel not in only:
-        return
-    target = root / rel
-    if target.exists():
-        report.add(Item(target=rel, status="跳过", note="已存在，不动"))
-        return
-    tpl = templates / "CONTEXT-骨架.md"
-    if not tpl.exists():
-        report.warnings.append("未找到模板 CONTEXT-骨架.md：CONTEXT.md 跳过。")
-        return
-    write_product(root, rel, apply_template(tpl.read_text(encoding="utf-8"), ctx),
-                  report, force, "术语文档骨架", src=str(tpl), only=only)
+    if dry_run:
+        print(f"=== agent-crew init --dry-run（{root}；技能版本 {skill_version}） ===")
+        for rel, status, note, _content in actions:
+            print(f"[{status}] {rel.as_posix()}" + (f"（{note}）" if note else ""))
+        for warning in report.warnings:
+            print(f"[警告] {warning}")
+        print("dry-run：零写入。")
+        return 0
 
-
-def gen_crew_docs(root: Path, report: Report, force: bool,
-                  only: set[Path] | None = None) -> None:
-    for rel, content, label, src in rule_doc_products(report):
-        if only is not None and rel not in only:
-            continue
-        write_product(root, rel, content, report, force, label, src=src, only=only)
-
-
-# ---------- 交互 ----------
-
-def ask_choice(prompt: str, options: list[str], default: int, yes: bool) -> int:
-    """tty 编号选项问答（建议8：1/2/… 编号 + 列出全部候选）；非 tty / --yes / EOF 取 default。
-    返回 1 起编号；兼容中文回答（「沿用」→1，「新建」→末项）。"""
-    if yes or not sys.stdin.isatty():
-        return default
-    menu = "\n".join(f"  {i}) {opt}" for i, opt in enumerate(options, 1))
+    # 锁 + 备份 + 写入
     try:
-        answer = input(f"{prompt}：\n{menu}\n编号 [默认: {default}]: ").strip()
-    except EOFError:
-        return default
-    if not answer:
-        return default
-    if answer.isdigit() and 1 <= int(answer) <= len(options):
-        return int(answer)
-    if answer.startswith("新建"):
-        return len(options)
-    if answer.startswith("沿用"):
-        return 1
-    return default
-
-
-# ---------- 主流程 ----------
-
-def _check_content(root: Path, rel: Path, content: str) -> tuple[str, str]:
-    target = root / rel
-    if not target.exists():
-        return "缺失", ""
-    try:
-        current = target.read_text(encoding="utf-8")
-    except OSError as exc:
-        return "过期", f"无法读取：{exc}"
-    if current != content:
-        return "过期", "内容与渲染结果不一致"
-    return "一致", ""
-
-
-def run_check(root: Path, templates: Path, skill_version: str) -> int:
-    """只读校验全部受管产物；逐项报一致/缺失/过期，有漂移非零退出。"""
-    print(f"技能版本：{skill_version}")
-    counts = {"一致": 0, "缺失": 0, "过期": 0}
-
-    def record(rel: Path, status: str, note: str = "") -> None:
-        counts[status] += 1
-        print(f"[{status}] {rel.as_posix()}" + (f"（{note}）" if note else ""))
-
-    report = Report()
-    cfg = load_defaults()
-    config_path = root / CONFIG_REL
-    if not config_path.exists():
-        record(CONFIG_REL, "缺失")
-    else:
-        try:
-            loaded = json.loads(config_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            record(CONFIG_REL, "过期", f"JSON 损坏：{exc}")
-        else:
-            if not isinstance(loaded, dict):
-                record(CONFIG_REL, "过期", "不是 JSON 对象")
-            else:
-                cfg = _deep_merge(cfg, loaded)
-                installed = loaded.get("skillVersion")
-                if installed == skill_version:
-                    record(CONFIG_REL, "一致", f"skillVersion={skill_version}")
+        with init_lock(root):
+            files = [root / rel for rel, status, _note, _content in actions
+                     if status in {"新建", "覆盖"} and _content is not None
+                     and (root / rel).is_file()]
+            backup_id = None
+            if force and any(action[1] == "覆盖" for action in actions):
+                backup_id = create_backup(root, "init-force", files)
+            for rel, status, note, content in actions:
+                target = root / rel
+                if status == "新建" or status == "覆盖":
+                    if content is None:
+                        continue
+                    mode = 0o755 if rel.suffix == ".sh" else None
+                    atomic_write_text(target, content, mode=mode)
+                    report.add(Item(rel, status, note))
+                elif status == "跳过":
+                    report.add(Item(rel, "跳过", note))
                 else:
-                    record(CONFIG_REL, "过期",
-                           f"skillVersion={installed if installed else '缺失'}，源={skill_version}")
-                    print(
-                        f"源已变更（已安装 skillVersion={installed if installed else '缺失'}，"
-                        f"源={skill_version}）：需重跑 update-all 后重跑 init。"
-                    )
-    cfg["projectName"] = cfg.get("projectName") or root.name
-    ctx = render_context(cfg)
-    ctx["project_name"] = ctx["project_name"] or root.name
+                    report.add(Item(rel, "冲突", note))
 
-    for rel, content, _label, _src in role_products(templates, ctx):
-        record(rel, *_check_content(root, rel, content))
-    for rel, content, _label, _src in script_products(report):
-        record(rel, *_check_content(root, rel, content))
-    for rel, content, _label, _src in rule_doc_products(report):
-        record(rel, *_check_content(root, rel, content))
+            # 更新 AGENTS 扫描结果（新建后）
+            current_agents = agents_path.read_text(encoding="utf-8") if agents_path.is_file() else None
+            final_scan = marker_scan(current_agents) if current_agents is not None else {
+                "state": "missing", "body": "", "errors": []
+            }
 
-    agents_rel = Path("AGENTS.md")
-    agents_tpl = templates / "AGENTS-编排节.md"
-    if agents_tpl.exists():
-        target = root / agents_rel
-        current = target.read_text(encoding="utf-8") if target.exists() else None
-        expected, warning = expected_agents_text(templates, ctx, current)
-        if expected is None:
-            report.warnings.append(warning)
-        elif current is None:
-            record(agents_rel, "缺失")
-        elif expected == current:
-            record(agents_rel, "一致")
-        else:
-            record(agents_rel, "过期", "编排节内容与渲染结果不一致")
+            # manifest
+            cfg_on_disk = json.loads((root / CONFIG_REL).read_text(encoding="utf-8"))
+            entries: list[dict] = []
+            for name in SCRIPT_MANIFEST:
+                rel = Path("scripts") / name
+                target = root / rel
+                if target.is_file():
+                    entries.append({"kind": "file", "path": rel.as_posix(),
+                                    "sha256": sha256_text(target.read_text(encoding="utf-8"))})
+            if final_scan["state"] == "ok":
+                entries.append({
+                    "kind": "block", "path": "AGENTS.md",
+                    "marker": "agent-crew:orchestration",
+                    "blockSha256": sha256_text(final_scan["body"]),
+                    "renderVersion": skill_version,
+                })
+            role_stubs: list[dict] = []
+            for runtime in ("qoder", "opencode"):
+                for role in ROLE_ORDER:
+                    rel = role_stub_path(runtime, role)
+                    target = root / rel
+                    if target.is_file():
+                        role_stubs.append({"path": rel.as_posix(), "managed": False,
+                                           "sha256": sha256_file_raw(target)})
+            manifest = {
+                "manifestVersion": 1,
+                "skillVersion": skill_version,
+                "projectId": cfg_on_disk.get("projectId"),
+                "configHash": config_hash(cfg_on_disk),
+                "entries": entries,
+                "roleStubs": role_stubs,
+            }
+            atomic_write_text(root / MANIFEST_REL,
+                              json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+            result = "pending" if pending else ("conflict" if report.conflicts else "ok")
+            append_install_log(root, {
+                "ts": utc_now(),
+                "action": "init",
+                "operator": os.environ.get("USER") or "unknown",
+                "projectId": cfg_on_disk.get("projectId"),
+                "skillVersion": skill_version,
+                "configHash": manifest["configHash"],
+                "root": str(root),
+                "backupId": backup_id,
+                "files": [{"path": item.target.as_posix(), "status": item.status}
+                          for item in report.items],
+                "conflicts": [item.target.as_posix() for item in report.conflicts],
+                "result": result,
+                "next": "按 pending 指引插入 AGENTS 块后重跑" if pending else "",
+            })
+            write_init_report(root, report.conflicts)
+    except InitLocked:
+        try:
+            append_install_log(root, {
+                "ts": utc_now(), "action": "init", "result": "locked",
+                "operator": os.environ.get("USER") or "unknown",
+                "skillVersion": skill_version, "root": str(root),
+            })
+        except OSError:
+            pass
+        print("错误：另一个 init/upgrade 正在运行（locked）", file=sys.stderr)
+        return 2
+    except InitError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 1
 
-    portfolio_rel = Path(cfg["portfolioDir"])
-    for rel, _content, _label in portfolio_products(portfolio_rel, templates, ctx, report):
-        record(rel, "一致" if (root / rel).exists() else "缺失")
-
-    if (templates / "CONTEXT-骨架.md").exists():
-        context_rel = Path("CONTEXT.md")
-        record(context_rel, "一致" if (root / context_rel).exists() else "缺失")
-
+    print(f"\n=== agent-crew init 核对清单（{root}；技能版本 {skill_version}） ===")
+    for item in report.items:
+        print(f"[{item.status}] {item.target.as_posix()}" + (f"（{item.note}）" if item.note else ""))
     for warning in report.warnings:
         print(f"[警告] {warning}")
-    print(
-        f"检查结果：{counts['一致']} 项一致，{counts['缺失']} 项缺失，"
-        f"{counts['过期']} 项过期。"
-    )
-    return 0 if counts["缺失"] == 0 and counts["过期"] == 0 else 1
+    if report.conflicts:
+        print("\n冲突清单（默认不覆盖）：")
+        for item in report.conflicts:
+            print(f"  - {item.target.as_posix()}（{item.note}）")
+    if pending:
+        print(f"\nAGENTS.md 无标记：已生成 {PENDING_REL.as_posix()}，AGENTS.md 未写入；"
+              "插入块后重跑 init。")
+        return 2
+    return 2 if report.conflicts else 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="agent-crew 编排体系初始化（v2.1 幂等）")
+    parser.add_argument("--root", help="目标项目仓根（默认 cwd）")
+    parser.add_argument("--templates", help=f"模板目录覆盖（默认 {TEMPLATES}）")
+    parser.add_argument("--yes", action="store_true", help="零交互（兼容参数）")
+    parser.add_argument("--force", action="store_true",
+                        help="覆盖 kind:file 受管脚本（AGENTS/项目角色永不覆盖）")
+    parser.add_argument("--dry-run", action="store_true", help="只打印计划，零写入")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true", help="只读校验安装状态与漂移")
+    mode.add_argument("--only-failed", action="store_true", help="只重跑上次冲突/失败项")
+    mode.add_argument("--refresh-block", action="store_true",
+                      help="只重渲染 AGENTS 受管块（需 --confirm 才写）")
+    parser.add_argument("--confirm", action="store_true", help="配合 --refresh-block 确认写入")
+    return parser
 
 
 def run(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="agent-crew 编排体系初始化（幂等）")
-    parser.add_argument("--root", help="目标项目仓根（默认 cwd）")
-    parser.add_argument("--templates", help=f"模板目录覆盖（默认 {TEMPLATES}）")
-    parser.add_argument("--yes", action="store_true", help="零交互，全部取默认值")
-    parser.add_argument("--force", action="store_true", help="冲突时覆盖（仅限本技能管理的产物路径）")
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument(
-        "--check", action="store_true",
-        help="只读校验受管产物（逐项一致/缺失/过期），有漂移非零退出",
-    )
-    mode.add_argument(
-        "--only-failed", action="store_true",
-        help="只重跑上次 init 记录的失败/冲突项（记录在 .git/crew/init-report.json）",
-    )
-    args = parser.parse_args(argv)
-
+    args = build_parser().parse_args(argv)
     root = Path(args.root).resolve() if args.root else Path.cwd().resolve()
-    templates = Path(args.templates).resolve() if args.templates else TEMPLATES
-    skill_version = read_skill_version()
-
+    source_dir = resolve_source(root) if root.is_dir() else SKILL_DIR
+    templates = Path(args.templates).resolve() if args.templates else source_dir / "templates"
+    skill_version = read_skill_version(source_dir)
     if not root.is_dir():
         print(f"错误：目标目录不存在：{root}", file=sys.stderr)
         return 1
-
     if args.check:
         return run_check(root, templates, skill_version)
-
-    report = Report()
+    if args.refresh_block:
+        return refresh_block(root, templates, skill_version, args.confirm)
     only: set[Path] | None = None
     if args.only_failed:
         try:
             failed = read_init_report(root)
-        except InitReportError as exc:
-            print(f"错误：上次 init 失败记录损坏（{exc}）；请先正常运行 init 修复。",
-                  file=sys.stderr)
+        except InitError as exc:
+            print(f"错误：{exc}", file=sys.stderr)
             return 1
         if failed is None:
-            print(
-                f"未找到上次 init 失败记录（{init_report_path(root)}）；"
-                "请先正常运行 init 后再用 --only-failed。"
-            )
+            print("未找到上次 init 冲突记录；先正常运行 init。")
             return 0
         if not failed:
-            print("上次 init 未记录失败/冲突项，无需 --only-failed。")
+            print("上次 init 无冲突/失败项。")
             return 0
-        only = {Path(path) for path in failed}
-
-    detect(root, report)
-
-    cfg = load_defaults()
-
-    if only is not None:
-        # 只重跑失败项：读现有配置取得 portfolioDir，不触发交互与目录选择
-        config_path = root / CONFIG_REL
-        if config_path.exists():
-            try:
-                existing = json.loads(config_path.read_text(encoding="utf-8"))
-            except ValueError:
-                existing = None
-            if isinstance(existing, dict):
-                cfg = _deep_merge(cfg, existing)
-        portfolio_rel = Path(cfg["portfolioDir"])
-        chosen_rel: str | None = None
-    else:
-        # portfolio 目录：已有 *portfolioMatch* 匹配目录时询问生成位置（--yes 取默认=沿用第一个候选）。
-        # 先询问后落配置（阻断4）：沿用结果同步进 cfg["portfolioDir"]，使 orchestration.json、
-        # 渲染 ctx、start-helm.sh 必读清单三处一致。
-        portfolio_rel = Path(cfg["portfolioDir"])
-        configured = portfolio_rel.as_posix()
-        existing_dirs = find_portfolio_dirs(root, cfg["portfolioMatch"])
-        chosen_rel = None
-        if configured in {p.relative_to(root).as_posix() for p in existing_dirs}:
-            chosen_rel = configured  # 配置指向的目录已存在：视为沿用，不再询问
-            report.add(Item(target=portfolio_rel, status="跳过",
-                            note="沿用配置指向的既有 portfolio 目录"))
-        elif existing_dirs:
-            options = [f"沿用 {p.relative_to(root).as_posix()}" for p in existing_dirs]
-            options.append(f"新建 {configured}")
-            pick = ask_choice("检测到已有 portfolio 目录，选择生成位置", options, 1, args.yes)
-            if pick <= len(existing_dirs):
-                chosen_rel = existing_dirs[pick - 1].relative_to(root).as_posix()
-                report.add(Item(target=Path(chosen_rel), status="跳过",
-                                note="沿用既有 portfolio 目录"))
-            else:
-                report.add(Item(target=portfolio_rel, status="新建", note="新建 portfolio 目录"))
-            if chosen_rel is not None:
-                cfg["portfolioDir"] = chosen_rel
-                portfolio_rel = Path(chosen_rel)
-
-    cfg = gen_config(root, cfg, report, args.force, portfolio_dir=chosen_rel,
-                     skill_version=skill_version, only=only)
-    portfolio_rel = Path(cfg["portfolioDir"])
-    ctx = render_context(cfg)
-    ctx["project_name"] = ctx["project_name"] or root.name
-
-    gen_role_templates(root, templates, ctx, report, args.force, only=only)
-    gen_scripts(root, report, args.force, only=only)
-    gen_crew_docs(root, report, args.force, only=only)
-    gen_portfolio(root, portfolio_rel, templates, ctx, report, args.force, only=only)
-    gen_agents_section(root, templates, ctx, report, args.force, only=only)
-    gen_context(root, templates, ctx, report, args.force, only=only)
-
-    failed_items = [item for item in report.items if item.status == "冲突"]
-    write_init_report(root, failed_items, report.warnings, skill_version)
-
-    # 核对清单
-    print(f"\n=== agent-crew init 核对清单（{root}；技能版本 {skill_version}） ===")
-    for item in report.items:
-        print(f"[{item.status}] {item.target.as_posix()}" + (f"（{item.note}）" if item.note else ""))
-    if only is not None:
-        requested = {path.as_posix() for path in only}
-        handled = {item.target.as_posix() for item in report.items}
-        unmatched = sorted(requested - handled)
-        if unmatched:
-            print("\n[提示] 以下失败项未匹配到当前受管产物（模板/脚本可能已变更）：")
-            for path in unmatched:
-                print(f"  - {path}")
-    for warning in report.warnings:
-        print(f"[警告] {warning}")
-    if report.conflicts:
-        print("\n冲突清单（默认不覆盖；人工比对后删除旧文件重跑，或加 --force 仅覆盖本技能产物路径）：")
-        for item in report.conflicts:
-            line = f"  - {item.target.as_posix()}（{item.note}）"
-            if item.src:
-                line += f"\n      技能侧源：{item.src}"
-            print(line)
-    print("\n后续步骤：")
-    print("  1) 启动总舵：bash scripts/start-helm.sh（需 Herdr server 运行）")
-    print("  2) 日常编排：对主 agent 说「启动总舵 / 派活」即可；详见技能 SKILL.md")
-    return 2 if report.conflicts and not args.force else 0
+        only = {Path(path) for path in failed if path}
+    return run_apply(root, source_dir, templates, skill_version,
+                     args.force, only, args.dry_run)
 
 
 def main(argv: list[str] | None = None) -> int:

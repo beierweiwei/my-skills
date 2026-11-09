@@ -156,11 +156,18 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     mkdir -p -- "$sandbox/$(dirname -- "$rel")"
     cp -a -- "$PROJECT_ROOT/$rel" "$sandbox/$rel"
   done < <(list_managed_files "$PROJECT_ROOT" | sort)
-  if ! python3 "$INIT_PY" --root "$sandbox" --yes --force >"$sandbox/.init.log" 2>&1; then
+  set +e
+  python3 "$INIT_PY" --root "$sandbox" --yes --force >"$sandbox/.init.log" 2>&1
+  SANDBOX_RC=$?
+  set -e
+  if [[ "$SANDBOX_RC" -ne 0 && "$SANDBOX_RC" -ne 2 ]]; then
     echo "错误：v2 init.py 在沙箱渲染失败，无法给出变更清单：" >&2
     tail -n 20 -- "$sandbox/.init.log" >&2 || true
     rm -rf -- "$sandbox"
     exit 2
+  fi
+  if [[ "$SANDBOX_RC" -eq 2 ]]; then
+    echo "提示：AGENTS.md 无受管标记，init 将返回 pending（零写入 AGENTS）；按 pending 指引插入后重跑。"
   fi
   echo "将改动的受管文件："
   mapfile -t CHANGES < <(diff_managed_trees "$sandbox" "$PROJECT_ROOT")
@@ -213,7 +220,7 @@ python3 "$INIT_PY" --root "$PROJECT_ROOT" --yes --force 2>&1 | tee "$BACKUP_DIR/
 INIT_RC=${PIPESTATUS[0]}
 set -e
 
-if [[ "$INIT_RC" -ne 0 ]]; then
+if [[ "$INIT_RC" -ne 0 && "$INIT_RC" -ne 2 ]]; then
   echo "错误：v2 init.py 执行失败（退出码 $INIT_RC）。" >&2
   if [[ "$AUTO_ROLLBACK" -eq 1 ]]; then
     if bash "$ROLLBACK_SH" "$PROJECT_ROOT" "$BACKUP_DIR"; then
@@ -230,6 +237,9 @@ if [[ "$INIT_RC" -ne 0 ]]; then
 fi
 
 echo "替换完成：受管文件已更新为 v2（非受管文件未动）。"
+if [[ "$INIT_RC" -eq 2 ]]; then
+  echo "注意：AGENTS.md 无受管标记，init 返回 pending（零写入 AGENTS）；按 docs/crew/AGENTS-block.pending.md 指引插入后重跑 init。"
+fi
 echo "备份路径：$BACKUP_DIR"
 echo "变更文件："
 declare -A BACKED=()
