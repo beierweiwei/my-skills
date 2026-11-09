@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import tempfile
 import unittest
@@ -171,6 +172,39 @@ class DoctorRoleTest(unittest.TestCase):
         rc, report = self.fx.doctor_json("--only", "role.delivery")
         self.assertEqual(1, rc, report)
         self.assertIn("composePath", self.fx.item(report, "role.delivery")["detail"])
+
+    def test_role_delivery_plugin_dir_pass_and_missing_plugin_fail(self):
+        _, compose = self.fx.compose("builder", "qoder")
+        run_dir = self.fx.root / ".git/crew/compose/run-plugin"
+        plugin_dir = run_dir / "qoder-plugin"
+        (plugin_dir / ".qoder-plugin").mkdir(parents=True)
+        (plugin_dir / ".qoder-plugin/plugin.json").write_text(
+            json.dumps({"name": "crew-run", "version": "0.1.0",
+                        "agents": ["./agents/builder.md"]}), encoding="utf-8")
+        (plugin_dir / "agents").mkdir()
+        (plugin_dir / "agents/builder.md").write_text(
+            "---\nname: builder\n---\nBASE_ONLY_MARKER\n", encoding="utf-8")
+        prompt = run_dir / "qoder/composed.md"
+        prompt.parent.mkdir()
+        prompt.write_text("BASE_ONLY_MARKER\nPROJECT_ONLY_MARKER\n", encoding="utf-8")
+        row = {
+            "ts": "2026-11-09T00:00:00Z", "action": "start", "role": "builder",
+            "runtime": "qoder", "agent": "proj-builder", "delivery": "plugin-dir",
+            "baseRef": "2.1.0:templates/agents/qoder/builder.md",
+            "composedSha256": compose["composedSha256"],
+            "composePath": str(run_dir), "promptPath": str(prompt),
+            "pluginPath": str(plugin_dir), "pluginAgent": "crew-run:builder",
+            "agentFile": str(plugin_dir / "agents/builder.md"),
+        }
+        self.fx.write_agent_log([row])
+        rc, report = self.fx.doctor_json("--only", "role.delivery")
+        self.assertEqual(0, rc, report)
+        self.assertEqual("pass", self.fx.item(report, "role.delivery")["status"])
+
+        (plugin_dir / ".qoder-plugin/plugin.json").unlink()
+        rc, report = self.fx.doctor_json("--only", "role.delivery")
+        self.assertEqual(1, rc, report)
+        self.assertIn("plugin", self.fx.item(report, "role.delivery")["detail"])
 
     def test_s9_02_three_group_migration(self):
         legacy_bodies = {

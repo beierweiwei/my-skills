@@ -5,7 +5,7 @@
   compose  组合 dry-run：读技能基类 + 项目角色文件 → 渲染 token → append-only 组合；
            输出 hash/标题/残留 token/门禁报告；只读，不写项目、不写 agent-log。
   start    启动角色：配置 → 描述符 → 继承/门禁/frontmatter 校验 → compose →
-           运行时通道交付（Qoder `--agents` + `--append-system-prompt`；
+           运行时通道交付（Qoder `--plugin-dir` + 命名空间 agent；
            opencode `OPENCODE_CONFIG_DIR`）→ agent-log。
   prompt / close / status / list / tab / pane  生命周期与工位操作（写 agent-log）。
 
@@ -597,7 +597,7 @@ def build_compose(root: Path, role_id: str, runtime: str | None) -> ComposeOutco
         report["runtime"] = resolved_runtime
         report["overlayPath"] = path.relative_to(root).as_posix()
         report["overlaySha256"] = sha256_file(path)
-        report["delivery"] = "qoder-inline" if resolved_runtime == "qoder" else "opencode-config-dir"
+        report["delivery"] = "plugin-dir" if resolved_runtime == "qoder" else "opencode-config-dir"
 
         parsed = parse_project_role(root, path, resolved_runtime, custom)
         outcome.project_mode = scalar(parsed["frontmatter"]["fields"].get("mode", ""))
@@ -969,20 +969,36 @@ def deliver_qoder(outcome: ComposeOutcome, name: str,
     overlay_path.write_text(outcome.rendered_overlay_body, encoding="utf-8")
 
     description = scalar(outcome.base_frontmatter["fields"].get("description", ""))
-    inline = {
-        outcome.role_id: {
-            "description": description or outcome.role_id,
-            "prompt": outcome.rendered_base_body,
-        }
-    }
+    # Qoder 经 plugin-dir 交付组合正文：herdr 无法安全传递多行/超长 argv，
+    # 运行时目录里放 .qoder-plugin/plugin.json + agents/<role>.md，启动只传短参数。
+    plugin_dir = run_dir / "qoder-plugin"
+    meta_dir = plugin_dir / ".qoder-plugin"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    plugin_name = f"crew-{run_dir.name}".lower()
+    agent_file = plugin_dir / "agents" / f"{outcome.role_id}.md"
+    agent_file.parent.mkdir(parents=True, exist_ok=True)
+    agent_file.write_text(
+        "---\n"
+        f"name: {outcome.role_id}\n"
+        f"description: {json.dumps(description or outcome.role_id, ensure_ascii=False)}\n"
+        "---\n"
+        f"{outcome.composed_body}",
+        encoding="utf-8",
+    )
+    write_json_atomic(meta_dir / "plugin.json", {
+        "name": plugin_name,
+        "version": "0.1.0",
+        "description": "agent-crew runtime composed role",
+        "agents": [f"./agents/{outcome.role_id}.md"],
+    })
+    plugin_agent = f"{plugin_name}:{outcome.role_id}"
     argv = [
         "herdr", "agent", "start", name,
         "--kind", "qodercli",
         "--pane", pane,
         "--",
-        "--agent", outcome.role_id,
-        "--agents", json.dumps(inline, ensure_ascii=False),
-        "--append-system-prompt", outcome.rendered_overlay_body,
+        "--plugin-dir", str(plugin_dir),
+        "--agent", plugin_agent,
     ]
     for tool in outcome.disallowed_tools:
         argv.extend(["--disallowed-tools", tool])
@@ -990,11 +1006,12 @@ def deliver_qoder(outcome: ComposeOutcome, name: str,
         argv.extend(["--permission-mode", permission_mode])
     run_herdr(argv)
     return {
-        "delivery": "qoder-inline",
+        "delivery": "plugin-dir",
         "composePath": str(run_dir),
         "promptPath": str(composed_path),
-        "inlinePromptPath": str(base_path),
-        "appendPromptPath": str(overlay_path),
+        "pluginPath": str(plugin_dir),
+        "pluginAgent": plugin_agent,
+        "agentFile": str(agent_file),
     }
 
 
@@ -1103,8 +1120,9 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
         "composedSha256": outcome.report["composedSha256"],
         "composePath": delivery["composePath"],
         "promptPath": delivery.get("promptPath"),
-        "inlinePromptPath": delivery.get("inlinePromptPath"),
-        "appendPromptPath": delivery.get("appendPromptPath"),
+        "pluginPath": delivery.get("pluginPath"),
+        "pluginAgent": delivery.get("pluginAgent"),
+        "agentFile": delivery.get("agentFile"),
         "capabilities": outcome.capabilities,
         "gates": outcome.gates,
         "result": "ok",

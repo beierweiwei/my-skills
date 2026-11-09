@@ -1035,7 +1035,7 @@ class Doctor:
             return Result("role.delivery", "skip", "无 start 记录")
         row = starts[-1]
         problems: list[str] = []
-        if row.get("delivery") not in {"qoder-inline", "opencode-config-dir"}:
+        if row.get("delivery") not in {"plugin-dir", "qoder-inline", "opencode-config-dir"}:
             problems.append(f"delivery 非法：{row.get('delivery')!r}")
         if not row.get("composedSha256"):
             problems.append("缺 composedSha256")
@@ -1052,6 +1052,19 @@ class Doctor:
             prompt = row.get("promptPath")
             if prompt and not Path(str(prompt)).exists():
                 problems.append(f"promptPath 不存在：{prompt}")
+        if row.get("delivery") == "plugin-dir":
+            plugin = row.get("pluginPath")
+            if not plugin:
+                problems.append("缺 pluginPath")
+            else:
+                plugin_path = Path(str(plugin))
+                if not is_inside(plugin_path, crew / "compose"):
+                    problems.append(f"pluginPath 不在 {crew / 'compose'}：{plugin}")
+                elif not (plugin_path / ".qoder-plugin/plugin.json").is_file():
+                    problems.append(f"pluginPath 缺 .qoder-plugin/plugin.json：{plugin}")
+                agent_file = row.get("agentFile")
+                if not agent_file or not Path(str(agent_file)).is_file():
+                    problems.append(f"plugin agent 文件不存在：{agent_file}")
         for base in (self.root / ".qoder/agents", self.root / ".opencode/agent",
                      self.root / "docs"):
             if base.exists():

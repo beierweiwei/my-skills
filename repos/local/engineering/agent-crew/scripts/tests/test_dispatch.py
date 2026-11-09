@@ -8,7 +8,7 @@
 ④ 受保护标题冲突 rc=1（`## 引用`）；
 ⑤ 项目 frontmatter 权限/工具字段拒绝；
 ⑥ gates 只追加；列核心 gate → rc=1；
-⑦ Qoder 命令构造（--agents / --append-system-prompt / --disallowed-tools）与 delivery；
+⑦ Qoder 命令构造（--plugin-dir + 命名空间 agent / --disallowed-tools）与 delivery；
 ⑧ opencode 命令构造（OPENCODE_CONFIG_DIR pane + config-dir 组合 agent 文件）与 delivery；
 ⑨ agent-log 字段（delivery/composedSha256/baseRef/overlaySha256/composePath）；
 ⑩ 项目角色文件零写入、不生成第二份角色文件；
@@ -255,7 +255,7 @@ class DispatchTest(unittest.TestCase):
         self.assertEqual([], report["residualSkillRootTokens"])
         self.assertTrue(report["basePointersPresent"])
         self.assertTrue(report["composedSha256"])
-        self.assertEqual("qoder-inline", report["delivery"])
+        self.assertEqual("plugin-dir", report["delivery"])
 
     def test_compose_no_section_merge_and_base_first_order(self):
         rc, _ = self.compose("builder", "qoder")
@@ -390,20 +390,33 @@ class DispatchTest(unittest.TestCase):
         self.assertIn("--kind", argv)
         self.assertEqual("qodercli", argv[argv.index("--kind") + 1])
         self.assertEqual("wX:p1", argv[argv.index("--pane") + 1])
-        self.assertIn("--agents", argv)
-        inline = json.loads(argv[argv.index("--agents") + 1])
-        self.assertIn("builder", inline)
-        self.assertIn("BASE_ONLY_MARKER", inline["builder"]["prompt"])
-        self.assertNotIn("PROJECT_ONLY_MARKER", inline["builder"]["prompt"])
-        append_text = argv[argv.index("--append-system-prompt") + 1]
-        self.assertIn("PROJECT_ONLY_MARKER", append_text)
-        self.assertIn("## 项目约定", append_text)
+        self.assertNotIn("--agents", argv)
+        self.assertNotIn("--append-system-prompt", argv)
+        self.assertIn("--plugin-dir", argv)
+        plugin_dir = Path(argv[argv.index("--plugin-dir") + 1])
+        self.assertTrue(plugin_dir.is_dir(), argv)
+        plugin_agent = argv[argv.index("--agent") + 1]
+        self.assertTrue(plugin_agent.endswith(":builder"), plugin_agent)
+        manifest = json.loads(
+            (plugin_dir / ".qoder-plugin/plugin.json").read_text(encoding="utf-8"))
+        self.assertEqual(f"{plugin_agent.split(':')[0]}", manifest["name"])
+        self.assertEqual(["./agents/builder.md"], manifest["agents"])
+        agent_file = plugin_dir / "agents/builder.md"
+        self.assertTrue(agent_file.is_file())
+        plugin_body = agent_file.read_text(encoding="utf-8")
+        self.assertIn("BASE_ONLY_MARKER", plugin_body)
+        self.assertIn("PROJECT_ONLY_MARKER", plugin_body)
+        self.assertIn("## 职责边界", plugin_body)
+        self.assertIn("## 项目约定", plugin_body)
 
         row = self.agent_log()[-1]
         self.assertEqual("start", row["action"])
         self.assertEqual("builder", row["role"])
         self.assertEqual("qoder", row["runtime"])
-        self.assertEqual("qoder-inline", row["delivery"])
+        self.assertEqual("plugin-dir", row["delivery"])
+        self.assertEqual(str(plugin_dir), row["pluginPath"])
+        self.assertEqual(plugin_agent, row["pluginAgent"])
+        self.assertEqual(str(agent_file), row["agentFile"])
         self.assertEqual("base", row["policySource"])
         self.assertIn("templates/agents/qoder/builder.md", row["baseRef"])
         self.assertIn("2.1.0", row["baseRef"])
