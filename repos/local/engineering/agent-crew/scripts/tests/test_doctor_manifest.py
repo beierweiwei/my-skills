@@ -59,6 +59,42 @@ class DoctorManifestTest(unittest.TestCase):
         self.assertEqual(1, rc, report)
         self.assertIn("missing.py", self.fx.item(report, "manifest.orphan")["detail"])
 
+    def test_manifest_orphan_ignores_registered_project_scripts(self):
+        script = self.fx.root / "scripts/project_check.py"
+        script.write_text("#!/usr/bin/env python3\n# project check\n", encoding="utf-8")
+        self.fx.config["hooks"]["projectScripts"] = [{
+            "id": "project-check", "path": "scripts/project_check.py",
+            "purpose": "probe", "readOnly": True,
+        }]
+        self.fx.write_config()
+        rc, report = self.fx.doctor_json("--only", "manifest.orphan")
+        self.assertEqual(0, rc, report)
+        item = self.fx.item(report, "manifest.orphan")
+        self.assertEqual("pass", item["status"], item)
+        self.assertNotIn("project_check.py", item["detail"])
+
+    def test_manifest_orphan_still_warns_unregistered_script(self):
+        script = self.fx.root / "scripts/unregistered.py"
+        script.write_text("#!/usr/bin/env python3\n# unregistered\n", encoding="utf-8")
+        rc, report = self.fx.doctor_json("--only", "manifest.orphan")
+        self.assertEqual(0, rc, report)
+        item = self.fx.item(report, "manifest.orphan")
+        self.assertEqual("warn", item["status"], item)
+        self.assertIn("scripts/unregistered.py", item["detail"])
+
+    def test_manifest_orphan_does_not_fail_for_missing_project_script(self):
+        self.fx.config["hooks"]["projectScripts"] = [{
+            "id": "missing-project", "path": "scripts/missing_project.py",
+            "purpose": "probe", "readOnly": True,
+        }]
+        self.fx.write_config()
+        rc, report = self.fx.doctor_json("--only", "manifest.orphan")
+        self.assertEqual(0, rc, report)
+        self.assertEqual("pass", self.fx.item(report, "manifest.orphan")["status"], report)
+        rc, report = self.fx.doctor_json("--only", "hooks.scripts")
+        self.assertEqual(1, rc, report)
+        self.assertIn("missing_project.py", self.fx.item(report, "hooks.scripts")["detail"])
+
     def test_manifest_hash_block_accepts_fixture_normalization(self):
         agents = (self.fx.root / "AGENTS.md").read_text(encoding="utf-8")
         manifest = self.fx.manifest()

@@ -516,6 +516,15 @@ class Doctor:
         if missing:
             return Result("manifest.orphan", "fail", f"manifest 指向不存在文件：{missing}")
         registered = {str(entry.get("path")) for entry in self.manifest_entries("file")}
+        config = self.config() or {}
+        hooks = config.get("hooks") if isinstance(config.get("hooks"), dict) else {}
+        project_scripts = hooks.get("projectScripts")
+        if isinstance(project_scripts, list):
+            for entry in project_scripts:
+                if isinstance(entry, dict):
+                    rel = entry.get("path")
+                    if isinstance(rel, str) and rel:
+                        registered.add(rel)
         scripts = self.root / "scripts"
         orphans: list[str] = []
         if scripts.is_dir():
