@@ -36,6 +36,8 @@ HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 COPY_BASENAMES = ("crew-rules.md", "crew-acceptance.md",
                   "orchestration-guide.md", "plan-discipline.md")
+PROJECT_SKILLS_PREFIXES = (".qoder/skills/", ".opencode/skills/")
+QODER_AGENT_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 CORE_IDS = set(dispatch_lib.CORE_ROLES)
 CORE_TOP_KEYS = {
     "projectId", "projectName", "skillRoot", "skillVersion", "portfolioDir",
@@ -55,6 +57,25 @@ RUNTIME_DIRECT_PATTERNS = (
 
 def utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def parse_qoder_agent_list(stdout: str) -> set[str]:
+    """解析 `qodercli agent list`：兼容 `name · Inherit` 与历史 `name (Project)` 格式。
+
+    跳过空行、`N active agents` 与 `Project:`/`Built-in:`/`Custom:` 等分节行；
+    只取第一个分隔符（`·`/`(`）前的角色名，非角色名行忽略。
+    """
+    names: set[str] = set()
+    for line in stdout.splitlines():
+        stripped = re.sub(r"^[-*+]\s+", "", line.strip())
+        if not stripped or stripped.endswith(":"):
+            continue
+        if re.fullmatch(r"\d+\s+active agents?", stripped, re.IGNORECASE):
+            continue
+        name = re.split(r"\s+·\s+|\s*\(", stripped, maxsplit=1)[0].strip()
+        if QODER_AGENT_NAME_RE.fullmatch(name):
+            names.add(name)
+    return names
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -705,6 +726,8 @@ class Doctor:
             rel = path.relative_to(self.root).as_posix()
             if not path.is_file() or rel.startswith(".git/") or rel.startswith(".planning/"):
                 continue
+            if rel.startswith(PROJECT_SKILLS_PREFIXES):
+                continue  # 项目级 skills 目录由技能安装器管理，不判技能源副本
             if path.name in source_names and not is_inside(path, skill_root):
                 copies.append(rel)
         if copies:
@@ -1099,7 +1122,7 @@ class Doctor:
         if rc != 0:
             return Result("role.discovery.qoder", "env",
                           f"qodercli agent list rc={rc}：{stderr.strip()[:200]}")
-        discovered = {line.split("(")[0].strip() for line in stdout.splitlines() if line.strip()}
+        discovered = parse_qoder_agent_list(stdout)
         missing = [entry["id"] for entry in entries if entry["id"] not in discovered]
         if missing:
             return Result("role.discovery.qoder", "fail", f"文件存在但未被发现：{missing}")

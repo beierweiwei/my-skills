@@ -96,6 +96,36 @@ class DoctorRuntimeTest(unittest.TestCase):
         self.assertEqual(1, rc, report)
         self.assertIn("非规范落点", self.fx.item(report, "role.discovery.opencode")["detail"])
 
+    def test_role_discovery_qoder_parses_inherit_and_paren_formats(self):
+        # 当前格式（fixture 默认）：`  builder · Inherit`
+        rc, report = self.fx.doctor_json("--only", "role.discovery.qoder")
+        self.assertEqual(0, rc, report)
+        self.assertEqual("pass", self.fx.item(report, "role.discovery.qoder")["status"])
+
+        # 历史括号格式：`builder (Project)`
+        self.fx.stub_cli(
+            "qodercli",
+            "#!/usr/bin/env python3\nprint('2 active agents')\n\n"
+            "print('Project:')\nprint('builder (Project)')\n"
+            "print('reviewer (Project)')\n",
+        )
+        rc, report = self.fx.doctor_json("--only", "role.discovery.qoder")
+        self.assertEqual(0, rc, report)
+        self.assertEqual("pass", self.fx.item(report, "role.discovery.qoder")["status"])
+
+        # 缺角色 → FAIL，且 section/总量行不被当成角色
+        self.fx.stub_cli(
+            "qodercli",
+            "#!/usr/bin/env python3\nprint('12 active agents')\n\n"
+            "print('Project:')\nprint('  builder · Inherit')\n\n"
+            "print('Built-in:')\nprint('  Explore · Inherit')\n",
+        )
+        rc, report = self.fx.doctor_json("--only", "role.discovery.qoder")
+        self.assertEqual(1, rc, report)
+        item = self.fx.item(report, "role.discovery.qoder")
+        self.assertEqual("fail", item["status"])
+        self.assertIn("reviewer", item["detail"])
+
     def test_role_discovery_missing_cli_is_env(self):
         (self.fx.bin / "qodercli").unlink()
         env = self.fx.env()

@@ -46,6 +46,29 @@ class DoctorConfigTest(unittest.TestCase):
         rc, report = self.fx.doctor_json("--only", "skill.source", "--strict")
         self.assertEqual(1, rc, report)
 
+    def test_skill_source_allows_project_skills_dirs(self):
+        # 项目级 skills 目录内的 SKILL.md 属合法安装，不算技能源副本；
+        # fixture skillRoot 仍是绝对路径 → 只保留 WARN，不因副本 FAIL
+        skill_md = self.fx.root / ".opencode/skills/firstmate-dispatch/SKILL.md"
+        skill_md.parent.mkdir(parents=True)
+        skill_md.write_text("---\nname: firstmate-dispatch\n---\n# SOP\n", encoding="utf-8")
+        rc, report = self.fx.doctor_json("--only", "skill.source")
+        self.assertEqual(0, rc, report)
+        item = self.fx.item(report, "skill.source")
+        self.assertEqual("warn", item["status"])
+        self.assertNotIn("副本", item["detail"])
+
+        # 项目 scope 安装技能源（相对 skillRoot）：SKILL.md/references 均在 skills 目录内 → PASS
+        installed = self.fx.root / ".qoder/skills/agent-crew"
+        shutil.copytree(self.fx.skill, installed)
+        self.fx.config["skillRoot"] = ".qoder/skills/agent-crew"
+        self.fx.write_config()
+        rc, report = self.fx.doctor_json("--only", "skill.source")
+        self.assertEqual(0, rc, report)
+        item = self.fx.item(report, "skill.source")
+        self.assertEqual("pass", item["status"])
+        self.assertNotIn("副本", item["detail"])
+
     def test_install_version_mismatch_fails_then_restores(self):
         self.fx.config["skillVersion"] = "9.9.9"
         self.fx.write_config()

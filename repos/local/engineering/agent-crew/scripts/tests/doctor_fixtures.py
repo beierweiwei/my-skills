@@ -171,8 +171,15 @@ class ProjectFixture:
         self.bin = base / "bin"
         self.bin.mkdir(exist_ok=True)
         self.stub_cli("herdr", HERDR_STUB)
+        # 对齐 qodercli 1.1.85 实际输出：总量行 + 分节 + `· Inherit` 后缀
         self.stub_cli("qodercli", "#!/usr/bin/env python3\n"
-                                  "print('builder')\nprint('reviewer')\n")
+                                  "print('12 active agents')\nprint()\n"
+                                  "print('Project:')\n"
+                                  "print('  builder · Inherit')\n"
+                                  "print('  reviewer · Inherit')\nprint()\n"
+                                  "print('Built-in:')\n"
+                                  "print('  Explore · Inherit')\n"
+                                  "print('  general-purpose · Inherit')\n")
         self.stub_cli("opencode", "#!/usr/bin/env python3\nprint('firstmate')\n")
 
     # ---------- 写 fixture ----------
