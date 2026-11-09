@@ -34,4 +34,5 @@ permission:
 
 ## 上下文与工位
 - ctx ≥30% 完成当前切片即停，≥60% 立即停；运行中不压缩；下一轮由副舵重建或 `/compact`。
+- **总舵换舵（物理步骤）**：ctx ≥30% 停止接新活；同 tab 新建 pane（`python3 scripts/dispatch.py pane split --pane <旧> --direction right`）→ `python3 scripts/dispatch.py start --role helm --runtime opencode --pane <新>`（启动名即会话名，两套名一致）；新舵读 portfolio 三文件 + progress 尾部并完成首条汇报后，旧舵关闭自己 pane；不在运行中压缩。
 - opencode 配置/角色/技能不热重载，改动后重启会话；工位回收按 W4–W5。

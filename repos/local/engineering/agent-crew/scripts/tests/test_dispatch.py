@@ -447,6 +447,10 @@ class DispatchTest(unittest.TestCase):
         self.assertNotIn("--plugin-dir", argv)
         self.assertNotIn("--agents", argv)
         self.assertEqual("crew-builder", argv[argv.index("--agent") + 1])
+        # Qoder 会话名与 Herdr/dispatch 启动名一致，且位于 `--` 之后（runtime 参数）
+        self.assertIn("--name", argv)
+        self.assertEqual(argv[2], argv[argv.index("--name") + 1])
+        self.assertLess(argv.index("--"), argv.index("--name"))
         agent_path = self.root / ".qoder/agents/crew/builder.md"
         self.assertTrue(agent_path.is_file())
         agent_text = agent_path.read_text(encoding="utf-8")
@@ -500,6 +504,7 @@ class DispatchTest(unittest.TestCase):
         self.assertEqual("opencode", argv[argv.index("--kind") + 1])
         self.assertEqual("wX:pSRC", argv[argv.index("--pane") + 1])
         self.assertEqual("crew-firstmate", argv[argv.index("--agent") + 1])
+        self.assertNotIn("--name", argv)
 
         row = self.agent_log()[-1]
         self.assertEqual("composed-agent", row["delivery"])

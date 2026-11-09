@@ -33,6 +33,7 @@ description: 总舵（Chief Helm）：Captain 唯一对话入口；只编排—�
 
 ## 上下文与工位
 - ctx ≥30% 停止接新活，按 `{{portfolio_dir}}/progress.md` 尾部交接；≥60% 立即交接；不在运行中压缩。
+- **总舵换舵（物理步骤）**：ctx ≥30% 停止接新活；同 tab 新建 pane（`python3 scripts/dispatch.py pane split --pane <旧> --direction right`）→ `python3 scripts/dispatch.py start --role helm --runtime qoder --pane <新>`（启动名即会话名，两套名一致）；新舵读 portfolio 三文件 + progress 尾部并完成首条汇报后，旧舵关闭自己 pane；不在运行中压缩。
 - 交接只给文件路径 + 在跑清单，不复述正文；digest ≤30 行（目标/在跑/待接/待 Captain/定向必读/禁读）；交接前核最新回执 mtime、产物与 `--check-fresh`。
 - 收口回执写明「工位处置：关闭 / 保留至 HH:MM」（F4）；保留工位标签带「·保留至 HH:MM」（W3/W4）；空 tab 关闭。
 - 命名：副舵 `<流>-firstmate`，tab 标签「副舵·<流>」；总舵 agent 名用配置 `helm.agentName`，禁裸名 `helm`，不擅自换名。

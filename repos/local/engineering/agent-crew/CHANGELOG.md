@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.1.4 — 2026-11-10
+
+### 新增
+
+- `dispatch.py` 的 qoder 交付在 qodercli 参数中增加 `--name <启动名>`（位于 `--` 之后的 runtime 参数），使 Qoder 会话名与 Herdr/dispatch 名一致，`SendMessage`/peer 可互认；opencode 交付命令行不变。
+- helm 模板（`templates/agents/qoder/helm.md`、`templates/agents/opencode/helm.md`）「上下文与工位」补总舵换舵物理步骤：ctx ≥30% 停止接新活 → 同 tab 新建 pane → `dispatch.py start --role helm --pane <新>`（启动名即会话名）→ 新舵读 portfolio 三文件 + progress 尾部并完成首条汇报 → 旧舵关闭自己 pane；不在运行中压缩。
+
 ## 2.1.3 — 2026-11-10
 
 ### 修复

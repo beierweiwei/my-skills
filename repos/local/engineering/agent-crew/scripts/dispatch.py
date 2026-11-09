@@ -1039,6 +1039,8 @@ def deliver_qoder(outcome: ComposeOutcome, name: str,
         argv.extend(["--disallowed-tools", tool])
     if permission_mode:
         argv.extend(["--permission-mode", permission_mode])
+    # Qoder 会话名对齐 Herdr/dispatch 启动名，保证 SendMessage/peer 可互认
+    argv.extend(["--name", name])
     run_herdr(argv)
     return {
         "delivery": "composed-agent",
