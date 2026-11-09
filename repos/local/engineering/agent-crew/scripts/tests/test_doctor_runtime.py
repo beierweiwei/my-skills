@@ -71,6 +71,29 @@ class DoctorRuntimeTest(unittest.TestCase):
         self.assertEqual(0, rc, report)
         self.assertEqual("warn", self.fx.item(report, "runtime.lock")["status"])
 
+    def test_runtime_lock_guard_pid_alive_pass_dead_or_missing_warn(self):
+        lock_dir = self.fx.root / ".git/crew"
+        lock_dir.mkdir(parents=True)
+        guard = lock_dir / "guard.lock"
+        guard.write_text(f"{os.getpid()}\n", encoding="utf-8")
+        rc, report = self.fx.doctor_json("--only", "runtime.lock")
+        self.assertEqual(0, rc, report)
+        item = self.fx.item(report, "runtime.lock")
+        self.assertEqual("pass", item["status"], item)
+        self.assertIn(f"guard 运行中（pid={os.getpid()}）", item["detail"])
+
+        guard.write_text(f"{1 << 30}\n", encoding="utf-8")
+        rc, report = self.fx.doctor_json("--only", "runtime.lock")
+        self.assertEqual(0, rc, report)
+        self.assertEqual("warn", self.fx.item(report, "runtime.lock")["status"])
+
+        guard.write_text("", encoding="utf-8")
+        rc, report = self.fx.doctor_json("--only", "runtime.lock")
+        self.assertEqual(0, rc, report)
+        item = self.fx.item(report, "runtime.lock")
+        self.assertEqual("warn", item["status"])
+        self.assertIn("无法识别 pid", item["detail"])
+
     def test_runtime_worktree_clean_pass_dirty_fail(self):
         self.fx.commit()
         rc, report = self.fx.doctor_json("--only", "runtime.worktree")

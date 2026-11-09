@@ -376,6 +376,12 @@ class Doctor:
             return True
         return archived and rel.startswith(ARCHIVED_DOCS_PREFIX)
 
+    def _is_git_ignored(self, rel: str) -> bool:
+        """git 仓内被忽略的路径不算项目内容；非 git/无 git 时按未忽略处理。"""
+        rc, _, _ = self._run_cli(
+            ["git", "-C", str(self.root), "check-ignore", "-q", "--", rel])
+        return rc == 0
+
     # ================= A. manifest =================
 
     def check_manifest_schema(self) -> Result:
@@ -760,6 +766,8 @@ class Doctor:
             if rel.startswith(PROJECT_SKILLS_PREFIXES):
                 continue  # 项目级 skills 目录由技能安装器管理，不判技能源副本
             if path.name in source_names and not is_inside(path, skill_root):
+                if self._is_git_ignored(rel):
+                    continue  # 被 .gitignore 忽略的外部技能源（如 skill-src/）不算项目副本
                 copies.append(rel)
         if copies:
             problems.append(f"项目内出现技能源/规则副本：{sorted(set(copies))}")
@@ -1396,17 +1404,34 @@ class Doctor:
             return Result("runtime.lock", "pass", "无锁文件")
         active: list[str] = []
         stale: list[str] = []
+        guard_pid: int | None = None
         for lock in locks:
             pid = None
             text = read_text(lock) or ""
             try:
                 data = json.loads(text)
-                pid = int(data.get("pid")) if isinstance(data, dict) else None
             except (ValueError, TypeError):
+                data = None
+            if isinstance(data, dict):
+                try:
+                    pid = int(data.get("pid"))
+                except (ValueError, TypeError):
+                    pid = None
+            else:
+                # guard.lock 等纯文本锁：首行/首列写 pid
                 try:
                     pid = int(text.strip().split()[0])
                 except (ValueError, IndexError):
                     pid = None
+            if lock.name == "guard.lock":
+                # guard 常驻持锁：活 pid 属正常，不算活锁 fail
+                if pid is not None and pid > 0 and _pid_alive(pid):
+                    guard_pid = pid
+                elif pid is None:
+                    stale.append(f"{lock.name}（无法识别 pid）")
+                else:
+                    stale.append(f"{lock.name}（pid={pid}）")
+                continue
             if pid is None:
                 stale.append(f"{lock.name}（无法识别 pid）")
             elif pid > 0 and _pid_alive(pid):
@@ -1416,8 +1441,10 @@ class Doctor:
         if active:
             return Result("runtime.lock", "fail", f"有活锁：{active}",
                           next="等待锁释放；确认无 init/upgrade 在跑后人工清理")
-        return Result("runtime.lock", "warn", f"stale 锁：{stale}",
-                      next="确认进程已退出后人工删除锁文件")
+        if stale:
+            return Result("runtime.lock", "warn", f"stale 锁：{stale}",
+                          next="确认进程已退出后人工删除锁文件")
+        return Result("runtime.lock", "pass", f"guard 运行中（pid={guard_pid}）")
 
     def check_runtime_worktree(self) -> Result:
         rc, stdout, _ = self._run_cli(["git", "-C", str(self.root), "status", "--porcelain"])

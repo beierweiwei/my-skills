@@ -86,6 +86,31 @@ class DoctorConfigTest(unittest.TestCase):
         for rel in paths:
             self.assertNotIn(rel, item["detail"])
 
+    def test_skill_source_skips_gitignored_external_sources_only(self):
+        rel = "skill-src/repos/local/other-skill/SKILL.md"
+        other = self.fx.root / rel
+        other.parent.mkdir(parents=True)
+        other.write_text("---\nname: other-skill\n---\n", encoding="utf-8")
+        # 未被忽略：仍判项目内技能源副本
+        rc, report = self.fx.doctor_json("--only", "skill.source")
+        self.assertEqual(1, rc, report)
+        self.assertIn(rel, self.fx.item(report, "skill.source")["detail"])
+
+        # 被 .gitignore 忽略的外部技能源：不算副本
+        (self.fx.root / ".gitignore").write_text("skill-src/\n", encoding="utf-8")
+        rc, report = self.fx.doctor_json("--only", "skill.source")
+        self.assertEqual(0, rc, report)
+        item = self.fx.item(report, "skill.source")
+        self.assertEqual("warn", item["status"], item)  # fixture skillRoot 是绝对路径
+        self.assertNotIn("副本", item["detail"])
+        self.assertNotIn(rel, item["detail"])
+
+        # 非 git 仓：维持原判定（git 不可用/rc≠0 同路径）
+        shutil.rmtree(self.fx.root / ".git")
+        rc, report = self.fx.doctor_json("--only", "skill.source")
+        self.assertEqual(1, rc, report)
+        self.assertIn(rel, self.fx.item(report, "skill.source")["detail"])
+
     def test_skill_source_still_flags_real_doc_rule_copy(self):
         (self.fx.root / "docs/crew-rules.md").write_text("# rules copy\n", encoding="utf-8")
         rc, report = self.fx.doctor_json("--only", "skill.source")

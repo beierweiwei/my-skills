@@ -7,6 +7,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -407,6 +408,18 @@ class LockAndOutputTest(GuardTestBase):
             self.assertEqual(code, 0)
             self.assertEqual(out, "")
             self.assertEqual(err, "")
+        finally:
+            handle.close()
+
+    def test_lock_file_records_current_pid(self):
+        handle = cg.acquire_lock(self.crew)
+        self.assertIsNotNone(handle)
+        try:
+            lock = self.crew / "guard.lock"
+            self.assertEqual(f"{os.getpid()}\n", lock.read_text(encoding="utf-8"))
+            # 第二实例拿不到锁，不改写持有者 pid
+            self.assertIsNone(cg.acquire_lock(self.crew))
+            self.assertEqual(f"{os.getpid()}\n", lock.read_text(encoding="utf-8"))
         finally:
             handle.close()
 

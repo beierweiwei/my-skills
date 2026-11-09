@@ -313,6 +313,10 @@ def acquire_lock(crew_dir: Path):
     except OSError:
         handle.close()
         return None
+    handle.seek(0)
+    handle.truncate()
+    handle.write(f"{os.getpid()}\n")
+    handle.flush()
     return handle
 
 
