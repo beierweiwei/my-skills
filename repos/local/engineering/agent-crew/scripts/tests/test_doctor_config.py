@@ -69,6 +69,40 @@ class DoctorConfigTest(unittest.TestCase):
         self.assertEqual("pass", item["status"])
         self.assertNotIn("副本", item["detail"])
 
+    def test_skill_source_ignores_third_party_skill_copies(self):
+        paths = (
+            "docs/业务/原型/.venv/lib/site-packages/playwright/SKILL.md",
+            "docs/业务/原型/node_modules/pkg/crew-rules.md",
+        )
+        for rel in paths:
+            path = self.fx.root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# third-party\n", encoding="utf-8")
+        rc, report = self.fx.doctor_json("--only", "skill.source")
+        self.assertEqual(0, rc, report)
+        item = self.fx.item(report, "skill.source")
+        self.assertEqual("warn", item["status"], item)
+        self.assertNotIn("副本", item["detail"])
+        for rel in paths:
+            self.assertNotIn(rel, item["detail"])
+
+    def test_skill_source_still_flags_real_doc_rule_copy(self):
+        (self.fx.root / "docs/crew-rules.md").write_text("# rules copy\n", encoding="utf-8")
+        rc, report = self.fx.doctor_json("--only", "skill.source")
+        self.assertEqual(1, rc, report)
+        item = self.fx.item(report, "skill.source")
+        self.assertEqual("fail", item["status"], item)
+        self.assertIn("docs/crew-rules.md", item["detail"])
+
+    def test_skill_source_clean_project_passes(self):
+        self.fx.config["skillRoot"] = "../skill"
+        self.fx.write_config()
+        rc, report = self.fx.doctor_json("--only", "skill.source")
+        self.assertEqual(0, rc, report)
+        item = self.fx.item(report, "skill.source")
+        self.assertEqual("pass", item["status"], item)
+        self.assertNotIn("副本", item["detail"])
+
     def test_install_version_mismatch_fails_then_restores(self):
         self.fx.config["skillVersion"] = "9.9.9"
         self.fx.write_config()

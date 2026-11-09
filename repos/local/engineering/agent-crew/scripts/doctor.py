@@ -755,6 +755,8 @@ class Doctor:
             rel = path.relative_to(self.root).as_posix()
             if not path.is_file() or rel.startswith(".git/") or rel.startswith(".planning/"):
                 continue
+            if self._skip_scan_path(path):
+                continue
             if rel.startswith(PROJECT_SKILLS_PREFIXES):
                 continue  # 项目级 skills 目录由技能安装器管理，不判技能源副本
             if path.name in source_names and not is_inside(path, skill_root):
