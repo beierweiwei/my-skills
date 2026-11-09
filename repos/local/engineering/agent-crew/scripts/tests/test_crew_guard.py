@@ -257,6 +257,63 @@ class WakeConditionTest(GuardTestBase):
         guard.run_once()
         self.assertEqual(len(self.prompt_calls), 1)
 
+    def test_probe_names_blocked_do_not_wake(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        for name in ("s9-probe", "S9-UPPER", "probe-alpha", "PROBE-1",
+                     "test-builder", "Test-2"):
+            with self.subTest(name=name):
+                self.agents = [{"name": name, "agent_status": "blocked",
+                                "cwd": str(self.root)}]
+                self.prompt_calls.clear()
+                guard = self.make_guard()
+                result = guard.run_once()
+                self.assertFalse(result["woke"])
+                self.assertEqual(result["blocked"], 0)
+                self.assertEqual(self.prompt_calls, [])
+
+    def test_probe_cwd_tmp_blocked_does_not_wake(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        for cwd in ("/tmp", "/tmp/s9-probe/session"):
+            with self.subTest(cwd=cwd):
+                self.agents = [{"name": "worker-1", "agent_status": "blocked",
+                                "cwd": cwd}]
+                self.prompt_calls.clear()
+                guard = self.make_guard()
+                result = guard.run_once()
+                self.assertFalse(result["woke"])
+                self.assertEqual(result["blocked"], 0)
+                self.assertEqual(self.prompt_calls, [])
+
+    def test_tmp_prefix_outside_tmp_still_wakes(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.agents = [{"name": "worker-1", "agent_status": "blocked",
+                        "cwd": "/tmpfoo/project"}]
+        guard = self.make_guard()
+        result = guard.run_once()
+        self.assertTrue(result["woke"])
+        self.assertIn("worker-1", self.prompt_calls[0][1])
+
+    def test_real_blocked_worker_still_wakes(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.agents = [{"name": "builder-1", "agent_status": "blocked",
+                        "cwd": "/home/worker/project"}]
+        guard = self.make_guard()
+        result = guard.run_once()
+        self.assertTrue(result["woke"])
+        self.assertEqual(len(self.prompt_calls), 1)
+        self.assertIn("builder-1", self.prompt_calls[0][1])
+
+    def test_probe_working_still_counts_as_running(self):
+        self.write_fixture()
+        self.agents = [{"name": "s9-probe", "agent_status": "working",
+                        "cwd": "/tmp/s9-probe/session"}]
+        guard = self.make_guard()
+        for _ in range(3):
+            result = guard.run_once()
+            self.assertFalse(result["woke"])
+        self.assertEqual(guard.consecutive, 0)
+        self.assertEqual(self.prompt_calls, [])
+
     def test_captain_blocked_does_not_wake(self):
         self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
         self.agents = [{"name": "Captain-1", "agent_status": "blocked"}]

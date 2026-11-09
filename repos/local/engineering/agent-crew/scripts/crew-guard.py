@@ -48,6 +48,7 @@ TODO_RE = re.compile(r"^\s*-\s*\[\s\]\s*(.+)$")
 PAUSE_MARKS = ("⏸", "待 Captain", "留 Captain")
 COOLDOWN_SECONDS = 600
 WRITE_INTERVAL_SECONDS = 300
+PROBE_NAME_PREFIXES = ("s9-", "probe-", "test-")
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,25 @@ class Todo:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def is_probe_agent(agent: dict) -> bool:
+    """测试探针：按 agent 名或 cwd 判定，仅用于排除 blocked 叫醒。"""
+    name = str(agent.get("name") or "").strip().lower()
+    if name.startswith(PROBE_NAME_PREFIXES):
+        return True
+    cwd = agent.get("cwd")
+    if not isinstance(cwd, str) or not cwd.strip():
+        return False
+    try:
+        path = Path(cwd).expanduser()
+        if not path.is_absolute():
+            return False
+        path = path.resolve()
+        tmp = Path("/tmp").resolve()
+        return path == tmp or tmp in path.parents
+    except (OSError, RuntimeError):
+        return False
 
 
 def load_config(root: Path) -> dict:
@@ -419,7 +439,8 @@ class Guard:
             agent for agent in workers if str(agent.get("agent_status")) == "working"
         ]
         blocked = [
-            agent for agent in workers if str(agent.get("agent_status")) == "blocked"
+            agent for agent in workers
+            if str(agent.get("agent_status")) == "blocked" and not is_probe_agent(agent)
         ]
         pending, residual = scan_todos(self.root)
 
@@ -492,7 +513,8 @@ class Guard:
 def build_parser() -> argparse.ArgumentParser:
     epilog = """\
 叫醒口径：有待办 + 无在跑 worker 连续 2 轮；冷却 10 分钟；blocked 单独叫醒；
-排除总舵自身与 Captain*（按 agent 名）。优先 herdr agent prompt <helm>；总舵 pane
+排除总舵自身与 Captain*（按 agent 名）；blocked 判定排除测试探针（agent 名
+s9-/probe-/test- 前缀，或 cwd 在 /tmp 下），真实 blocked 仍叫醒。优先 herdr agent prompt <helm>；总舵 pane
 聚焦时写 <crew-dir>/guard.wake + 通知。叫醒时执行 plan-status.py --check-fresh；
 每 5 分钟顺带执行 plan-status.py --write。正常零 stdout，事件写 <crew-dir>/guard.log。
 

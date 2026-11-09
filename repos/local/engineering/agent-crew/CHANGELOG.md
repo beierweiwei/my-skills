@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.1.2 — 2026-11-10
+
+### 修复
+
+- BUG-009：`crew-guard.py` 的 blocked 叫醒排除测试探针——agent 名以 `s9-`/`probe-`/`test-` 开头（不区分大小写）或 `cwd` 位于 `/tmp` 下时不参与 blocked 判定；真实 blocked worker 仍叫醒，探针的 `working` 状态仍计入在跑。
+
 ## 2.1.1 — 2026-11-10
 
 ### 修复
