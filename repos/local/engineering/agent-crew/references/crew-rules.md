@@ -1,6 +1,6 @@
-# crew 运行规则（唯一正文）
+# crew 运行规则（技能源唯一正文）
 
-> 本文件是可执行规则的唯一正文：每条规则只写一次，以稳定编号供 AGENTS 编排节、角色文件与工单引用。
+> 本文件是可执行规则的唯一正文，只存在于技能源 `skillRoot/references/`：每条规则只写一次，以稳定编号供 AGENTS 编排节、角色文件与工单引用。项目只保留指针，不复制副本。
 > 机制与背景见 [orchestration-guide.md](orchestration-guide.md)，本文件不复述机制解释，也不写操作步骤与实现细节。
 > 与项目决策清单冲突时，以决策清单为准，并列入发现清单上报 Captain。
 > 适用范围：总舵、副舵与全部 crew。Captain 明确授权可对管理类规则作例外；数据安全红线不因授权放宽。
@@ -19,6 +19,14 @@
 | S | 状态机 | S1–S4 |
 | X | 边界红线 | X1–X5 |
 
+## 0. 入口与角色继承（非编号动作）
+
+- **普通技能引用**：通用规则/验收/机制/plan 纪律只在技能源一份；项目 `AGENTS.md` 与角色文件用 `{{skill_root}}`/`{{crew_rules}}`/`{{crew_acceptance}}` 指针引用，`skillRoot` 变化用 `init --refresh-block --confirm` 重渲染块。项目内出现规则/验收副本按 doctor `skill.source` 失败处理。
+- **唯一 dispatcher**：Agent 生命周期与工位变更只走 `python3 scripts/dispatch.py`（compose/start/prompt/close/status/list/tab/pane）；`start-agent.sh`/`start-helm.sh` 只是薄包装。角色文件、项目文档、项目脚本禁止直写 `herdr agent start/prompt/close`、`herdr tab/pane` 变更或 runtime `--agent` 直启；只读 `agent list`/`tab list`/`pane list`/`status` 允许。
+- **角色继承与组合**：角色 = 技能基类（`skillRoot/templates/agents/<runtime>/<role>.md`）+ 项目角色文件（`extends: skill:<role>`、`managed: false`）。dispatch 启动时 base 先、项目后 append-only 组合；frontmatter/权限只取基类；受保护标题冲突、残留 token、项目 frontmatter 权限键一律拒绝；组合结果不写项目发现目录。
+- **安装 / 升级 / 体检**：`init` 只在缺失时生成项目角色 stub，AGENTS 无标记零写入并生成 pending 文件；受管块只经 `--refresh-block --confirm` 重渲染；`upgrade` 只替换受管脚本并保留逐字节回滚；`doctor` 只读，输出 JSON 证据与可执行 `next`。
+- **版本与迁移**：技能版本见 `SKILL.md`/`CHANGELOG.md`；安装版本与配置 `skillVersion` 由 doctor 校验。基类升级只改技能源，下次 dispatch 自动生效，项目角色文件不需改。
+
 ## D 派单
 
 - **D1 工单五段**：每张工单必须写齐目标、现状入口、验收断言、边界规则、回执要求五段；缺段不得派出。
@@ -30,7 +38,7 @@
 
 ## R 回执
 
-- **R1 文件真源**：回执以 `.git/crew/inbox/` 下的文件为真源；先原子落盘（见 P3）再尝试推送，推送失败不影响回执成立。
+- **R1 文件真源**：回执以 `<git-common-dir>/crew/inbox/` 下的文件为真源；先原子落盘（见 P3）再尝试推送，推送失败不影响回执成立。
 - **R2 回执字段**：`receipt_id`、`from`、`runtime`、`task`、`status`（`done|blocked|captain`）、`commit`、`changed_files[]`、`evidence[]`、`work_slot`、`findings[]`、`summary`、`ts`；缺字段视为无效回执；⏸ 一律用 `status=captain`。
 - **R3 去重**：回执按 `receipt_id` 去重，同一 `receipt_id` 只处理一次。
 - **R4 触发器不是状态**：回执只触发收口与审计，任务状态只认 plan；回执与 plan 不一致时以 plan 为准并触发核对。
@@ -45,7 +53,7 @@
 
 ## O 占用
 
-- **O1 声明先于写入**：worker 写前在 `.git/crew/occupancy.json` 声明占用，写明任务与将写的文件/资产；未声明不得写入。
+- **O1 声明先于写入**：worker 写前在 `<git-common-dir>/crew/occupancy.json` 声明占用，写明任务与将写的文件/资产；未声明不得写入。
 - **O2 冲突即停**：目标已被占用时立即停止相关写入，回执报 `blocked` 并列出冲突项；不抢占、不协商共写。
 - **O3 释放与回收**：切片结束（完成/中止/失败）立即释放；失联占用由派单方核验后回收，不得静默覆盖。
 
@@ -87,7 +95,7 @@
   | 任意 → cancelled | 任意状态可取消 |
 
 - **S2 工位状态**：`starting → working → blocked / done → closed`；`idle ≠ done`；`done` 必须有回执；`closed` 才可从注册表删除。
-- **S3 派生与幂等**：状态从工单、回执、注册表、plan 派生，不新建数据库；非法迁移拒绝或告警；动作按幂等键去重；崩溃后由事件日志（`.git/crew/events.jsonl`）重建已应用状态。
+- **S3 派生与幂等**：状态从工单、回执、注册表、plan 派生，不新建数据库；非法迁移拒绝或告警；动作按幂等键去重；崩溃后由事件日志（`<git-common-dir>/crew/events.jsonl`）重建已应用状态。
 - **S4 稳定性八条验收**（任意一条不成立即视为不稳定，不得发布）：
   - **S4.1 不丢任务**：dispatched 任务必须有回执或超时告警，不因监控中断、重启或换舵而消失。
   - **S4.2 不重复派单**：同一工单/动作幂等，重复触发不产生第二份派单或第二次执行。

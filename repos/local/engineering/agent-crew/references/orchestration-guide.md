@@ -21,6 +21,9 @@
 | 向 Captain 汇报 | crew-acceptance.md **A5** |
 | plan 三文件字段、看板派生、归档 | [plan-discipline.md](plan-discipline.md) |
 | Herdr 命令与按键 | [herdr-cheatsheet.md](herdr-cheatsheet.md) |
+| Agent 生命周期/工位变更 | `scripts/dispatch.py`（唯一入口）；`start-*.sh` 只是薄包装 |
+| 安装 / 升级 / 回滚 / 体检 | `scripts/init.py`、`scripts/upgrade.py`、`scripts/doctor.py` |
+| 技能基类与项目角色继承 | `templates/agents/<runtime>/<role>.md` + 项目角色 `extends: skill:<role>`（append-only 组合） |
 | 项目运行期规则 | 项目 `AGENTS.md` 编排节 + 各角色文件 |
 
 ## 1. 设计前提
@@ -45,9 +48,11 @@
 | 运行时 | Herdr | workspace/tab/pane、Agent 生命周期、worktree、远程 |
 | 工单 | `.scratch/<topic>/issues/`（临时；可接远端 Issue 系统） | 执行层任务卡，不是状态真源 |
 | 状态 | `.planning/<task>/` 三文件（task_plan / findings / progress） | 任务状态唯一真源；看板只是派生视图 |
-| 路由 | `.git/crew/registry.json` | 只存 Herdr 不知道的路由（非 Herdr 运行时的收件箱/会话），默认不创建 |
-| 回执 | `.git/crew/inbox/` | crew → 编排者的文件回执；是触发器，不是状态 |
+| 路由 | `<git-common-dir>/crew/registry.json` | 只存 Herdr 不知道的路由（非 Herdr 运行时的收件箱/会话），默认不创建 |
+| 回执 | `<git-common-dir>/crew/inbox/` | crew → 编排者的文件回执；是触发器，不是状态 |
+| 组合产物 | `<git-common-dir>/crew/compose/<run-id>/` | dispatch 启动时一次性产物，可丢弃；不写项目发现目录 |
 | 正文 | 需求文档 `{{doc_req}}`（含『落地要点』） | 唯一需求真源 |
+| 技能正文 | 技能源 `skillRoot/references/**`、`skillRoot/SKILL.md` | 通用规则/验收/机制/plan 纪律唯一落点；项目只留指针，不复制 |
 | 代码 | Git worktree + 分支/MR | 隔离、评审、合并 |
 
 为什么这样分：运行时信息（pane、进程、状态）变化快、无历史价值，交给 Herdr；任务信息（目标、阶段、决策、错误）要跨会话、跨重启存活，必须落仓库文件；回执是瞬时事件，落文件即可触发，不承担状态。任何一方都不是第二份真源：回执与 plan 冲突时以 plan 为准（R4），registry 只是 Herdr 缺失路由的瘦表。
@@ -61,6 +66,8 @@
 | Herdr | workspace/tab/pane、Agent 启动与状态、`prompt/read/wait` 互调、detach/远程、worktree 拓扑 | 任务拆解、需求正文、业务验收、AOP 六维实现 |
 | 编码 Agent CLI + subagent | 单会话执行、技能加载、工具调用、角色系统提示与工具权限 | 跨 tab 调度、验收拍板、需求正文 |
 | 工作流技能 | 单工位流程纪律：盘问/规格/拆单/实现+TDD/评审 | 跨 Agent 调度、业务口径、AOP 切面实现 |
+| dispatch.py | 唯一派单与生命周期入口：组合、启动、提示、关闭、状态、工位；agent-log | 需求正文、验收拍板、合并/推送 |
+| init / upgrade / doctor | 安装与 bootstrap、受管脚本升级与回滚、只读体检与证据 | 项目角色正文、项目决策、自动修复 |
 | 仓库文档 | 需求/进度/决策/术语真源；handoff 载体 | 运行时状态、进程管理 |
 | 远端 Issue/MR（可选） | Issue/MR/CI/审计与合并 | Agent 运行时、编排调度 |
 
@@ -81,7 +88,8 @@
 
 - **Captain 是唯一的人**；总舵/大副是编排角色，不执行具体任务；Builder / Reviewer / Runner / Scout 是 crew，各自独立 tab。
 - **只编排不下场**：副舵不执行实现、调研、调试、数据处理或文档撰写。原因很实际：编排者的价值在全局进度与判断；一旦下场，既失去视角，又与成果产生利益重合。
-- **角色固化**：crew 身份写在角色文件里（Qoder `.qoder/agents/`，opencode `.opencode/agent/`），启动时按 `--agent <role>` 加载，不靠每次手发身份 prompt。角色动作与权限见角色文件；worker 的可执行边界（单写者、最小改动、AMEND、发现清单）见 D3–D6 与 O、P 编号。
+- **角色固化**：crew 身份写在角色文件里（Qoder `.qoder/agents/`，opencode `.opencode/agent/`），由 `dispatch.py start` 加载，不靠每次手发身份 prompt。角色文件是项目自有 overlay（`extends: skill:<role>`、`managed: false`）；动作基类与权限在技能源 `templates/agents/<runtime>/<role>.md`，启动时 append-only 组合、权限只取基类。worker 的可执行边界（单写者、最小改动、AMEND、发现清单）见 D3–D6 与 O、P 编号。
+- **核心角色能力**：helm/firstmate/builder/planner/reviewer/runner/scout 七个核心角色的 capabilities/gates/lifecycle 由技能基类与 dispatch 默认表统一约束；项目只能追加 gate，不能删改核心门。
 - **船员复用**：同一任务流复用同一船员与 tab；任务无关或 Captain 指定才新开。复用省下的是重新读文件、重建上下文与交接成本。
 - **评审独立**：Builder 自检不能替代独立 Reviewer 的评审——自评有确认偏差，独立评审才提供第二视角。
 - **交互式盘问必须 Captain 在场**：后台自动跑完再交人，盘问就退化成填表。
@@ -98,9 +106,9 @@
 
 ### 4.1 双栈（Qoder / opencode）
 
-- 两栈的角色都按 `--agent <role>` 在 tab/会话上选择；**项目不设默认 agent**，否则所有会话都会长成副舵。普通会话保持默认 agent，主控 tab 显式指定副舵角色。
+- **两栈都完整**：技能源 `templates/agents/qoder/` 与 `templates/agents/opencode/` 各 7 个核心基类；opencode 核心角色全部 `mode: primary`，项目侧由 init 生成同名 stub。**项目不设默认 agent**，主控 tab 显式指定副舵角色。
 - 角色文件位置：Qoder `.qoder/agents/*.md`，opencode `.opencode/agent/*.md`；技能目录不同。opencode 配置/角色/技能**不热重载**，改动后重启会话。
-- 本技能默认只带一份 opencode 副舵角色；crew 用 opencode 需先补对应角色文件。启动命令、能力差异与排障命令见 [herdr-cheatsheet.md](herdr-cheatsheet.md)。
+- **唯一入口**：两栈的启动/提示/关闭/工位变更都走 `python3 scripts/dispatch.py`；Qoder 用 inline + append-system-prompt 交付，opencode 用 `OPENCODE_CONFIG_DIR` 交付。禁止直写 `herdr agent start/prompt/close` 或 runtime `--agent` 直启（`start-*.sh` 走 dispatcher 是唯一例外）。命令与排障见 [herdr-cheatsheet.md](herdr-cheatsheet.md)。
 
 ## 5. 端到端流程（机制）
 
@@ -131,7 +139,7 @@
 
 ### 5.4 实现（Builder）
 
-- Builder 在独立 worktree/分支实现，按该工位的工作流技能（TDD 等）执行；改动范围与扩围边界按 D4–D5 执行。
+- Builder 由 `dispatch.py start --role builder` 启动（技能基类 + 项目 overlay 组合），在独立 worktree/分支实现，按该工位的工作流技能（TDD 等）执行；改动范围与扩围边界按 D4–D5 执行。
 - 单写者与占用（O1–O3、P1）解决同一个问题：多个 Agent 同时写同一文件时，谁的动作算数。没有占用声明，冲突事后无法判定。
 - 提交到任务分支，并按 F3 更新对应 plan 的阶段状态与证据指针。
 
@@ -200,7 +208,7 @@
 ### 7.2 Herdr 与 plan-with-files 的协作原理
 
 - **分工**：Herdr 管「活的」——进程、pane、workspace、worktree、互调与状态；plan-with-files 管「记得的」——目标、阶段、决策、错误、Next Step。Herdr 只保活进程，不保存对话上下文；重启或换机后靠文件恢复。
-- **桥**：回执把运行时事件固化成文件（R1–R4）；编排者按回执收口、更新 plan（F1–F5），再由 plan 派生看板。
+- **桥**：回执把运行时事件固化成文件（R1–R4）；编排者按回执收口、更新 plan（F1–F5），再由 plan 派生看板。运行时状态目录统一由 `scripts/crew_paths.py` 解析为 `<git-common-dir>/crew/`（linked worktree 取主仓 common dir；非 git 用 `<root>/.crew`）。
 - **恢复顺序**：`{{doc_context}}` → 工单 → `{{doc_req}}` → plan/进度；不依赖旧聊天或自动记忆。这样换人、换机、重启后都能接上。
 - 这条分工也解释了为什么「派活/等结果/读输出」走 Herdr，而「做到哪、为什么这样做」永远写 plan：前者是瞬时协调，后者是持久事实。
 
@@ -223,6 +231,7 @@
 
 - 编排者不能靠前台阻塞等待（`herdr agent prompt --wait` / `agent wait`）过日子——一个 Agent 的长任务会把编排者钉死，其他流全部停摆。
 - 因此采用「guard 常驻轮询 + 一次性人工抽查 + 外置看门狗」：guard 按 G1–G5 的待办/在跑口径判断是否叫醒，正常零输出；人工抽查用监听脚本的边沿模式，不承担自动叫醒；外置定时只检查 guard 进程存活。
+- **启动与恢复**：Agent 只经 `dispatch.py start` 启动并写 agent-log（`composedSha256`/`delivery`/`baseRef`）；`doctor.py` 的 `role.delivery` 复核最近一次启动与 compose 报告一致。
 - 叫醒条件、冷却、待办/在跑口径见 G1–G5；命令用法见 [herdr-cheatsheet.md](herdr-cheatsheet.md)。
 
 ## 8. 可选远端扩展

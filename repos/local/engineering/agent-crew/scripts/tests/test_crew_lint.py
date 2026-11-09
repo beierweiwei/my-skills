@@ -20,7 +20,9 @@ BUDGET_CASES = (
     ("templates/AGENTS-编排节.md", 151, 150),
     ("templates/agents/qoder/helm.md", 81, 80),
     ("templates/agents/qoder/builder.md", 51, 50),
+    ("templates/agents/opencode/helm.md", 81, 80),
     ("templates/agents/opencode/firstmate.md", 81, 80),
+    ("templates/agents/opencode/builder.md", 51, 50),
     ("templates/_templates/ticket.md", 16, 15),
 )
 ROLE_FILES = (
@@ -31,7 +33,13 @@ ROLE_FILES = (
     "templates/agents/qoder/reviewer.md",
     "templates/agents/qoder/runner.md",
     "templates/agents/qoder/scout.md",
+    "templates/agents/opencode/helm.md",
     "templates/agents/opencode/firstmate.md",
+    "templates/agents/opencode/builder.md",
+    "templates/agents/opencode/planner.md",
+    "templates/agents/opencode/reviewer.md",
+    "templates/agents/opencode/runner.md",
+    "templates/agents/opencode/scout.md",
 )
 
 
@@ -121,7 +129,7 @@ class CrewLintTest(unittest.TestCase):
             text=True,
         )
         self.assertEqual(repo.returncode, 0, repo.stderr)
-        self.assertEqual(repo.stdout.strip(), "2.0.0")
+        self.assertEqual(repo.stdout.strip(), "2.1.0")
 
     # ---- 行数预算 --------------------------------------------------------
 
@@ -213,6 +221,51 @@ class CrewLintTest(unittest.TestCase):
             self.write(rel, f"{long_heading}\n{table}\n```\n{code_line}\n```\n")
         proc = self.lint()
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    # ---- purity ----------------------------------------------------------
+
+    def test_purity_clean_fixture(self):
+        self.make_skill()
+        proc = self.lint("--purity")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("purity ok", proc.stdout)
+
+    def test_purity_absolute_path_rejected(self):
+        self.make_skill()
+        self.write("templates/project/topology.md", "# 拓扑\ndata: /home/alice/project/data\n")
+        proc = self.lint("--purity")
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("absolute path", proc.stdout)
+        self.assertIn("templates/project/topology.md", proc.stdout)
+
+    def test_purity_windows_drive_rejected(self):
+        self.make_skill()
+        self.write("references/extra.md", "# 示例\nC:\\Users\\alice\\project\\data\n")
+        proc = self.lint("--purity")
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("absolute path", proc.stdout)
+
+    def test_purity_denylist_terms(self):
+        self.make_skill()
+        self.write("purity.denylist", "# 维护者本地词表\nAcmeCorp\n")
+        self.write("templates/project/topology.md", "# 拓扑\n项目：acmecorp 内部系统\n")
+        proc = self.lint("--purity")
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("forbidden term", proc.stdout)
+
+    def test_purity_skips_tests_and_pycache(self):
+        self.make_skill()
+        self.write("scripts/tests/test_dummy.py", "HOME = '/home/alice/project'\n")
+        self.write("scripts/__pycache__/x.py", "HOME = '/home/alice/project'\n")
+        proc = self.lint("--purity")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_help_mentions_purity(self):
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT), "--help"], capture_output=True, text=True
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("--purity", proc.stdout)
 
     # ---- 缺规则正文 ------------------------------------------------------
 

@@ -3,6 +3,9 @@ name: reviewer
 description: 编排体系中的 Reviewer（crew）：对 diff 做 Standards / Spec 两轴评审，只读。
 disallowedTools: [Write, Edit]
 ---
+<!-- crew-role
+{"id":"reviewer","runtime":"qoder","extends":null,"managed":true,"capabilities":["read","report"],"gates":["three-human-gates","report-only"],"lifecycle":"one-shot","prompt":"templates/agents/qoder/reviewer.md"}
+-->
 # Reviewer
 
 ## 引用

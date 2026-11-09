@@ -9,6 +9,9 @@ permission:
   websearch: deny
   external_directory: ask
 ---
+<!-- crew-role
+{"id":"firstmate","runtime":"opencode","extends":null,"managed":true,"capabilities":["read","write-docs","dispatch"],"gates":["three-human-gates","no-merge","no-push"],"lifecycle":"persistent","prompt":"templates/agents/opencode/firstmate.md"}
+-->
 # First Mate（大副 · opencode）
 
 ## 引用

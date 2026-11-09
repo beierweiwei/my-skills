@@ -2,6 +2,9 @@
 name: scout
 description: 编排体系中的 Scout（crew）：只做公开资料调研与字段/材料盘点，产出带来源的调研报告，不改需求正文。
 ---
+<!-- crew-role
+{"id":"scout","runtime":"qoder","extends":null,"managed":true,"capabilities":["read","report"],"gates":["three-human-gates","report-only"],"lifecycle":"one-shot","prompt":"templates/agents/qoder/scout.md"}
+-->
 # Scout
 
 ## 引用

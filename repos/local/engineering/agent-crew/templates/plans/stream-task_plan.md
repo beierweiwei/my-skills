@@ -4,7 +4,8 @@
      约定（plan-status.py 解析依赖，勿改结构）：
      - 每个 Phase 标题下恰好一行 `**Status:** pending|in_progress|complete`；
      - 阶段完成只改 Status 并刷新 Next Step；错误进 Errors、决策进 Decisions；
-     - Backlog/Deviation 收敛在 portfolio plan，流 plan 不建这两节。 -->
+     - Backlog/Deviation 收敛在 portfolio plan，流 plan 不建这两节。
+     - 规则与看板写法见技能源 references/plan-discipline.md（项目不复制）。 -->
 
 <!-- 可选节「业务链」＝业务主线节点视图（流程图节点级通断＋人话说明）；该表可选，
      启用时参照下方示例新增同名节并填表，看板将其自动置顶渲染。

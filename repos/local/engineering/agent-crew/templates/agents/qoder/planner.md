@@ -2,6 +2,9 @@
 name: planner
 description: 需求正文船员：按 Captain 已确认的决定补写/修订需求文档（含『落地要点』）与 ADR，不改代码。
 ---
+<!-- crew-role
+{"id":"planner","runtime":"qoder","extends":null,"managed":true,"capabilities":["read","write-docs"],"gates":["three-human-gates"],"lifecycle":"one-shot","prompt":"templates/agents/qoder/planner.md"}
+-->
 # Planner
 
 ## 引用

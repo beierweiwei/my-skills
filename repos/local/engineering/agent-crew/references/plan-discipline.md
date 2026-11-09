@@ -1,12 +1,13 @@
 # Plan 纪律与看板派生（agent-crew）
 
-> plan-with-files 工作记忆 + portfolio 多流 plan 模式的使用纪律；运行期规则以项目 `AGENTS.md`「工作记忆与进度」节为准，本文是字段说明与配套机制说明。
+> plan-with-files 工作记忆 + portfolio 多流 plan 模式的使用纪律；运行期规则以项目 `AGENTS.md` 编排节指向的 `{{crew_rules}}` 为准，本文是字段说明与配套机制说明（技能源唯一正文，项目不复制）。
+> 状态行写法固定 `**Status:** pending|in_progress|complete`；不允许 `in progress` 等变体。看板与新鲜度由 `scripts/plan-status.py` 负责（`--write` 生成、`--check-fresh` 校验、`--selftest`/`--lint` 自检）。
 
 ## 1. plan-with-files 使用纪律
 
 - **使用范围**：≥3 步或 ≥5 次工具调用的任务；简单问答、单文件小修不建 plan。
 - **三文件**：`task_plan.md`（真源）、`findings.md`、`progress.md`——队列、进度、决策、错误的唯一记录（原生三文件，ASCII 命名）；并行任务各自一个命名 plan。
-- **建/恢复/校验**：用上游技能 planning-with-files 的脚本 `init-session.sh`（ASCII 名）建命名 plan（`.planning/YYYY-MM-DD-<slug>/`），填完跑 `check-complete.sh --validate` 校验；开工读**三份文件** + `git diff --stat`；有 `.planning/` 时不回退根 plan；多 plan 无 `PLAN_ID` 先纠偏。
+- **建/恢复/校验**：用上游技能 planning-with-files 的脚本 `init-session.sh`（ASCII 名）建命名 plan（`.planning/YYYY-MM-DD-<slug>/`），填完跑 `check-complete.sh --validate` 校验；开工读**三份文件** + `git diff --stat`；有 `.planning/` 时不回退根 plan；多 plan 无 `PLAN_ID` 先纠偏。新建 plan 可从技能源 `templates/plans/` 骨架起步。
 - **写者**：一 plan 一 owner；worker 只写自己的报告/ledger，不改 `task_plan.md`（多写者会静默覆盖）。
 - **阶段纪律**：阶段完成改该 Phase 下**唯一**的 `**Status:**` 行（pending → in_progress → complete）并刷新 `## Next Step`（单一动作）；错误进 `## Errors Encountered`（Error/Resolution）；决策进 `## Decisions Made`（Decision/Rationale，代决标注「代决（可覆盖）」）。
 - **Current Phase 自动推导**：`## Current Phase` 由 `plan-status.py` 自动推导（首个非 complete 的 Phase），勿手工维护；所有 Phase 都 complete 时，可在该节写收口说明文字，作为看板兜底显示。

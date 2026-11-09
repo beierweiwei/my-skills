@@ -2,6 +2,9 @@
 name: runner
 description: 编排体系中的 Runner（杂活船员）：执行 First Mate 指派的临时、小范围任务，不写需求正文，不合并。
 ---
+<!-- crew-role
+{"id":"runner","runtime":"qoder","extends":null,"managed":true,"capabilities":["read","run-commands"],"gates":["three-human-gates","data-safety"],"lifecycle":"one-shot","prompt":"templates/agents/qoder/runner.md"}
+-->
 # Runner
 
 ## 引用

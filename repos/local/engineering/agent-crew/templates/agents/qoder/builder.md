@@ -2,6 +2,9 @@
 name: builder
 description: 编排体系中的 Builder（crew）：按工单与需求文档（含『落地要点』）实现，遵循 TDD，只改工单范围。
 ---
+<!-- crew-role
+{"id":"builder","runtime":"qoder","extends":null,"managed":true,"capabilities":["read","write-code","run-commands"],"gates":["three-human-gates","review-required"],"lifecycle":"keep-until","prompt":"templates/agents/qoder/builder.md"}
+-->
 # Builder
 
 ## 引用

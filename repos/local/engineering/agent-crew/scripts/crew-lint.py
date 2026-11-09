@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""技能资产静态校验：行数预算 / 规则编号引用 / 指针写法 / 跨文档重复句。
+"""技能资产静态校验：行数预算 / 规则编号引用 / 指针写法 / 跨文档重复句 / 纯净度。
 
 检查项：
   1. budget    行数预算：
-               templates/AGENTS-编排节.md ≤150；qoder helm/firstmate ≤80；
-               qoder worker（builder/planner/reviewer/runner/scout）≤50；
-               templates/agents/opencode/firstmate.md ≤80；工单模板 ≤15。
+               templates/AGENTS-编排节.md ≤150；qoder/opencode helm/firstmate ≤80；
+               qoder/opencode worker（builder/planner/reviewer/runner/scout）≤50；
+               工单模板 ≤15。
   2. rule-ref  模板/角色里引用的 D/R/W/O/F/P/G/S/X 与 A 编号必须在
                references/crew-rules.md / crew-acceptance.md 中有定义；
                区间（如 D2–D6、A1–A5）逐号校验，含端点与中间号。
@@ -15,6 +15,10 @@
                排除标题、表格分隔、代码块（含围栏与围栏内内容）。
                角色文件之间共用同构骨架（qoder/opencode 镜像与公共段落）不互比；
                角色/模板与文档正文之间的重复仍报出。
+  5. purity    --purity：templates/、references/、scripts/ 零绝对路径
+               （家目录与 Windows 盘符）；项目名/业务词来自维护者本地未跟踪
+               denylist `<root>/purity.denylist`（每行一个词，# 注释），
+               denylist 不随技能发布。scripts/tests/ 与 __pycache__ 不扫描。
 
 输出：每个违规一行 `<文件>:<行号>: <规则>: <说明>`；全绿只输出一行摘要。
 退出码：0 全绿；1 有违规；3 根目录/规则正文缺失或 SKILL.md 无法解析。
@@ -23,7 +27,8 @@
 用法：
   python3 scripts/crew-lint.py                 # 校验技能根（脚本所在目录的上一级）
   python3 scripts/crew-lint.py --root <技能根>
-  python3 scripts/crew-lint.py --version       # 输出 2.0.0
+  python3 scripts/crew-lint.py --root . --purity   # 只跑纯净度检查
+  python3 scripts/crew-lint.py --version       # 输出 SKILL.md 版本
 """
 
 from __future__ import annotations
@@ -46,7 +51,13 @@ BUDGETS: tuple[tuple[str, int], ...] = (
     ("templates/agents/qoder/reviewer.md", 50),
     ("templates/agents/qoder/runner.md", 50),
     ("templates/agents/qoder/scout.md", 50),
+    ("templates/agents/opencode/helm.md", 80),
     ("templates/agents/opencode/firstmate.md", 80),
+    ("templates/agents/opencode/builder.md", 50),
+    ("templates/agents/opencode/planner.md", 50),
+    ("templates/agents/opencode/reviewer.md", 50),
+    ("templates/agents/opencode/runner.md", 50),
+    ("templates/agents/opencode/scout.md", 50),
     ("templates/_templates/ticket.md", 15),
 )
 TEMPLATE_FILES = tuple(rel for rel, _ in BUDGETS)
@@ -245,12 +256,72 @@ def skill_version(root: Path) -> str:
     raise Failure("SKILL.md frontmatter missing version")
 
 
+PURITY_DIRS = ("templates", "references", "scripts")
+PURITY_SKIP = {"__pycache__", "tests"}
+PURITY_SUFFIXES = {".md", ".py", ".sh", ".json", ".txt"}
+_HOME_SEGMENTS = ("home", "Users", "root")
+ABS_HOME_RE = re.compile(
+    r"(?<![\w.-])/(?:" + "|".join(_HOME_SEGMENTS) + r")/[A-Za-z0-9._-]+"
+)
+ABS_DRIVE_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s\"'`)]*")
+DENYLIST_NAME = "purity.denylist"
+
+
+def purity_files(root: Path) -> list[Path]:
+    files: list[Path] = []
+    for name in PURITY_DIRS:
+        base = root / name
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*")):
+            if not path.is_file() or path.suffix not in PURITY_SUFFIXES:
+                continue
+            parts = path.relative_to(root).parts
+            if any(part in PURITY_SKIP for part in parts):
+                continue
+            files.append(path)
+    return files
+
+
+def load_denylist(root: Path) -> list[str]:
+    path = root / DENYLIST_NAME
+    if not path.is_file():
+        return []
+    terms: list[str] = []
+    for line in read_text(path).splitlines():
+        term = line.strip()
+        if term and not term.startswith("#"):
+            terms.append(term)
+    return terms
+
+
+def check_purity(root: Path) -> list[tuple[str, int, str, str]]:
+    issues: list[tuple[str, int, str, str]] = []
+    terms = [(term, term.casefold()) for term in load_denylist(root)]
+    for path in purity_files(root):
+        rel = rel_posix(path, root)
+        for lineno, line in enumerate(read_text(path).splitlines(), 1):
+            if ABS_HOME_RE.search(line) or ABS_DRIVE_RE.search(line):
+                issues.append((rel, lineno, "purity", "absolute path in skill asset"))
+            for term, folded in terms:
+                if folded in line.casefold():
+                    issues.append(
+                        (rel, lineno, "purity", f"forbidden term {term!r} (denylist)")
+                    )
+    return issues
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="技能资产静态校验：行数预算/规则编号/指针写法/跨文档重复句"
+        description="技能资产静态校验：行数预算/规则编号/指针写法/跨文档重复句/纯净度"
     )
     parser.add_argument("--root", help="技能根目录；默认脚本所在目录的上一级")
     parser.add_argument("--version", action="store_true", help="打印 SKILL.md frontmatter 版本")
+    parser.add_argument(
+        "--purity",
+        action="store_true",
+        help="只跑纯净度检查（绝对路径 + <root>/purity.denylist 本地词表）",
+    )
     return parser
 
 
@@ -260,6 +331,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.version:
             print(skill_version(root))
+            return 0
+        if args.purity:
+            purity_issues = check_purity(root)
+            if purity_issues:
+                for rel, lineno, rule, message in sorted(purity_issues):
+                    print(f"{rel}:{lineno}: {rule}: {message}")
+                print(f"crew-lint: {len(purity_issues)} purity issue(s)")
+                return 1
+            print(f"crew-lint: purity ok ({len(purity_files(root))} files)")
             return 0
         rules, acceptance = parse_defined_ids(root)
     except Failure as exc:

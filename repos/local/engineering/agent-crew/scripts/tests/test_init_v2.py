@@ -141,7 +141,7 @@ class InitV2Test(unittest.TestCase):
             "crew-lint.py",
         ):
             self.assertIn(f"[一致] scripts/{name}", out)
-        self.assertIn("30 项一致", out)
+        self.assertIn("36 项一致", out)
         self.assertIn("0 项缺失", out)
         self.assertIn("0 项过期", out)
 

@@ -7,6 +7,6 @@
 - <可现场复现的通过条件 1>
 - <可现场复现的通过条件 2>
 ## 边界规则
-<保护资产、单写者、最小改动、AMEND、发现清单；引用 D3–D6、X1–X5。>
+<保护资产、单写者、最小改动、AMEND、发现清单；派单/工位变更只走 python3 scripts/dispatch.py；引用 D3–D6、X1–X5。>
 ## 回执要求
 <按 R1–R4 落盘：status、changed_files、evidence、findings、work_slot、summary。>
