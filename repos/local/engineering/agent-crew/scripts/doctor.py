@@ -1045,7 +1045,7 @@ class Doctor:
                     problems.append(f"manifest 未登记组合基础代理：{rel.as_posix()}")
                     continue
                 text = read_text(path) or ""
-                if entry.get("sha256") and sha256_text(text) != str(
+                if entry.get("sha256") and sha256_bytes(text.encode("utf-8")) != str(
                         entry.get("sha256")).removeprefix("sha256:"):
                     problems.append(f"组合基础代理 hash 不一致：{rel.as_posix()}")
                     continue
@@ -1104,8 +1104,11 @@ class Doctor:
                 problems.append("缺 composedPath")
             else:
                 composed_path = Path(str(composed))
-                if not is_inside(composed_path, crew / "compose"):
-                    problems.append(f"composedPath 不在 {crew / 'compose'}：{composed}")
+                allowed = (is_inside(composed_path, crew / "compose")
+                           or is_inside(composed_path, self.root / ".qoder/agents/crew")
+                           or is_inside(composed_path, self.root / ".opencode/agent"))
+                if not allowed:
+                    problems.append(f"composedPath 位置非法：{composed}")
                 elif not composed_path.is_file():
                     problems.append(f"composedPath 不存在：{composed}")
         for base in (self.root / ".qoder/agents", self.root / ".opencode/agent",
@@ -1174,7 +1177,7 @@ class Doctor:
         if not shutil.which("qodercli"):
             return Result("role.discovery.qoder", "env", "qodercli 不在 PATH")
         rc, stdout, stderr = self._run_cli(
-            ["qodercli", "agent", "list", "--setting-sources", "project"])
+            ["qodercli", "agent", "list", "--setting-sources", "project"], timeout=60)
         if rc != 0:
             return Result("role.discovery.qoder", "env",
                           f"qodercli agent list rc={rc}：{stderr.strip()[:200]}")
@@ -1197,7 +1200,7 @@ class Doctor:
             return Result("role.discovery.opencode", "pass", "无 opencode 角色文件")
         if not shutil.which("opencode"):
             return Result("role.discovery.opencode", "env", "opencode 不在 PATH")
-        rc, stdout, stderr = self._run_cli(["opencode", "agent", "list"])
+        rc, stdout, stderr = self._run_cli(["opencode", "agent", "list"], timeout=60)
         if rc != 0:
             return Result("role.discovery.opencode", "env",
                           f"opencode agent list rc={rc}：{stderr.strip()[:200]}")
