@@ -597,7 +597,7 @@ def build_compose(root: Path, role_id: str, runtime: str | None) -> ComposeOutco
         report["runtime"] = resolved_runtime
         report["overlayPath"] = path.relative_to(root).as_posix()
         report["overlaySha256"] = sha256_file(path)
-        report["delivery"] = "plugin-dir" if resolved_runtime == "qoder" else "opencode-config-dir"
+        report["delivery"] = "agents-pointer" if resolved_runtime == "qoder" else "opencode-config-dir"
 
         parsed = parse_project_role(root, path, resolved_runtime, custom)
         outcome.project_mode = scalar(parsed["frontmatter"]["fields"].get("mode", ""))
@@ -957,48 +957,58 @@ def cmd_compose(args: argparse.Namespace, root: Path) -> int:
     return 0 if outcome.ok else 1
 
 
+CAPABILITY_TOOLS = {
+    "read": ["Read", "Glob", "Grep"],
+    "write-code": ["Write", "Edit"],
+    "write-docs": ["Write", "Edit"],
+    "run-commands": ["Bash"],
+    "dispatch": ["Bash", "Task"],
+    "report": [],
+}
+
+
+def qoder_tools(outcome: ComposeOutcome) -> list[str]:
+    tools: set[str] = set()
+    for capability in (getattr(outcome, "capabilities", None) or []):
+        tools.update(CAPABILITY_TOOLS.get(str(capability), []))
+    for blocked in (getattr(outcome, "disallowed_tools", None) or []):
+        tools.discard(str(blocked))
+    return sorted(tools)
+
+
 def deliver_qoder(outcome: ComposeOutcome, name: str,
                   pane: str, run_dir: Path, permission_mode: str | None) -> dict:
     qoder_dir = run_dir / "qoder"
     qoder_dir.mkdir(parents=True, exist_ok=True)
-    composed_path = qoder_dir / "composed.md"
     base_path = qoder_dir / "base.md"
     overlay_path = qoder_dir / "overlay.md"
-    composed_path.write_text(outcome.composed_body, encoding="utf-8")
     base_path.write_text(outcome.rendered_base_body, encoding="utf-8")
     overlay_path.write_text(outcome.rendered_overlay_body, encoding="utf-8")
-
+    # B2 主路径：组合正文落 <run>/<role>.md，启动只传短 JSON + initialPrompt 短指针。
+    composed_path = run_dir / f"{outcome.role_id}.md"
+    composed_path.write_text(outcome.composed_body, encoding="utf-8")
+    tools = qoder_tools(outcome)
+    if "Read" not in tools:
+        raise DispatchError(
+            "Qoder 角色基类未允许 Read：B2 initialPrompt 指针无法读取组合正文；"
+            "请修正基类 capabilities/disallowedTools（配置错误，无回退）")
     description = scalar(outcome.base_frontmatter["fields"].get("description", ""))
-    # Qoder 经 plugin-dir 交付组合正文：herdr 无法安全传递多行/超长 argv，
-    # 运行时目录里放 .qoder-plugin/plugin.json + agents/<role>.md，启动只传短参数。
-    plugin_dir = run_dir / "qoder-plugin"
-    meta_dir = plugin_dir / ".qoder-plugin"
-    meta_dir.mkdir(parents=True, exist_ok=True)
-    plugin_name = f"crew-{run_dir.name}".lower()
-    agent_file = plugin_dir / "agents" / f"{outcome.role_id}.md"
-    agent_file.parent.mkdir(parents=True, exist_ok=True)
-    agent_file.write_text(
-        "---\n"
-        f"name: {outcome.role_id}\n"
-        f"description: {json.dumps(description or outcome.role_id, ensure_ascii=False)}\n"
-        "---\n"
-        f"{outcome.composed_body}",
-        encoding="utf-8",
-    )
-    write_json_atomic(meta_dir / "plugin.json", {
-        "name": plugin_name,
-        "version": "0.1.0",
-        "description": "agent-crew runtime composed role",
-        "agents": [f"./agents/{outcome.role_id}.md"],
-    })
-    plugin_agent = f"{plugin_name}:{outcome.role_id}"
+    temp_agent = f"crew-{run_dir.name}".lower()
+    inline = {
+        temp_agent: {
+            "description": description or outcome.role_id,
+            "prompt": outcome.role_id,
+            "initialPrompt": f"你的完整角色说明在 {composed_path}；开始前先读取并遵守。",
+            "tools": tools,
+        }
+    }
     argv = [
         "herdr", "agent", "start", name,
         "--kind", "qodercli",
         "--pane", pane,
         "--",
-        "--plugin-dir", str(plugin_dir),
-        "--agent", plugin_agent,
+        "--agent", temp_agent,
+        "--agents", json.dumps(inline, ensure_ascii=False),
     ]
     for tool in outcome.disallowed_tools:
         argv.extend(["--disallowed-tools", tool])
@@ -1006,12 +1016,11 @@ def deliver_qoder(outcome: ComposeOutcome, name: str,
         argv.extend(["--permission-mode", permission_mode])
     run_herdr(argv)
     return {
-        "delivery": "plugin-dir",
+        "delivery": "agents-pointer",
         "composePath": str(run_dir),
         "promptPath": str(composed_path),
-        "pluginPath": str(plugin_dir),
-        "pluginAgent": plugin_agent,
-        "agentFile": str(agent_file),
+        "composedPath": str(composed_path),
+        "agentFile": str(composed_path),
     }
 
 
@@ -1120,8 +1129,7 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
         "composedSha256": outcome.report["composedSha256"],
         "composePath": delivery["composePath"],
         "promptPath": delivery.get("promptPath"),
-        "pluginPath": delivery.get("pluginPath"),
-        "pluginAgent": delivery.get("pluginAgent"),
+        "composedPath": delivery.get("composedPath"),
         "agentFile": delivery.get("agentFile"),
         "capabilities": outcome.capabilities,
         "gates": outcome.gates,

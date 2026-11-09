@@ -1008,6 +1008,9 @@ class Doctor:
                 problems.append(f"{role_id}: basePointersPresent=false")
             if not report["composedSha256"]:
                 problems.append(f"{role_id}: 缺 composedSha256")
+            if entry["runtime"] == "qoder" and "Read" not in dispatch_lib.qoder_tools(outcome):
+                problems.append(
+                    f"{role_id}: Qoder 角色未允许 Read（B2 initialPrompt 不可用，配置错误）")
         if problems:
             return Result("role.compose", "fail", "；".join(problems[:20]),
                           evidence={"roles": len(entries)})
@@ -1035,7 +1038,7 @@ class Doctor:
             return Result("role.delivery", "skip", "无 start 记录")
         row = starts[-1]
         problems: list[str] = []
-        if row.get("delivery") not in {"plugin-dir", "qoder-inline", "opencode-config-dir"}:
+        if row.get("delivery") not in {"agents-pointer", "opencode-config-dir"}:
             problems.append(f"delivery 非法：{row.get('delivery')!r}")
         if not row.get("composedSha256"):
             problems.append("缺 composedSha256")
@@ -1052,19 +1055,16 @@ class Doctor:
             prompt = row.get("promptPath")
             if prompt and not Path(str(prompt)).exists():
                 problems.append(f"promptPath 不存在：{prompt}")
-        if row.get("delivery") == "plugin-dir":
-            plugin = row.get("pluginPath")
-            if not plugin:
-                problems.append("缺 pluginPath")
+        if row.get("delivery") == "agents-pointer":
+            composed = row.get("composedPath") or row.get("promptPath")
+            if not composed:
+                problems.append("缺 composedPath")
             else:
-                plugin_path = Path(str(plugin))
-                if not is_inside(plugin_path, crew / "compose"):
-                    problems.append(f"pluginPath 不在 {crew / 'compose'}：{plugin}")
-                elif not (plugin_path / ".qoder-plugin/plugin.json").is_file():
-                    problems.append(f"pluginPath 缺 .qoder-plugin/plugin.json：{plugin}")
-                agent_file = row.get("agentFile")
-                if not agent_file or not Path(str(agent_file)).is_file():
-                    problems.append(f"plugin agent 文件不存在：{agent_file}")
+                composed_path = Path(str(composed))
+                if not is_inside(composed_path, crew / "compose"):
+                    problems.append(f"composedPath 不在 {crew / 'compose'}：{composed}")
+                elif not composed_path.is_file():
+                    problems.append(f"composedPath 不存在：{composed}")
         for base in (self.root / ".qoder/agents", self.root / ".opencode/agent",
                      self.root / "docs"):
             if base.exists():
