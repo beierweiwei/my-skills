@@ -465,6 +465,21 @@ class DispatchTest(unittest.TestCase):
 
     # ---------- ⑩ 项目零写入 / 不生成第二份 ----------
 
+    def test_opencode_parse_real_herdr_split_envelope(self):
+        # herdr 0.9.5 实际输出：根 `id=cli:pane:split`，真实 pane 在 result.pane.pane_id
+        real = HERDR_STUB.replace(
+            '{"result": {"pane_id": "wX:pNEW"}}',
+            '{"id": "cli:pane:split", "result": {"pane": {"pane_id": "wX:pREAL"}}}',
+        )
+        stub = self.bin / "herdr"
+        stub.write_text(real, encoding="utf-8")
+        stub.chmod(0o755)
+        proc = self.start("firstmate", "opencode", pane="wX:pSRC")
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        starts = [c for c in self.herdr_calls() if c[:2] == ["agent", "start"]]
+        self.assertEqual(1, len(starts), starts)
+        self.assertEqual("wX:pREAL", starts[0][starts[0].index("--pane") + 1])
+
     def test_project_role_file_zero_write_and_no_second_copy(self):
         before = self.project_snapshot()
         self.assertEqual(0, self.start("builder", "qoder").returncode)

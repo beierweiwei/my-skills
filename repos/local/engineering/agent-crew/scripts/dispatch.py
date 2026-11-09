@@ -784,19 +784,19 @@ def herdr_agent_names() -> list[str]:
             if isinstance(agent, dict) and isinstance(agent.get("name"), str)]
 
 
-def extract_pane_id(data: object) -> str | None:
+def extract_pane_id(data: object, keys: tuple[str, ...] = ("pane_id", "paneId")) -> str | None:
     if isinstance(data, dict):
-        for key in ("pane_id", "paneId", "id"):
+        for key in keys:
             value = data.get(key)
             if isinstance(value, str) and ":" in value:
                 return value
         for value in data.values():
-            found = extract_pane_id(value)
+            found = extract_pane_id(value, keys)
             if found:
                 return found
     elif isinstance(data, list):
         for value in data:
-            found = extract_pane_id(value)
+            found = extract_pane_id(value, keys)
             if found:
                 return found
     return None
@@ -807,7 +807,9 @@ def parse_pane_id(output: str, action: str) -> str:
         data = json.loads(output)
     except ValueError as exc:
         raise DispatchError(f"{action} 输出非 JSON：{output.strip()!r}", 3) from exc
-    pane_id = extract_pane_id(data)
+    # herdr 响应根 `id` 是命令标识（cli:pane:split），真实 pane 在 result.pane.pane_id；
+    # 优先全树找 pane_id/paneId，找不到才退回 id 兼容旧格式。
+    pane_id = extract_pane_id(data) or extract_pane_id(data, ("id",))
     if not pane_id:
         raise DispatchError(f"{action} 未返回 pane_id：{output.strip()!r}", 3)
     return pane_id
