@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Callable
 
 PHASE_RE = re.compile(r"^### Phase\s+\d+\s*[:：]\s*(.+?)\s*$")
-STATUS_RE = re.compile(r"\*\*Status:\*\*\s+(pending|in_progress|complete)")
+STATUS_RE = re.compile(r"\*\*Status:\*\*\s+(pending|in[ _]progress|complete)")
 TODO_RE = re.compile(r"^\s*-\s*\[\s\]\s*(.+)$")
 PAUSE_MARKS = ("⏸", "待 Captain", "留 Captain")
 COOLDOWN_SECONDS = 600

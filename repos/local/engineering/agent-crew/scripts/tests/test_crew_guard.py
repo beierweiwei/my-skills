@@ -405,5 +405,76 @@ class LockAndOutputTest(GuardTestBase):
             self.assertIn(token, text)
 
 
+class PhaseStatusParseTest(GuardTestBase):
+    """Status 行需同时识别 `in_progress` 与 `in progress`（真实 plan 两种写法并存）。"""
+
+    IN_PROGRESS_PLAN = """# Task Plan: Flow A
+
+## Phases
+
+### Phase 6: 进行中
+- owner: builder
+- [ ] 待办A
+- **Status:** {status}
+"""
+
+    def test_status_regex_matches_in_progress_spellings(self):
+        for line in (
+            "**Status:** in_progress",
+            "**Status:** in progress",
+            "**Status:**    in progress",
+            "**Status:**   in_progress",
+        ):
+            with self.subTest(line=line):
+                match = cg.STATUS_RE.search(line)
+                self.assertIsNotNone(match, line)
+                self.assertIn(match.group(1), ("in_progress", "in progress"))
+
+    def test_status_regex_keeps_pending_and_complete(self):
+        for line, expected in (
+            ("**Status:** pending", "pending"),
+            ("**Status:** complete", "complete"),
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(cg.STATUS_RE.search(line).group(1), expected)
+
+    def test_both_in_progress_spellings_keep_todos_active(self):
+        for status in ("in_progress", "in progress"):
+            with self.subTest(status=status):
+                self.write_fixture(
+                    stream=self.IN_PROGRESS_PLAN.format(status=status),
+                    portfolio=EMPTY_PORTFOLIO,
+                )
+                pending, residual = cg.scan_todos(self.root)
+                self.assertEqual([todo.text for todo in pending], ["待办A"])
+                self.assertEqual(residual, [])
+
+    def test_pending_and_complete_buckets_unchanged(self):
+        self.write_fixture(
+            stream=(
+                "# Task Plan: Flow A\n\n## Phases\n\n"
+                "### Phase 1: 待开工\n- [ ] 待办P\n- **Status:** pending\n\n"
+                "### Phase 2: 已完成\n- [ ] 残留C\n- **Status:** complete\n"
+            ),
+            portfolio=EMPTY_PORTFOLIO,
+        )
+        pending, residual = cg.scan_todos(self.root)
+        self.assertEqual([todo.text for todo in pending], ["待办P"])
+        self.assertEqual([todo.text for todo in residual], ["残留C"])
+
+    def test_space_spelling_still_wakes_guard(self):
+        self.write_fixture(
+            stream=self.IN_PROGRESS_PLAN.format(status="in progress"),
+            portfolio=EMPTY_PORTFOLIO,
+        )
+        self.agents = [{"name": "worker-1", "agent_status": "idle"}]
+        guard = self.make_guard()
+        first = guard.run_once()
+        self.assertFalse(first["woke"])
+        second = guard.run_once()
+        self.assertTrue(second["woke"])
+        self.assertIn("待办A", self.prompt_calls[0][1])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
