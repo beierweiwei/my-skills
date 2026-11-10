@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.2.10 — 2026-11-11
+
+T20 一致性小修（A–E + FB-008）与发布。
+
+### 修复
+
+- **A init↔doctor 对齐**：`init.py` 的 `forbidden_copies` 对 `.gitignore` 忽略路径（`git check-ignore -q`）不再误判为技能源副本，非 gitignored 真实副本仍失败；非 git 仓/无 git 可用时按未忽略处理。`test_init_v2.py` 补正反例。
+- **B R6 处置动作映射**：`crew-rules.md` R6 明确 re-task/close/escalate 是处置动作语义、不是回执 `status`，并给出映射：`re-task`/`close` → `status=done`（summary 分别标「已转出/已闭环」）、`escalate` → `status=captain`（标「待 Captain」）、未处置保持 `status=blocked`；`templates/_templates/ticket.md` 回执要求引用 R1–R6 并含映射要点。
+- **C doctor guard 配置先后**：`config.schema` 校验 effective `blockedRepeatMinutes <= blockedGraceMinutes`（缺省 15/30 参与比较），矛盾配置 fail 并给可执行提示；`test_doctor_config.py` 补正反例与缺省比较。
+- **D upgrade 口径统一**：docstring 与 `--apply` 实际一致（仅同步 config `skillVersion`，不做其他配置迁移）；`diff_report` 以 manifest entries 为准；install-log `next` 不再过期（提示 `init.py --refresh-block --confirm`）；`test_upgrade.py` 补对应断言。
+- **E 编号回退**：`ticket.md` 回执引用 R1–R4 → R1–R6；`orchestration-guide.md` 与 qoder/opencode `helm.md` 的 F1–F12 → F1–F16；新增 `test_2210_patch.py` grep 防回退断言。
+
+### 新增
+
+- **FB-008 guard ctx 阈值/交接检测**：`parse_ctx_k` 兼容 `ctx (412k/1M)`、`ctx 75.4k/1M`（小数）、`ctx ( 75.4k / 1M )`、`ctx 62.3%`，统一折算为每 1M 的 k 值，多行取最后一个；解析失败返回 None 不抛异常。总舵 pane 先按 agent name 解析，名字缺失/漂移时回退 `<crew-dir>/dispatch-agents.json`（按名或最近 `role=helm` 条目反查），解析不到 fail-safe 不动作、不误交接。`guard.handoff` `phase=done` 后继续监控继任总舵（不再永久短路），一次交接成功后重置 `handoff_attempted` 允许再次交接；失败只通知并写 `phase=done result=failed`，不循环、不回落 split。交接阈值 `ctxWarn` 默认 0.30 / `ctxHandoff` 默认 **0.50**（Captain 2026-11-11 修正，原 0.60）；交接收尾按 handoff `old` 识别旧舵（重启不误杀 working 旧舵），继任缺失/blocked/idle 无首报或旧舵停滞连续 3 轮转 `failed` 通知人工，失败通知区分孤儿资源与现役继任，registry 反查仅接受可解释关系（B1–B5）。`test_crew_guard.py` 新增解析/阈值 29/30/49/50/51/映射/phase 流转用例。
+
+### 测试
+
+- 新增 `test_2210_patch.py`（B/E 文档断言）；`test_init_v2.py`、`test_doctor_config.py`、`test_upgrade.py`、`test_crew_guard.py` 补对应正反例。
+- 全量 pytest 629 passed + 143 subtests（2.2.9 基线 586+117，0 fail）；`crew-lint`（含 `--purity`）、本仓 `plan-status --lint`/`--playbooks` 绿。
+- 版本 2.2.10：`SKILL.md` frontmatter 与标题、`init.py` fallback、`test_crew_lint.py`、`test_220_final.py`、`test_224_retro.py`、`test_225_patch.py` 版本断言同步。
+
 ## 2.2.9 — 2026-11-10
 
 ### 新增

@@ -51,7 +51,7 @@ TEMPLATES = SKILL_DIR / "templates"
 MARK_START = "<!-- agent-crew:orchestration:start -->"
 MARK_END = "<!-- agent-crew:orchestration:end -->"
 MARK_PREFIX = "<!-- agent-crew:orchestration:"
-SKILL_VERSION_FALLBACK = "2.2.9"
+SKILL_VERSION_FALLBACK = "2.2.10"
 
 CONFIG_REL = Path(".planning/orchestration.json")
 MANIFEST_REL = Path("docs/crew/manifest.json")
@@ -898,6 +898,18 @@ def detect(root: Path, report: Report) -> None:
         )
 
 
+def git_ignored_path(root: Path, rel: str) -> bool:
+    """rel 被 .gitignore 忽略时为 True；非 git 仓/无 git 可用时按未忽略处理。"""
+    try:
+        probe = subprocess.run(
+            ["git", "-C", str(root), "check-ignore", "-q", "--", rel],
+            capture_output=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return probe.returncode == 0
+
+
 def forbidden_copies(root: Path, skill_root: str) -> list[str]:
     skill_path = Path(skill_root)
     if not skill_path.is_absolute():
@@ -914,7 +926,7 @@ def forbidden_copies(root: Path, skill_root: str) -> list[str]:
             continue
         except ValueError:
             pass
-        if path.name in COPY_BASENAMES:
+        if path.name in COPY_BASENAMES and not git_ignored_path(root, rel):
             copies.append(rel)
     return sorted(set(copies))
 

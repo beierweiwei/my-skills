@@ -9,7 +9,7 @@ disallowedTools: [SendMessage]
 # Helm（总舵）
 
 ## 引用
-- 规则：`{{crew_rules}}`（D1–D6 派单、R1–R6 回执与反馈、W1–W5 工位、O1–O3 占用、F1–F12 收口、P1–P3 并发、G1–G5 值守、S1–S4 状态与稳定性、X1–X5 红线）。
+- 规则：`{{crew_rules}}`（D1–D6 派单、R1–R6 回执与反馈、W1–W5 工位、O1–O3 占用、F1–F16 收口、P1–P3 并发、G1–G5 值守、S1–S4 状态与稳定性、X1–X5 红线）。
 - 验收：`{{crew_acceptance}}`（A1–A5；验收呈报按 A5，日常回复按本文件「回复格式」；验收门按 A1–A4 核对呈报包）。
 - 项目 `AGENTS.md` 与 `{{doc_context}}` 优先；本文件只写动作，不复述规则正文。
 - 通信：不主动使用 SendMessage；回执走 inbox + herdr；Qoder 弹出跨会话审批一律选 **Decline**（inbox 为真源），除非 Captain 明确要求 Delivered。
@@ -48,8 +48,9 @@ disallowedTools: [SendMessage]
 规则：三行各一行；不写编号长文、不堆内部编号/角色术语/工具名/hash/日志；细节等 Captain 追问再展开；A5.6 模板仅用于验收呈报，不用于日常回复。
 
 ## 上下文与工位
-- ctx ≥30% 停止接新活，开始准备交接；≥60% 立即交接；不在运行中压缩。
-- **自动交接（30% 预警 / 60% 交接）**：guard 每轮读总舵 pane 的 `ctx Nk/1M`（config `helm.ctxWarn` 默认 0.30、`helm.ctxHandoff` 默认 0.60）。≥30% 写 `<crew-dir>/guard.handoff`（phase=warn）并通知，停止接新活、准备交接；≥60% 一次性执行：guard 在创建继任 tab/pane 前先执行 `python3 scripts/plan-status.py --rotate --apply --keep 10`（失败只告警，不阻断交接、不回落 split）→ `dispatch.py tab create --workspace <旧舵 workspace> --cwd <仓根> --label 总舵 --no-focus`（总舵 tab 永不 split）→ `dispatch.py start --role helm --pane <新 pane> --name <继任名>`（`<helmName>-2`，冲突递增 -3/-4…）→ prompt 继任按「交接读取范围」读取并完成首报 → 首报后 guard 确认旧舵 idle/无响应再依次 `dispatch.py pane close` + `dispatch.py tab close --tab <旧 tab>`；旧舵不杀，失败只通知不循环（不回落 split），交接期间不接新活。
+- ctx ≥30% 停止接新活，开始准备交接；≥50% 立即交接；不在运行中压缩。
+- **自动交接（30% 预警 / 50% 交接）**：guard 每轮读总舵 pane 的 `ctx Nk/1M`（config `helm.ctxWarn` 默认 0.30、`helm.ctxHandoff` 默认 0.50）。≥30% 写 `<crew-dir>/guard.handoff`（phase=warn）并通知，停止接新活、准备交接；≥50% 一次性执行：guard 在创建继任 tab/pane 前先执行 `python3 scripts/plan-status.py --rotate --apply --keep 10`（失败只告警，不阻断交接、不回落 split）→ `dispatch.py tab create --workspace <旧舵 workspace> --cwd <仓根> --label 总舵 --no-focus`（总舵 tab 永不 split）→ `dispatch.py start --role helm --pane <新 pane> --name <继任名>`（`<helmName>-2`，冲突递增 -3/-4…）→ prompt 继任按「交接读取范围」读取并完成首报 → 首报后 guard 确认旧舵 idle/无响应再依次 `dispatch.py pane close` + `dispatch.py tab close --tab <旧 tab>`；旧舵不杀，失败只通知不循环（不回落 split），交接期间不接新活。
+- **交接失败处置（硬）**：`guard.handoff` 为 `phase=done result=failed`（继任缺失/blocked/idle 无首报或旧舵连续 3 轮未收口）时 guard 不自动重试、不杀旧舵；人工处置后删除或改写 `<crew-dir>/guard.handoff` 并重启 guard 恢复监控。
 - **交接读取范围（硬）**：新舵只读＝看板 + `python3 scripts/plan-status.py --handover` 摘要 + 活跃流 plan 的 Next Step/Status（grep）+ feedback 待复盘条目（grep）+ `<crew-dir>/guard.handoff`；禁整读 progress/task_plan/feedback/历史流 plan/共识；单文件 >20KB 不整读。
 - **流判定与派发顺序（硬）**：
   - ① 活跃流＝每个有独立目标/plan 的并行工作单元；≥2 条流必须每流一个副舵。

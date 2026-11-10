@@ -23,9 +23,14 @@ blocked 年龄与重复叫醒：按 agent 身份（name，缺省 pane_id）记�
 时叫醒消息提示「按 R6 处置（re-task / close / escalate），应关闭工位或升级 Captain」；
 guard 不自动关闭/杀 agent；agent 不再 blocked 或消失即清除年龄。
 自动交接：每轮读总舵 pane 的 `ctx Nk/1M`（`herdr pane read <pane> --lines 80`），
-按 config `helm.ctxWarn`（默认 0.30）/`helm.ctxHandoff`（默认 0.60）写
-<crew-dir>/guard.handoff 并通知；≥交接阈值一次性新建 tab/继任/首报后关旧 pane
-与旧 tab，失败只通知不循环，不杀旧舵。交接启动前先执行
+兼容小数与百分比（`ctx 75.4k/1M`、`ctx 62.3%`）；pane 先按 agent 名解析，
+名字缺失/漂移时回退 <crew-dir>/dispatch-agents.json（按名或最近 role=helm 条目反查，
+反查关系不可解释时 fail-safe），解析不到则 fail-safe 不动作。按 config
+`helm.ctxWarn`（默认 0.30）/`helm.ctxHandoff`（默认 0.50）写 <crew-dir>/guard.handoff
+并通知；≥交接阈值一次性新建 tab/继任/首报后关旧 pane 与旧 tab，失败只通知不循环；
+旧舵一律按 handoff `old` 身份判定，working 不杀；继任缺失/blocked/idle 无首报或旧舵
+持续未收口连续 HANDOFF_STALL_ROUNDS 轮后记 failed 并通知人工。交接完成（phase=done）后
+继续监控继任总舵，不因 done 永久短路。交接启动前先执行
 `plan-status.py --rotate --apply --keep ROTATE_KEEP`（默认 10）归档 progress；
 rotate 失败或异常只写 guard.log 告警，继续原交接流程（不阻断、不回落 split）。
 
@@ -69,10 +74,21 @@ WRITE_INTERVAL_SECONDS = 300
 # 交接启动前 progress 轮转保留条数（与 plan-status.py --rotate 默认一致；显式常量便于审计）
 ROTATE_KEEP = 10
 PROBE_NAME_PREFIXES = ("s9-", "probe-", "test-")
-CTX_RE = re.compile(r"ctx\s*\(?\s*(\d+)k\s*/\s*1M\s*\)?", re.IGNORECASE)
+CTX_RE = re.compile(
+    r"ctx\s*\(?\s*(?:"
+    r"(?P<used>\d+(?:\.\d+)?)\s*k\s*/\s*(?P<total>\d+(?:\.\d+)?)\s*(?P<unit>[kKmM])"
+    r"|(?P<percent>\d+(?:\.\d+)?)\s*%"
+    r")\s*\)?",
+    re.IGNORECASE,
+)
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 DEFAULT_CTX_WARN = 0.30
-DEFAULT_CTX_HANDOFF = 0.60
+DEFAULT_CTX_HANDOFF = 0.50
+# 交接等待有界：继任缺失/blocked/idle 无首报，或旧舵持续未收口满 N 轮
+# → phase=done result=failed
+HANDOFF_STALL_ROUNDS = 3
+# 创建阶段失败的 newPane/newTab 是孤儿资源；其它失败步骤下继任可能仍可用，提示保留。
+HANDOFF_CREATE_FAILURE_STEPS = ("tab create", "dispatch start", "dispatch prompt", "state")
 DEFAULT_TAB_LABEL = "总舵"
 RETRO_SECTION = "流程反馈（复盘信箱）"
 RETRO_OPEN_STATUS = "待复盘"
@@ -119,12 +135,28 @@ def is_probe_agent(agent: dict) -> bool:
         return False
 
 
-def parse_ctx_k(text: str) -> int | None:
-    """从 `herdr pane read` 文本解析 `ctx (123k/1M)`；多个取最后一个。"""
+def parse_ctx_k(text: str) -> float | None:
+    """从 `herdr pane read` 文本解析总舵 ctx，统一折算为每 1M 的 k 值。
+
+    兼容 `ctx (412k/1M)`、`ctx 75.4k/1M`（小数）、`ctx ( 75.4k / 1M )`、
+    `ctx 62.3%`（百分比折算为 623）；多行取最后一个匹配。解析失败
+    （含 `ctx unknown`、空串、缺总量 `ctx 75.4k`）返回 None，不抛异常。
+    """
     if not isinstance(text, str):
         return None
-    matches = CTX_RE.findall(ANSI_RE.sub("", text))
-    return int(matches[-1]) if matches else None
+    matches = list(CTX_RE.finditer(ANSI_RE.sub("", text)))
+    if not matches:
+        return None
+    match = matches[-1]
+    percent = match.group("percent")
+    if percent is not None:
+        return float(percent) * 10.0
+    used = float(match.group("used"))
+    total = float(match.group("total"))
+    if total <= 0:
+        return None
+    total_k = total * (1000.0 if match.group("unit").lower() == "m" else 1.0)
+    return used / total_k * 1000.0
 
 
 def parse_worktree_paths(output: str) -> set[Path]:
@@ -565,14 +597,22 @@ def read_handoff_state(crew_dir: Path) -> dict[str, str]:
 
 
 def resolve_guard_helm(root: Path, crew_dir: Path, explicit: str | None) -> str:
-    """交接后重启 guard 时优先沿用 handoff 记录的继任名（显式 --helm 不覆盖）。"""
+    """交接后重启 guard 时按 handoff 状态识别现役总舵（显式 --helm 不覆盖）。
+
+    phase=warn → old（当前现役总舵）；phase=started / done(result≠failed)
+    → new（继任）；done(result=failed) 或其它 → 配置 helm，不采用失败继任名。
+    """
     current = resolve_helm_name(root, explicit)
     if explicit:
         return current
     state = read_handoff_state(crew_dir)
-    if (state.get("phase") in ("started", "done")
-            and state.get("old") == current and state.get("new")):
-        return state["new"]
+    phase = state.get("phase")
+    if phase == "warn":
+        return state.get("old") or current
+    if phase == "started":
+        return state.get("new") or current
+    if phase == "done" and state.get("result") != "failed":
+        return state.get("new") or current
     return current
 
 
@@ -599,6 +639,9 @@ class Guard:
     blocked_since: dict[str, float] = field(default_factory=dict, init=False)
     blocked_last_wake: dict[str, float] = field(default_factory=dict, init=False)
     handoff_attempted: bool = field(default=False, init=False)
+    handoff_failed_noted: bool = field(default=False, init=False)
+    handoff_wait_rounds: int = field(default=0, init=False)
+    handoff_close_rounds: int = field(default=0, init=False)
     project_roots: set[Path] | None = None
     roots_cache: set[Path] | None = field(default=None, init=False)
 
@@ -637,10 +680,21 @@ class Guard:
         fields = dict(base)
         fields.setdefault("time", utc_now())
         self._write_handoff(**fields, phase="done", result="failed", error=error)
-        self._notify_handoff(
-            "guard 交接失败",
-            f"{self.helm} 自动交接失败（{step}），旧舵未关闭；请 Captain 人工接手。\n{detail}",
-        )
+        old = str(base.get("old") or self.helm)
+        body = f"{old} 自动交接失败（{step}），旧舵未关闭；请 Captain 人工接手。\n{detail}"
+        resources = [
+            f"{label} {base[key]}"
+            for key, label in (("newPane", "pane"), ("newTab", "tab"))
+            if base.get(key)
+        ]
+        if resources:
+            if step in HANDOFF_CREATE_FAILURE_STEPS:
+                body += (f"\n已创建资源：{'，'.join(resources)}；"
+                         "请人工确认后清理（dispatch.py pane close / tab close）。")
+            else:
+                body += (f"\n继任资源：{'，'.join(resources)}；"
+                         "请保留，人工确认后处置（不要当作孤儿资源）。")
+        self._notify_handoff("guard 交接失败", body)
         self.log(f"交接失败（{step}）：{detail}")
         return {"action": "failed", "reason": f"交接失败：{error}", "error": error}
 
@@ -659,15 +713,86 @@ class Guard:
                 return value.strip()
         return ""
 
-    def _ctx_for_helm(self, agents: list[dict]) -> tuple[int, str] | None:
-        helm_agent = self._find_agent(agents, self.helm)
-        if helm_agent is None:
-            self.log(f"ctx 检查跳过：未找到总舵 agent {self.helm}")
+    def _dispatch_registry(self) -> dict:
+        try:
+            data = json.loads(
+                (self.crew_dir / "dispatch-agents.json").read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _registry_pane(info: object) -> str:
+        if not isinstance(info, dict):
+            return ""
+        for key in ("pane", "pane_id"):
+            value = info.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    def _resolve_helm_pane(self, agents: list[dict]) -> tuple[str, str] | None:
+        """总舵 pane 解析：agent name → dispatch registry（按名/最近 helm 条目反查）。
+
+        名字漂移时以 registry pane 在 agent list 中的实际名字为准；解析不到
+        返回 None（fail-safe：本轮不动作、不误交接）。
+        """
+        agent = self._find_agent(agents, self.helm)
+        pane = self._agent_pane(agent)
+        if pane:
+            return pane, self.helm
+
+        registry = self._dispatch_registry()
+        candidates: list[tuple[str, str]] = []
+        direct_info = registry.get(self.helm)
+        if isinstance(direct_info, dict) and direct_info.get("role") == "helm":
+            direct = self._registry_pane(direct_info)
+            if direct:
+                candidates.append((self.helm, direct))
+        helm_entries = []
+        for name, info in registry.items():
+            if not isinstance(info, dict) or info.get("role") != "helm":
+                continue
+            entry_pane = self._registry_pane(info)
+            if entry_pane:
+                helm_entries.append(
+                    (str(info.get("startedAt") or ""), str(name), entry_pane))
+        for _, name, entry_pane in sorted(helm_entries, reverse=True):
+            if all(entry_pane != pane for _, pane in candidates):
+                candidates.append((name, entry_pane))
+
+        for name, entry_pane in candidates:
+            actual = next(
+                (item for item in agents if self._agent_pane(item) == entry_pane),
+                None,
+            )
+            if actual is None:
+                continue
+            actual_name = str(actual.get("name") or "").strip() or name
+            if actual_name != name and not actual_name.startswith(self.helm):
+                self.log(
+                    f"registry 反查关系不可解释：条目 {name} 指向 pane {entry_pane}，"
+                    f"实际 agent {actual_name}；fail-safe 不动作"
+                )
+                continue
+            if actual_name != self.helm:
+                self.log(
+                    f"helm 名漂移：guard 记录 {self.helm}，实际 agent "
+                    f"{actual_name}（pane {entry_pane}，来源 dispatch registry）"
+                )
+            return entry_pane, actual_name
+        self.log(
+            f"ctx 检查跳过：未找到总舵 agent {self.helm}"
+            "（dispatch registry 未解析到可用 pane）"
+        )
+        return None
+
+    def _ctx_for_helm(self, agents: list[dict]) -> tuple[float, str, str] | None:
+        resolved = self._resolve_helm_pane(agents)
+        if resolved is None:
             return None
-        pane = self._agent_pane(helm_agent)
-        if not pane:
-            self.log(f"ctx 检查跳过：总舵 agent {self.helm} 无 pane")
-            return None
+        pane, helm_name = resolved
         try:
             text = self.pane_read(pane, 80)
         except Exception as exc:  # noqa: BLE001 - 读 pane 失败不动作
@@ -677,7 +802,7 @@ class Guard:
         if ctx_k is None:
             self.log(f"ctx 解析失败（{pane}），本轮不动作")
             return None
-        return ctx_k, pane
+        return ctx_k, pane, helm_name
 
     def _helm_runtime(self) -> str:
         try:
@@ -766,12 +891,16 @@ class Guard:
         else:
             self.log(f"交接前 progress rotate 失败（退出码 {code}，继续交接）：{detail}")
 
-    def _start_handoff(self, agents: list[dict], ctx_k: int, old_pane: str) -> dict:
+    def _start_handoff(self, agents: list[dict], ctx_k: float, old_pane: str) -> dict:
         if self.handoff_attempted:
             return {"action": "wait", "reason": "交接已尝试，等待继任首报"}
         self.handoff_attempted = True
+        self.handoff_failed_noted = False
+        self.handoff_wait_rounds = 0
+        self.handoff_close_rounds = 0
         pct = ctx_k / 1000.0
-        reason = f"ctx {ctx_k}k/1M ≥ {pct:.0%} 交接阈值"
+        helm_cfg = load_config(self.root)["helm"]
+        reason = f"ctx {ctx_k:g}k/1M ≥ {helm_cfg['ctxHandoff']:.0%} 交接阈值"
         old_agent = self._find_agent(agents, self.helm)
         old_tab = str(old_agent.get("tab_id") or "") if old_agent else ""
         workspace = str(old_agent.get("workspace_id") or "") if old_agent else ""
@@ -791,7 +920,7 @@ class Guard:
                 base,
             )
         successor = self._successor_name(agents)
-        tab_label = load_config(self.root)["helm"]["tabLabel"]
+        tab_label = helm_cfg["tabLabel"]
 
         # 交接前置：先归档 progress（失败只告警），再做任何 tab/pane 变更。
         self._rotate_progress_before_handoff()
@@ -804,12 +933,12 @@ class Guard:
             return self._handoff_fail("tab create", error or output, base)
         new_pane = self._extract_pane(output)
         new_tab = self._extract_tab(output)
+        base.update({"new": successor, "newPane": new_pane, "newTab": new_tab})
         if not new_pane:
             return self._handoff_fail("tab create", f"未返回 pane：{output.strip()}", base)
         if not new_tab:
             return self._handoff_fail("tab create", f"未返回 tab：{output.strip()}", base)
 
-        base.update({"new": successor, "newPane": new_pane, "newTab": new_tab})
         start_args = ["start", "--role", "helm", "--pane", new_pane]
         runtime = self._helm_runtime()
         if runtime:
@@ -821,7 +950,7 @@ class Guard:
 
         portfolio = load_config(self.root)["portfolioDir"]
         message = (
-            f"交接接手：原总舵 {self.helm} 的 ctx 已达 {ctx_k}k/1M（{pct:.0%}）。\n"
+            f"交接接手：原总舵 {self.helm} 的 ctx 已达 {ctx_k:g}k/1M（{pct:.0%}）。\n"
             "按「交接读取范围（硬）」读取：派生看板（docs/进度追踪.md）+ "
             "`python3 scripts/plan-status.py --handover` 摘要 + "
             f"活跃流 plan 的 Next Step/Status（grep）+ {portfolio}/feedback.md 待复盘条目（grep）"
@@ -853,6 +982,18 @@ class Guard:
         old_pane = fields.get("oldPane", "")
         if not successor:
             return self._handoff_fail("state", "guard.handoff 缺 new", fields)
+        # 旧舵身份一律取 handoff old：guard 重启后 self.helm 可能已是继任。
+        old_name = fields.get("old") or self.helm
+        base = {
+            "old": old_name,
+            "oldPane": old_pane,
+            "oldTab": fields.get("oldTab", ""),
+            "new": successor,
+            "newPane": fields.get("newPane", ""),
+            "newTab": fields.get("newTab", ""),
+            "time": utc_now(),
+            "reason": fields.get("reason", ""),
+        }
 
         agent = self._find_agent(agents, successor)
         status = str(agent.get("agent_status") or "") if agent else ""
@@ -864,21 +1005,30 @@ class Guard:
             status == "idle" and fields.get("successorWasWorking") == "1"
         )
         if not ready:
+            # 有界等待：继任缺失/blocked/unknown，或 idle 但未观测到首报
+            # （successorWasWorking≠1，常见于 guard 停机窗口内完成首报）连续 N 轮
+            # → failed 通知人工。
+            if agent is None or status in ("idle", "blocked", "unknown"):
+                self.handoff_wait_rounds += 1
+                state_text = "不存在" if agent is None else status
+                if status == "idle":
+                    state_text = "idle（successorWasWorking≠1）"
+                if self.handoff_wait_rounds >= HANDOFF_STALL_ROUNDS:
+                    return self._handoff_fail(
+                        "首报等待",
+                        f"继任 {successor} {state_text}"
+                        f"（连续 {self.handoff_wait_rounds} 轮）",
+                        base,
+                    )
+                self.log(
+                    f"继任 {successor} {state_text}，等待首报"
+                    f"（{self.handoff_wait_rounds}/{HANDOFF_STALL_ROUNDS} 轮）"
+                )
             return {"action": "wait", "reason": f"等待继任 {successor} 首报"}
 
-        old_agent = self._find_agent(agents, self.helm)
+        old_agent = self._find_agent(agents, old_name)
         old_status = str(old_agent.get("agent_status") or "") if old_agent else ""
-        base = {
-            "old": fields.get("old", self.helm),
-            "oldPane": old_pane,
-            "oldTab": fields.get("oldTab", ""),
-            "new": successor,
-            "newPane": fields.get("newPane", ""),
-            "newTab": fields.get("newTab", ""),
-            "time": utc_now(),
-            "reason": fields.get("reason", ""),
-        }
-        close_note = "旧舵仍在运行，未关闭"
+        close_note = f"旧舵 {old_name} 仍在运行（{old_status or 'working'}），未关闭"
         pane_closed = False
         if old_pane and old_status in ("", "idle", "done", "unknown"):
             code, output, error = self.dispatch(
@@ -890,6 +1040,20 @@ class Guard:
             close_note = "旧舵 pane 已关闭"
         elif not old_pane:
             close_note = "旧舵 pane 未知，未关闭"
+        else:
+            # 旧舵仍在 working/blocked：不杀，有界等待后转 failed 交人工。
+            self.handoff_close_rounds += 1
+            if self.handoff_close_rounds >= HANDOFF_STALL_ROUNDS:
+                return self._handoff_fail(
+                    "旧舵收口",
+                    f"旧舵 {old_name} 连续 {self.handoff_close_rounds} 轮"
+                    f"仍为 {old_status}，不自动关闭",
+                    base,
+                )
+            self.log(
+                f"{close_note}（{self.handoff_close_rounds}/{HANDOFF_STALL_ROUNDS} 轮）"
+            )
+            return {"action": "wait", "reason": close_note}
 
         old_tab = fields.get("oldTab", "")
         if pane_closed and old_tab:
@@ -925,6 +1089,10 @@ class Guard:
             **base, phase="done", result="ok", successorWasWorking="1",
         )
         self.helm = successor
+        # 一次交接已完成；新 helm 后续再达阈值时允许再次交接（防同进程永久短路）。
+        self.handoff_attempted = False
+        self.handoff_wait_rounds = 0
+        self.handoff_close_rounds = 0
         self._notify_handoff(
             "guard 交接",
             f"交接完成：{base['old']} → {successor}；{close_note}；请 Captain 知悉。",
@@ -938,13 +1106,28 @@ class Guard:
         phase = fields.get("phase")
         if phase == "started":
             return self._continue_handoff(fields, agents)
-        if phase == "done":
+        if phase == "done" and fields.get("result") == "failed":
+            # 交接失败不自动重试（防循环）；失败时已通知，等待人工处置。
+            if not self.handoff_failed_noted:
+                self.handoff_failed_noted = True
+                self.log(
+                    f"上次交接失败（{fields.get('error', '')}），"
+                    "不再自动重试，等待人工处置"
+                )
             return {"action": "none"}
+        if phase == "done":
+            # done 不得永久短路：交接完成后继续监控继任总舵（handoff new）。
+            successor = fields.get("new", "")
+            if successor and successor != self.helm:
+                self.log(f"交接已完成，改监控继任总舵 {successor}")
+                self.helm = successor
 
         ctx = self._ctx_for_helm(agents)
         if ctx is None:
             return {"action": "none"}
-        ctx_k, pane = ctx
+        ctx_k, pane, helm_name = ctx
+        if helm_name != self.helm:
+            self.helm = helm_name
         ratio = ctx_k / 1000.0
         cfg = load_config(self.root)["helm"]
         if ratio >= cfg["ctxHandoff"]:
@@ -952,7 +1135,7 @@ class Guard:
         if ratio >= cfg["ctxWarn"]:
             if phase == "warn":
                 return {"action": "none"}
-            reason = f"ctx {ctx_k}k/1M ≥ {cfg['ctxWarn']:.0%} 预警阈值"
+            reason = f"ctx {ctx_k:g}k/1M ≥ {cfg['ctxWarn']:.0%} 预警阈值"
             helm_agent = self._find_agent(agents, self.helm)
             old_tab = str(helm_agent.get("tab_id") or "") if helm_agent else ""
             self._write_handoff(
@@ -961,9 +1144,9 @@ class Guard:
             )
             self._notify_handoff(
                 "guard 交接预警",
-                f"总舵 {self.helm} ctx 已达 {ctx_k}k/1M（{ratio:.0%}），该准备交接。",
+                f"总舵 {self.helm} ctx 已达 {ctx_k:g}k/1M（{ratio:.0%}），该准备交接。",
             )
-            self.log(f"交接预警：{self.helm} ctx {ctx_k}k/1M")
+            self.log(f"交接预警：{self.helm} ctx {ctx_k:g}k/1M")
             return {"action": "warn", "reason": reason}
         return {"action": "none"}
 
@@ -1234,12 +1417,10 @@ class Guard:
         except Exception as exc:  # noqa: BLE001 - 交接检测失败不终止值守
             self.log(f"交接检测异常：{type(exc).__name__}: {exc}")
             handoff = {"action": "none"}
+        result["handoff"] = handoff
         if handoff.get("action") in ("started", "wait", "done"):
             result["reason"] = handoff.get("reason", "")
-            result["handoff"] = handoff
             return result
-        if handoff.get("action") != "none":
-            result["handoff"] = handoff
         if not blocked:
             retro_reason = self._retro_due(running, handoff)
             if retro_reason:
@@ -1326,14 +1507,21 @@ blocked 年龄与重复叫醒：按 agent 身份（name，缺省 pane_id）记�
 「按 R6 处置（re-task / close / escalate），应关闭工位或升级 Captain」；
 guard 不自动关闭/杀 agent。配置位于 .planning/orchestration.json。
 
-自动交接：每轮 `herdr pane read <pane> --lines 80` 解析总舵 `ctx Nk/1M`；
+自动交接：每轮 `herdr pane read <pane> --lines 80` 解析总舵 `ctx`，兼容
+`ctx (412k/1M)`、`ctx 75.4k/1M`（小数）、`ctx 62.3%`（百分比折算），多行取最后；
+pane 先按 agent 名解析，名字缺失/漂移时回退 <crew-dir>/dispatch-agents.json
+（按名或最近 role=helm 条目反查；关系不可解释或解析不到时 fail-safe 不动作）。
 ctxWarn（默认 30%）写 <crew-dir>/guard.handoff phase=warn 并通知；
-ctxHandoff（默认 60%）一次性 `dispatch.py tab create` 新 tab（配置 helm.tabLabel
+ctxHandoff（默认 50%）一次性 `dispatch.py tab create` 新 tab（配置 helm.tabLabel
 默认「总舵」）→ `start --name <继任>` → `prompt` → 首报后 close 旧 pane，确认旧 tab
 无剩余 pane 后 close 旧 tab；guard.handoff 记录 oldTab/newTab（旧文件缺字段时只关旧 pane）；
-总舵 tab 永不 split。失败只通知+记录（phase=done, result=failed），不循环、不杀旧舵、
-不回落 pane split；旧 tab 有剩余 pane/无法确认或关闭失败只记 note，由人工或
-pane-audit --apply 兜底。
+总舵 tab 永不 split。旧舵按 handoff old 身份判定且不杀：working 时保持 started 等待；
+继任缺失/blocked/idle 无首报或旧舵持续未收口连续 3 轮则记 phase=done result=failed + 通知人工，
+不循环、不自动重试、不回落 pane split；失败通知带出 newPane/newTab：
+创建阶段失败按孤儿资源提示清理，首报等待/旧舵收口失败提示保留待人工处置。
+交接完成（phase=done, result=ok）后继续监控继任总舵（handoff new），不因 done 永久短路；
+done(result=failed) 不自动重试，人工删除或改写 <crew-dir>/guard.handoff 后重启 guard 恢复。
+旧 tab 有剩余 pane/无法确认或关闭失败只记 note，由人工或 pane-audit --apply 兜底。
 
 周复盘兜底：仅当 feedback 复盘信箱 `待复盘` >0、无在跑 worker 且最近 retro 报告超期
 （config retro.periodDays，默认 7，夹取 1–30）时叫醒，每日最多一次
@@ -1354,7 +1542,7 @@ pane-audit --apply 兜底。
     parser.add_argument("--interval", type=int, default=120, help="轮询秒数（默认 120）")
     parser.add_argument("--once", action="store_true", help="只跑一轮（测试/人工抽查）")
     parser.add_argument("--json", action="store_true",
-                        help="配合 --once 输出 JSON（crewDir/planPath/pending/workers/wake）")
+                        help="配合 --once 输出 JSON（crewDir/planPath/pending/workers/wake/handoff）")
     return parser
 
 
@@ -1392,6 +1580,7 @@ def main(argv: list[str] | None = None) -> int:
                     "pending": result.get("pending", 0),
                     "workers": result.get("workers", []),
                     "wake": bool(result.get("woke")),
+                    "handoff": result.get("handoff", {}),
                 }
                 print(json.dumps(payload, ensure_ascii=False))
             return 0

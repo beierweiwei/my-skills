@@ -37,6 +37,9 @@ HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 COPY_BASENAMES = ("crew-rules.md", "crew-acceptance.md",
                   "orchestration-guide.md", "plan-discipline.md")
+# 与 crew-guard.py 的 DEFAULT_BLOCKED_{REPEAT,GRACE}_MINUTES 对齐；缺省参与 effective 比较
+GUARD_BLOCKED_REPEAT_DEFAULT = 15
+GUARD_BLOCKED_GRACE_DEFAULT = 30
 PROJECT_SKILLS_PREFIXES = (".qoder/skills/", ".opencode/skills/")
 QODER_AGENT_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 CORE_IDS = set(dispatch_lib.CORE_ROLES)
@@ -896,6 +899,23 @@ class Doctor:
                             or not 1 <= value <= 240):
                         problems.append(
                             f"guard.{key} 必须是 1–240 的整数：{value!r}")
+                repeat = guard.get("blockedRepeatMinutes")
+                grace = guard.get("blockedGraceMinutes")
+                effective_repeat = (
+                    repeat if isinstance(repeat, int) and not isinstance(repeat, bool)
+                    else GUARD_BLOCKED_REPEAT_DEFAULT)
+                effective_grace = (
+                    grace if isinstance(grace, int) and not isinstance(grace, bool)
+                    else GUARD_BLOCKED_GRACE_DEFAULT)
+                if effective_repeat > effective_grace:
+                    problems.append(
+                        "guard.blockedRepeatMinutes 必须 <= guard.blockedGraceMinutes："
+                        f"effective repeat={effective_repeat} > grace={effective_grace}"
+                        "（缺省值 repeat=15、grace=30）；"
+                        "repeat 是重复叫醒间隔，grace 是累计提示阈值；"
+                        "repeat 更大时 grace 提示要等到下一次叫醒才出现；"
+                        f"下一步：把 blockedRepeatMinutes 调低到 <= {effective_grace}，"
+                        f"或把 blockedGraceMinutes 调高到 >= {effective_repeat}")
         roles = config.get("roles")
         if roles is None:
             problems.append("缺 roles.enabled")

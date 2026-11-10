@@ -43,7 +43,7 @@
 - **R3 去重**：回执按 `receipt_id` 去重，同一 `receipt_id` 只处理一次。
 - **R4 触发器不是状态**：回执只触发收口与审计，任务状态只认 plan；回执与 plan 不一致时以 plan 为准并触发核对。
 - **R5 反馈分诊**：发现先分四路，不混用——①阻断级（流程跑不下去/工具坏）走回执 `blocked` + 即时推送总舵/副舵，20–30 分钟自检兜底，不进 feedback；②repo 犯错记该流 plan `## Errors Encountered`（回执 findings 带出），correct 启用后转其队列；③跨项目认知由总舵/大副当场 inone 推送（`INONE_AGENT_NAME` 用角色名），船员只报不推；④仅编排/流程/提示词问题进 feedback 信箱（项目 portfolio 目录 `feedback.md`），上报者预分诊填「预判去向」（改规则 R* / 改 SOP 步骤 / 改脚本 / 改模板措辞），格式与生命周期按 [plan-discipline.md](plan-discipline.md) §5.3。复盘去向必须留痕（已改 R*/已改文件、转_correct、已_inone、归档+原因）；待复盘未清零且无去向视为复盘未完成。
-- **R6 blocked 回执处置闭环**：①`status=blocked` 回执由 owner（总舵/副舵）**当轮**处置：re-task / close / escalate，并在回执或原工位留痕；②blocked 工位**不适用** W4 的 2 小时保留，超过 worker 报 blocked 时建议的保留窗（含最晚处置时间）仍未处置即关闭工位或升级 Captain（升级须写明），未给出保留窗时当轮处置；③只改 plan、不回写原工位的视为未处置；处置后回执状态标「已闭环 / 已转出 / 待 Captain」；④区分「等 helm 决策」与「等人工权限/扫码」：后者标 Captain 项并**释放工位**，不空挂。
+- **R6 blocked 回执处置闭环**：①`status=blocked` 回执由 owner（总舵/副舵）**当轮**处置：re-task / close / escalate，并在回执或原工位留痕；②blocked 工位**不适用** W4 的 2 小时保留，超过 worker 报 blocked 时建议的保留窗（含最晚处置时间）仍未处置即关闭工位或升级 Captain（升级须写明），未给出保留窗时当轮处置；③只改 plan、不回写原工位的视为未处置；re-task / close / escalate 是处置动作语义，不是回执 `status`；回写原工位时按合法枚举映射：`re-task` → `status=done` 且 summary 标「已转出：<新工单/工位/接手人>」；`close` → `status=done` 且 summary 标「已闭环：<原因/动作>」；`escalate` → `status=captain` 且 summary 标「待 Captain：<决策项>」；未处置保持 `status=blocked`，不得用 `done`/`captain` 掩盖；④区分「等 helm 决策」与「等人工权限/扫码」：后者标 Captain 项并**释放工位**，不空挂。
 
 ## W 工位
 

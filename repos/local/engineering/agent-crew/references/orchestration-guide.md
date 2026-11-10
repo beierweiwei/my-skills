@@ -13,7 +13,7 @@
 | 回执 | crew-rules.md **R1–R6** |
 | 工位 | crew-rules.md **W1–W5** |
 | 占用与并发 | crew-rules.md **O1–O3、P1–P3** |
-| 收口 | crew-rules.md **F1–F12** |
+| 收口 | crew-rules.md **F1–F16** |
 | 值守 | crew-rules.md **G1–G5** |
 | 状态机与放行条件 | crew-rules.md **S1–S4** |
 | 边界红线 | crew-rules.md **X1–X5** |
@@ -112,7 +112,7 @@
 
 ## 5. 端到端流程（机制）
 
-五个阶段，三道人工门插在中间。每个阶段有唯一 owner 与唯一产物落点；门只看产物，不看过程。派单、收口与状态放行的可执行规则分别见 D1–D6、F1–F12、S1–S4。
+五个阶段，三道人工门插在中间。每个阶段有唯一 owner 与唯一产物落点；门只看产物，不看过程。派单、收口与状态放行的可执行规则分别见 D1–D6、F1–F16、S1–S4。
 
 ### 5.1 需求入口
 
@@ -208,7 +208,7 @@
 ### 7.2 Herdr 与 plan-with-files 的协作原理
 
 - **分工**：Herdr 管「活的」——进程、pane、workspace、worktree、互调与状态；plan-with-files 管「记得的」——目标、阶段、决策、错误、Next Step。Herdr 只保活进程，不保存对话上下文；重启或换机后靠文件恢复。
-- **桥**：回执把运行时事件固化成文件（R1–R6）；编排者按回执收口、更新 plan（F1–F12），再由 plan 派生看板。运行时状态目录统一由 `scripts/crew_paths.py` 解析为 `<git-common-dir>/crew/`（linked worktree 取主仓 common dir；非 git 用 `<root>/.crew`）。
+- **桥**：回执把运行时事件固化成文件（R1–R6）；编排者按回执收口、更新 plan（F1–F16），再由 plan 派生看板。运行时状态目录统一由 `scripts/crew_paths.py` 解析为 `<git-common-dir>/crew/`（linked worktree 取主仓 common dir；非 git 用 `<root>/.crew`）。
 - **恢复顺序**：`{{doc_context}}` → 工单 → `{{doc_req}}` → plan/进度；不依赖旧聊天或自动记忆。这样换人、换机、重启后都能接上。
 - 这条分工也解释了为什么「派活/等结果/读输出」走 Herdr，而「做到哪、为什么这样做」永远写 plan：前者是瞬时协调，后者是持久事实。
 

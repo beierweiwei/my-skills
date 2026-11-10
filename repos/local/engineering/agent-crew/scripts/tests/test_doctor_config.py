@@ -143,6 +143,47 @@ class DoctorConfigTest(unittest.TestCase):
                 self.assertEqual(1, rc, report)
                 self.assertIn(token, self.fx.item(report, "config.schema")["detail"])
 
+    def test_guard_repeat_must_not_exceed_grace(self):
+        # C：repeat 是重复叫醒间隔，grace 是累计提示阈值；repeat > grace 时
+        # grace 提示永远要等下个叫醒周期才出现，配置矛盾必须 fail 并给可执行提示。
+        self.fx.config["guard"] = {"blockedRepeatMinutes": 30, "blockedGraceMinutes": 30}
+        self.fx.write_config()
+        rc, report = self.fx.doctor_json("--only", "config.schema")
+        self.assertEqual(0, rc, report)
+        self.assertEqual("pass", self.fx.item(report, "config.schema")["status"])
+
+        self.fx.config["guard"] = {"blockedRepeatMinutes": 60, "blockedGraceMinutes": 30}
+        self.fx.write_config()
+        rc, report = self.fx.doctor_json("--only", "config.schema")
+        self.assertEqual(1, rc, report)
+        item = self.fx.item(report, "config.schema")
+        self.assertEqual("fail", item["status"])
+        for token in ("blockedRepeatMinutes", "blockedGraceMinutes", "60", "30",
+                      "调低", "调高"):
+            self.assertIn(token, item["detail"])
+
+    def test_guard_repeat_grace_compare_effective_defaults(self):
+        # C 边界：只配一个键时，另一键按 crew-guard 缺省（repeat=15、grace=30）
+        # 取 effective 值比较，缺省参与后仍矛盾不得静默通过。
+        cases = (
+            ({"blockedRepeatMinutes": 60}, 1, "effective repeat=60 > grace=30"),
+            ({"blockedGraceMinutes": 10}, 1, "effective repeat=15 > grace=10"),
+            ({"blockedRepeatMinutes": 30}, 0, ""),
+        )
+        for guard, expected_rc, token in cases:
+            with self.subTest(guard=guard):
+                self.fx.config["guard"] = guard
+                self.fx.write_config()
+                rc, report = self.fx.doctor_json("--only", "config.schema")
+                self.assertEqual(expected_rc, rc, report)
+                item = self.fx.item(report, "config.schema")
+                if token:
+                    self.assertEqual("fail", item["status"])
+                    self.assertIn(token, item["detail"])
+                    self.assertIn("下一步", item["detail"])
+                else:
+                    self.assertEqual("pass", item["status"])
+
     def test_skill_source_rule_copy_fails_and_absolute_warns(self):
         copy = self.fx.root / "docs/crew-rules.md"
         copy.write_text("# rules copy\n", encoding="utf-8")

@@ -5,9 +5,10 @@
 - 只处理 manifest 中 kind:file 的受管脚本（scripts/*.py|*.sh）；不碰 AGENTS 块、
   项目角色文件、项目文案、规则/验收（项目无副本）。
 - `--diff`：只读列出脚本内容/版本差异；`--apply --confirm`：加锁 → 备份到
-  <common>/crew/backups/<UTC>/ + backup-manifest.json → 原子替换 → 更新 manifest 哈希/版本 → install-log。
+  <common>/crew/backups/<UTC>/ + backup-manifest.json → 原子替换 → 同步 config 的
+  skillVersion（仅此一项）→ 更新 manifest 哈希/版本 → install-log。
 - `--rollback <backup-id>`：按备份 manifest 逐字节还原受管脚本并校验 sha256。
-- 不做 3-way、不做 baseline、不做路径/配置迁移；不改 orchestration.json。
+- 不做 3-way、不做 baseline、不做路径/其他配置迁移；除 skillVersion 外不改 orchestration.json。
 
 退出码：0 成功；1 校验/状态错误；2 待人工（缺 --confirm / 锁）；3 环境缺失。
 """
@@ -65,7 +66,7 @@ def managed_script_names(manifest: dict) -> list[str]:
 def diff_report(root: Path, manifest: dict, version: str, source_dir: Path) -> dict:
     installed_version = manifest.get("skillVersion")
     rows: list[dict] = []
-    for name in init_lib.SCRIPT_MANIFEST:
+    for name in managed_script_names(manifest):
         content = source_text(name, source_dir)
         if content is None:
             continue
@@ -120,13 +121,25 @@ def _refresh_manifest_hashes(root: Path, manifest: dict) -> None:
             entry["sha256"] = init_lib.sha256_text(target.read_text(encoding="utf-8"))
 
 
+def _config_skill_version(config_path: Path) -> str | None:
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return config.get("skillVersion") if isinstance(config, dict) else None
+
+
 def apply_upgrade(root: Path, confirm: bool, version: str, source_dir: Path) -> int:
     manifest = _load_manifest(root)
     if not confirm:
         print("upgrade --apply 需要 --confirm（不会自动覆盖受管脚本）。")
         return 2
     report = diff_report(root, manifest, version, source_dir)
-    if not report["changed"]:
+    config_path = root / init_lib.CONFIG_REL
+    config_stale = (
+        config_path.is_file() and _config_skill_version(config_path) != version)
+    if (not report["changed"] and manifest.get("skillVersion") == version
+            and not config_stale):
         print("受管脚本已是最新，无需升级。")
         return 0
     try:
@@ -134,7 +147,6 @@ def apply_upgrade(root: Path, confirm: bool, version: str, source_dir: Path) -> 
             manifest = _load_manifest(root)
             names = [Path(row["path"]).name for row in report["scripts"]
                      if row["status"] != "same"]
-            config_path = root / init_lib.CONFIG_REL
             backup_paths = [root / "scripts" / name for name in names]
             if config_path.is_file():
                 backup_paths.append(config_path)
@@ -167,12 +179,13 @@ def apply_upgrade(root: Path, confirm: bool, version: str, source_dir: Path) -> 
                     config["skillVersion"] = version
                     init_lib.atomic_write_text(
                         config_path, json.dumps(config, ensure_ascii=False, indent=2) + "\n")
-            try:
-                manifest["composedAgents"] = init_lib.regenerate_composed_agents(
-                    root, skill_root=source_dir)
-            except init_lib.InitError as exc:
-                raise UpgradeError(f"组合基础代理重建失败：{exc}") from exc
-            _refresh_manifest_hashes(root, manifest)
+            if names:
+                try:
+                    manifest["composedAgents"] = init_lib.regenerate_composed_agents(
+                        root, skill_root=source_dir)
+                except init_lib.InitError as exc:
+                    raise UpgradeError(f"组合基础代理重建失败：{exc}") from exc
+                _refresh_manifest_hashes(root, manifest)
             manifest["skillVersion"] = version
             _write_manifest(root, manifest)
             init_lib.append_install_log(root, {
@@ -190,7 +203,8 @@ def apply_upgrade(root: Path, confirm: bool, version: str, source_dir: Path) -> 
                 ],
                 "conflicts": [],
                 "result": "ok",
-                "next": "如需版本戳一致，把 orchestration.json 的 skillVersion 改为源版本",
+                "next": ("skillVersion 已自动同步为源版本；如需刷新 AGENTS 编排块，"
+                         "运行 python3 scripts/init.py --refresh-block --confirm"),
             })
     except init_lib.InitLocked:
         print("upgrade: 另一个 init/upgrade 正在运行（locked）。", file=sys.stderr)
@@ -198,7 +212,10 @@ def apply_upgrade(root: Path, confirm: bool, version: str, source_dir: Path) -> 
     except (OSError, UpgradeError, init_lib.InitError) as exc:
         print(f"upgrade 失败：{exc}", file=sys.stderr)
         return 1
-    print(f"upgrade 完成：{len(report['changed'])} 个受管脚本更新；backup={backup_id}")
+    if report["changed"]:
+        print(f"upgrade 完成：{len(report['changed'])} 个受管脚本更新；backup={backup_id}")
+    else:
+        print(f"upgrade 完成：仅同步版本戳 {version}；backup={backup_id}")
     return 0
 
 
