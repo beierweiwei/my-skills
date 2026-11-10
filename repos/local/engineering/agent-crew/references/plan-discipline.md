@@ -104,28 +104,28 @@
 1. **Next Step 只放未完成**（≤10 条、每条 ≤1 行 ≤100 字）；完成项迁入 `## 最近完成`（≤10 条，含 commit/测试/证据指针）。
 2. **待 Captain 项只在 Backlog**（C 行）；Next Step 只引用编号，不复制待办正文。
 3. **progress 事件触发写入**：决策/阻塞/派单/收口/异常各写一次，最长 30–60 分钟兜底；一段多里程碑、一条一行。
-4. **交接看板优先**：看板 + portfolio 索引 + Decisions/Errors + 活跃流 Next Step + 最近 3 段 progress；需求文档只读当前活跃章节，全量读仅在歧义时。看板未刷新或源 sha 不一致时，禁止交接。
+4. **交接看板优先**：交接输入＝看板 + `python3 scripts/plan-status.py --handover` 摘要 + 活跃流 Next Step/Status + 最近 3 段 progress + 需求当前章节；禁整读 progress/task_plan/feedback/历史流 plan/共识，单文件 >20KB 不整读（歧义时才按需定向补读）。看板未刷新或源 sha 不一致时，禁止交接。
 
 > 交接 digest 另含 pane 清单与待关项；工位/tab 回收规则见 [orchestration-guide.md](orchestration-guide.md) §5.10（单一真源，此处只留指针）。
 
-### 5.2 归档 SOP（交接前静默窗口）
+### 5.2 归档 SOP（交接流程内动作）
 
-顺序：**① 旧舵/owner 归档（dry-run → apply）→ ② 启动新舵 → ③ 新舵读文件 → ④ 关闭旧舵**；apply 必须在无写者的静默窗口内，禁止定时自动归档。
+顺序：**① 归档 → ② 启动新舵 → ③ 新舵读文件 → ④ 关闭旧舵**。归档属交接流程内动作：guard 自动交接在创建继任 tab/pane **之前**执行 `python3 scripts/plan-status.py --rotate --apply --keep 10`（失败只告警、不阻断交接，不回落 split）；guard 未覆盖的场景（手动交接等）由旧 owner 兜底 dry-run → apply。apply 必须在无写者的静默窗口内，禁止定时自动归档。
 
 | 约束 | 做法 |
 |---|---|
-| 触发 | 交接前；progress >500 行或 Next Step 已完成 >30 条时由 `plan-status.py --write` stderr 告警 |
+| 触发 | 交接前；progress ≥40KB 或条目 ≥100 时由 `plan-status.py --write` stderr 告警「建议交接时 --rotate」 |
 | 归属 | 一 plan 一 owner：portfolio 由总舵归档，各流由对应 owner 归档；Runner 只做只读 `--report` |
-| 命令 | `python3 scripts/plan-archive.py --task <slug> --dry-run` 预览，确认后 `--apply`；**禁止 `--all --apply`**（脚本在项目侧，本技能当前未内置，跨仓同步另行立项） |
-| 静默校验 | 仅 owner 执行；运行前后源文件 sha256 不变；`flock .planning/.plan-archive.lock`；活动 worker 检测（herdr 可用则查，否则 `--quiet-ok` 显式确认）；mtime 仅提示 |
-| 落点 | `.planning/_archive/<task>-<YYYYMMDD-HHMM>.md`（入库）；文件名不得叫 `task_plan.md`；一 task 一次运行一个归档文件 |
+| 命令 | `python3 scripts/plan-status.py --rotate`（默认 dry-run，预览归档范围与 before/after）→ 确认后 `--rotate --apply --keep 10`；保留最近 10 条 + 尾部非条目区块，其余写归档 |
+| 静默校验 | 仅 owner 执行；apply 前后总量守恒（live 保留段 + 归档、行数与字节）；`flock .planning/.plan-rotate.lock`；活动 worker 检测（herdr 可用则查，否则显式确认）；mtime 仅提示 |
+| 落点 | `.planning/_archive/progress-<YYYYMMDD>.md`（入库）；一 task 一次运行一个归档文件 |
 | 备份 | 先写归档文件并 fsync，再「临时文件 + 原子 rename」重写 live；归档失败即中止；**禁止无备份删除** |
-| 对账 | 行多重集守恒、活跃项前后计数相等、health before==after（不等 abort）、`plan-status --selftest` 绿、看板 diff 仅已完成行减少 |
-| 归档头 | 来源路径、归档日期、截止边界、before/after 行数、**源文件归档前 sha256**、操作角色 |
-| live 指针 | 尾部留一行：「归档记录：<date> 移出 N 段/M 行 → `.planning/_archive/<file>`」 |
+| 对账 | 条目数/行数/字节守恒（归档 + live 前后相等）、`plan-status --selftest` 绿、看板 diff 仅归档行减少 |
+| 归档头 | 来源路径、归档日期、截止边界、before/after 行数与字节、**源文件归档前 sha256**、操作角色 |
+| live 指针 | 尾部留一行：「归档记录：<date> 移出 N 条/M 行 → `.planning/_archive/progress-<YYYYMMDD>.md`」 |
 | 回滚 | 归档文件与 live 改动同一 commit，`git revert` 一步还原；不提供 `--restore` |
 
-**保留粒度**：progress 目标 300–350 行、硬上限 400；Next Step 未完成全留，已完成只留最近 ≤10 条迁入 `## 最近完成`；Decisions/Errors/Backlog/未解决 Deviation/Phase 不动；Deviation 仅归档含「已解决」的行；findings 不归档（上限 50 行）。
+**保留粒度**：progress 目标 <40KB 且条目 <100（超阈值交接时 `--rotate --apply --keep 10`）；交接保留最近 10 条 + 尾部非条目区块，其余归档；Next Step 未完成全留，已完成只留最近 ≤10 条迁入 `## 最近完成`；Decisions/Errors/Backlog/未解决 Deviation/Phase 不动；Deviation 仅归档含「已解决」的行；findings 不归档（上限 50 行）。
 
 **禁止**：无备份删除、归档活跃项、删改 Phase/Status、跨 task 合并归档、写者活跃时 apply、`.scratch` 作唯一备份。
 

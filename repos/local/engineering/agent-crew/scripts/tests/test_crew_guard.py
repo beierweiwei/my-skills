@@ -144,6 +144,8 @@ class GuardTestBase(unittest.TestCase):
         self.prompt_calls: list[tuple[str, str]] = []
         self.notify_calls: list[tuple[str, str]] = []
         self.status_calls: list[str] = []
+        self.rotate_calls: list[Path] = []
+        self.rotate_result = (0, "条目：15 → 保留 10，移出 5")
         self.logs: list[str] = []
         self.prompt_ok = True
         self.status_result = (0, "看板新鲜")
@@ -204,6 +206,9 @@ class GuardTestBase(unittest.TestCase):
             ),
             run_status=lambda root, flag: (
                 self.status_calls.append(flag) or self.status_result
+            ),
+            run_rotate=lambda root: (
+                self.rotate_calls.append(root) or self.rotate_result
             ),
             pane_read=self.fake_pane_read,
             dispatch=self.fake_dispatch,
@@ -831,6 +836,76 @@ class HandoffTest(GuardTestBase):
         self.assertEqual(before, len(self.dispatch_calls))
         self.assertEqual("started", self.handoff_fields()["phase"])
 
+    def test_rotate_runs_before_tab_create(self):
+        self.prepare_handoff(ctx_k=650)
+        order: list[str] = []
+
+        def rotate(root):
+            order.append("rotate")
+            return 0, "ok"
+
+        original = self.fake_dispatch
+
+        def dispatch(root, args):
+            order.append("dispatch:" + " ".join(args[:2]))
+            return original(root, args)
+
+        self.make_guard(run_rotate=rotate, dispatch=dispatch).run_once()
+        self.assertEqual("rotate", order[0])
+        self.assertLess(order.index("rotate"), order.index("dispatch:tab create"))
+
+    def test_rotate_success_logged_and_handoff_continues(self):
+        self.prepare_handoff(ctx_k=650)
+        self.make_guard().run_once()
+        self.assertEqual([self.root], self.rotate_calls)
+        self.assertTrue(
+            any("已归档" in log and "rotate" in log for log in self.logs), self.logs)
+        self.assertEqual("started", self.handoff_fields()["phase"])
+
+    def test_rotate_failure_logs_warning_and_continues(self):
+        self.prepare_handoff(ctx_k=650)
+        self.rotate_result = (2, "已有 rotate 在运行（锁被占用）")
+        self.make_guard().run_once()
+        self.assertTrue(
+            any("rotate 失败" in log and "退出码 2" in log for log in self.logs), self.logs)
+        fields = self.handoff_fields()
+        self.assertEqual("started", fields["phase"])
+        self.assertNotEqual("failed", fields.get("result"))
+        self.assertEqual(1, len([c for c in self.dispatch_calls if c[:2] == ["tab", "create"]]))
+        self.assertEqual(1, len([c for c in self.dispatch_calls if c[:1] == ["prompt"]]))
+
+    def test_rotate_exception_logs_warning_and_continues(self):
+        self.prepare_handoff(ctx_k=650)
+
+        def boom(root):
+            raise OSError("模拟异常")
+
+        self.make_guard(run_rotate=boom).run_once()
+        self.assertTrue(any("rotate 异常" in log for log in self.logs), self.logs)
+        self.assertEqual("started", self.handoff_fields()["phase"])
+
+    def test_default_rotate_uses_production_args(self):
+        self.prepare_handoff(ctx_k=650)
+        with mock.patch.object(cg, "run_plan_status_args", return_value=(0, "ok")) as run:
+            self.make_guard(run_rotate=None).run_once()
+        run.assert_called_once_with(
+            self.root, ["--rotate", "--apply", "--keep", "10"])
+        self.assertEqual("started", self.handoff_fields()["phase"])
+
+    def test_rotate_once_across_two_rounds(self):
+        self.prepare_handoff(ctx_k=650)
+        guard = self.make_guard()
+        guard.run_once()
+        guard.run_once()
+        self.assertEqual(1, len(self.rotate_calls))
+        self.assertEqual("started", self.handoff_fields()["phase"])
+
+    def test_warn_round_does_not_rotate(self):
+        self.prepare_handoff(ctx_k=320)
+        self.make_guard().run_once()
+        self.assertEqual([], self.rotate_calls)
+        self.assertEqual("warn", self.handoff_fields()["phase"])
+
     def test_tab_create_workspace_falls_back_to_pane_prefix(self):
         self.prepare_handoff(ctx_k=650)
         self.agents[0].pop("workspace_id")
@@ -1341,6 +1416,30 @@ class RetroDueTest(GuardTestBase):
         message = self.prompt_calls[0][1]
         self.assertIn("guard 叫醒：有待办", message)
         self.assertNotIn("周复盘到期", message)
+
+
+class PlanStatusArgsTest(GuardTestBase):
+    """工单 02 断言 8：生产 run_plan_status 按 argv 列表传 rotate 多参数。"""
+
+    def test_rotate_argv_passed_as_separate_elements(self):
+        completed = mock.Mock(returncode=0, stdout="ok", stderr="")
+        with mock.patch.object(cg.subprocess, "run", return_value=completed) as run:
+            code, output = cg.run_plan_status_args(
+                self.root, ["--rotate", "--apply", "--keep", "10"])
+        self.assertEqual((0, "ok"), (code, output))
+        argv = run.call_args[0][0]
+        self.assertEqual(["--rotate", "--apply", "--keep", "10"], argv[2:6])
+        self.assertEqual("--root", argv[6])
+        self.assertEqual(str(self.root), argv[7])
+        self.assertNotIn("--rotate --apply --keep 10", argv)
+
+    def test_single_flag_helper_still_passes_one_arg(self):
+        completed = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(cg.subprocess, "run", return_value=completed) as run:
+            cg.run_plan_status(self.root, "--write")
+        argv = run.call_args[0][0]
+        self.assertEqual(["--write"], argv[2:3])
+        self.assertEqual("--root", argv[3])
 
 
 if __name__ == "__main__":

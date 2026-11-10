@@ -19,7 +19,9 @@ cwd 隔离：只统计 cwd 在本仓或 `git worktree list --porcelain` 列出�
 自动交接：每轮读总舵 pane 的 `ctx Nk/1M`（`herdr pane read <pane> --lines 80`），
 按 config `helm.ctxWarn`（默认 0.30）/`helm.ctxHandoff`（默认 0.60）写
 <crew-dir>/guard.handoff 并通知；≥交接阈值一次性新建 tab/继任/首报后关旧 pane
-与旧 tab，失败只通知不循环，不杀旧舵。
+与旧 tab，失败只通知不循环，不杀旧舵。交接启动前先执行
+`plan-status.py --rotate --apply --keep ROTATE_KEEP`（默认 10）归档 progress；
+rotate 失败或异常只写 guard.log 告警，继续原交接流程（不阻断、不回落 split）。
 
 用法：
   python3 scripts/crew-guard.py                 # 每 120s 一轮
@@ -58,6 +60,8 @@ PAUSE_MARKS = ("⏸", "待 Captain", "留 Captain")
 DONE_RE = re.compile(r"(?<![a-z])(?:complete|completed|done)(?![a-z])")
 COOLDOWN_SECONDS = 600
 WRITE_INTERVAL_SECONDS = 300
+# 交接启动前 progress 轮转保留条数（与 plan-status.py --rotate 默认一致；显式常量便于审计）
+ROTATE_KEEP = 10
 PROBE_NAME_PREFIXES = ("s9-", "probe-", "test-")
 CTX_RE = re.compile(r"ctx\s*\(?\s*(\d+)k\s*/\s*1M\s*\)?", re.IGNORECASE)
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -469,16 +473,21 @@ def herdr_notify(title: str, body: str) -> bool:
         return False
 
 
-def run_plan_status(root: Path, flag: str) -> tuple[int, str]:
+def run_plan_status_args(root: Path, args: list[str]) -> tuple[int, str]:
+    """按 argv 列表调用 plan-status.py（多参数逐个成元素，禁止拼成单个参数串）。"""
     script = Path(__file__).resolve().parent / "plan-status.py"
     proc = subprocess.run(
-        [sys.executable, str(script), flag, "--root", str(root)],
+        [sys.executable, str(script), *args, "--root", str(root)],
         text=True,
         capture_output=True,
         check=False,
         timeout=60,
     )
     return proc.returncode, (proc.stdout + proc.stderr).strip()
+
+
+def run_plan_status(root: Path, flag: str) -> tuple[int, str]:
+    return run_plan_status_args(root, [flag])
 
 
 def acquire_lock(crew_dir: Path):
@@ -557,6 +566,7 @@ class Guard:
     pane_read: Callable[[str, int], str] = herdr_pane_read
     dispatch: Callable[[Path, list[str]], tuple[int, str, str]] = run_dispatch
     run_status: Callable[[Path, str], tuple[int, str]] = run_plan_status
+    run_rotate: Callable[[Path], tuple[int, str]] | None = None
     log_fn: Callable[[str], None] | None = None
     consecutive: int = field(default=0, init=False)
     prev_working: int = field(default=0, init=False)
@@ -706,6 +716,27 @@ class Guard:
     def _extract_tab(output: str) -> str:
         return Guard._extract_id(output, ("tab_id", "tab"))
 
+    def _rotate_progress_before_handoff(self) -> None:
+        """交接前 progress 归档（`--rotate --apply --keep ROTATE_KEEP`）：
+        成功记日志；失败/异常只告警，不阻断交接、不回落 split。"""
+        try:
+            if self.run_rotate is not None:
+                code, output = self.run_rotate(self.root)
+            else:
+                code, output = run_plan_status_args(
+                    self.root,
+                    ["--rotate", "--apply", "--keep", str(ROTATE_KEEP)],
+                )
+        except Exception as exc:  # noqa: BLE001 - 归档失败不得中断交接
+            self.log(f"交接前 progress rotate 异常：{type(exc).__name__}: {exc}（继续交接）")
+            return
+        detail = " / ".join(line.strip() for line in output.splitlines() if line.strip())
+        if code == 0:
+            self.log(f"交接前 progress 已归档（rotate --apply --keep {ROTATE_KEEP}）："
+                     f"{detail or 'ok'}")
+        else:
+            self.log(f"交接前 progress rotate 失败（退出码 {code}，继续交接）：{detail}")
+
     def _start_handoff(self, agents: list[dict], ctx_k: int, old_pane: str) -> dict:
         if self.handoff_attempted:
             return {"action": "wait", "reason": "交接已尝试，等待继任首报"}
@@ -733,6 +764,8 @@ class Guard:
         successor = self._successor_name(agents)
         tab_label = load_config(self.root)["helm"]["tabLabel"]
 
+        # 交接前置：先归档 progress（失败只告警），再做任何 tab/pane 变更。
+        self._rotate_progress_before_handoff()
         code, output, error = self.dispatch(
             self.root,
             ["tab", "create", "--workspace", workspace, "--cwd", str(self.root),
