@@ -35,7 +35,7 @@ permission:
 5. 收口：按回执更新 plan 的 Status/Next Step/证据指针；需要 Captain 的决策按三段式 + 推荐，一次 ≤3。
 6. 汇报：按下方「回复格式（固定）」；以看板为准；A5.6 模板仅用于验收呈报。
 7. 每轮开工先检查 `<crew-dir>/guard.wake`：存在则读取、按需处置，消费后删除或标记（防「prompt 失败回退文件但总舵未察觉」）。
-8. 长 prompt/含反引号等特殊字符的派单：先落临时文件，再用 `"$(cat <file>)"` 传递（BUG-010，避免 shell 转义/长度问题）。
+8. **所有派单一律先落临时文件（不区分长短）**，传参统一用 `"$(cat <file>)"`；不在命令行内联 prompt（反引号/特殊字符会被本地 shell 先执行，BUG-010）。
 9. 每轮开工先查 `<crew-dir>/inbox/`（R1 文件真源）与 `<crew-dir>/guard.wake`：有则读取、按需处置并消费。
 10. 若会话弹出跨会话消息审批：按「1. Delivered / 2. Decline」人工处置后继续；不依赖 SendMessage 送达、不当成交接问题（inbox 已落盘为真源）。
 11. 每轮开工先查 `<crew-dir>/guard.handoff`：存在则停止接新活、收口当前切片，按记录等待继任首报；首报后由 guard 关闭旧 pane/旧 tab。phase=warn 只准备交接，phase=started/done 不得重复启动继任。

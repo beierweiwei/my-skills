@@ -175,6 +175,33 @@ class AuditRulesTest(unittest.TestCase):
         self.assertEqual(pa.audit(data, prefixes), [])
         self.assertEqual(kinds(pa.audit(data)), [("empty-tab", "t1")])  # 未配置时仍告警
 
+    def test_custom_helm_label_single_pane_not_flagged(self):
+        data = snapshot(
+            [tab("t3", "steering")],
+            [pane("p1", "t3")],
+            [agent("helm-1", "p1", tab_id="t3")],
+        )
+        self.assertEqual(pa.audit(data, helm_labels=("总舵", "steering")), [])
+
+    def test_custom_helm_label_multi_pane_reported(self):
+        data = snapshot(
+            [tab("t3", "steering")],
+            [pane("p1", "t3"), pane("p2", "t3")],
+            [agent("helm-1", "p1", tab_id="t3"), agent("helm-2", "p2", tab_id="t3")],
+        )
+        findings = pa.audit(data, helm_labels=("总舵", "steering"))
+        self.assertEqual(kinds(findings), [("helm-tab-multi-pane", "t3")])
+        self.assertIsNone(findings[0].action)
+
+    def test_helm_recognition_precedes_whitelist_prefix(self):
+        # 标签同时命中总舵与白名单前缀：按总舵 tab 处理（仅单 pane 检查）
+        data = snapshot(
+            [tab("t3", "Captain·总舵支持")],
+            [pane("p1", "t3"), pane("p2", "t3")],
+            [agent("a1", "p1", tab_id="t3"), agent("a2", "p2", tab_id="t3")],
+        )
+        self.assertEqual(kinds(pa.audit(data)), [("helm-tab-multi-pane", "t3")])
+
     def test_working_orphan_is_report_only(self):
         data = snapshot([tab("t1", "普通")], [pane("p9", "t1", status="working")], [])
         findings = pa.audit(data)
@@ -291,6 +318,57 @@ class _MainTest(unittest.TestCase):
         rc, out, _err, _recorded = self._run(data, ["--workspace", "wA"])
         self.assertEqual(rc, 0)
         self.assertIn("1 个 tab", out)
+
+    def _write_config(self, payload: object) -> Path:
+        project = self.tmp / "proj"
+        (project / ".planning").mkdir(parents=True, exist_ok=True)
+        text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+        (project / ".planning/orchestration.json").write_text(text, encoding="utf-8")
+        return project
+
+    def test_config_custom_helm_label_recognized(self):
+        project = self._write_config({"helm": {"tabLabel": "steering"}})
+        data = snapshot(
+            [tab("t3", "steering")],
+            [pane("p1", "t3"), pane("p2", "t3")],
+            [agent("helm-1", "p1", tab_id="t3"), agent("helm-2", "p2", tab_id="t3")],
+        )
+        rc, out, err, _recorded = self._run(data, ["--root", str(project)])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("[告警] 总舵 tab 多 pane", out)
+
+    def test_config_missing_or_corrupt_falls_back_to_default_label(self):
+        data = snapshot([tab("t3", "总舵")], [pane("p1", "t3")],
+                        [agent("helm-1", "p1", tab_id="t3")])
+        for name, payload in (("missing", None), ("corrupt", "{not json"),
+                              ("invalid", {"helm": {"tabLabel": 123}})):
+            with self.subTest(config=name):
+                extra = [] if payload is None else [
+                    "--root", str(self._write_config(payload))]
+                rc, out, err, _recorded = self._run(data, extra)
+                self.assertEqual(rc, 0, err)
+                self.assertIn("巡检通过", out)  # 默认「总舵」仍被识别，单 pane 无告警
+
+    def test_unresolvable_tilde_root_does_not_crash(self):
+        data = snapshot([tab("t3", "总舵")], [pane("p1", "t3")],
+                        [agent("helm-1", "p1", tab_id="t3")])
+        rc, out, err, _recorded = self._run(data, ["--root", "~nosuchuser4242/x"])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("巡检通过", out)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(pa.load_helm_labels("~nosuchuser4242/x"), ("总舵",))
+
+    def test_help_documents_non_helm_and_priority(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            with self.assertRaises(SystemExit):
+                pa.main(["--help"])
+        text = out.getvalue()
+        self.assertIn("非总舵", text)
+        self.assertIn("优先", text)
+        self.assertIn("helm.tabLabel", text)
+        self.assertIn("非总舵", pa.__doc__)
+        self.assertIn("优先", pa.__doc__)
 
 
 class CliTest(unittest.TestCase):

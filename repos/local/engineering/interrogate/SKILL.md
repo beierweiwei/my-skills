@@ -21,6 +21,8 @@ The scope is what the user names. Otherwise it is the branch diff from its merge
 
 Default to **one adversary** — the economy tier. Run it as one subagent on the parent model (omit `model` so the seat inherits the parent), or run the brief yourself when no subagent is available. It covers the attack angles in sequence: correctness; edge cases and failure modes; data and state; security and performance.
 
+Before dispatching background subagents, declare a **timeout window** (for example 10–15 minutes). Do not end the turn while waiting. When the window expires with adversaries still outstanding, collect every returned finding first and record each missing angle as a **coverage gap**; never idle-wait or treat an unfinished angle as completed.
+
 Escalate to **two adversaries** only when any of these holds:
 
 - the diff touches a core module,
@@ -39,11 +41,14 @@ Isolation: where the harness supports worktree isolation, each adversary works i
 
 Rerun every finding's command yourself, in the same isolated environment. Keep a finding when the output shows the failure and the failure breaks the intent. Drop the rest. Merge findings that share a root cause into one entry, naming every adversary that found it. Report only; do not fix anything.
 
+If a verification command has not returned, do not end the turn either: verify everything that returned first, then mark timed-out items as unverified and record them as a coverage gap.
+
 ## Output
 
 - **Intent**: the restatement.
 - **Findings**: for each verified finding, the command, its output, how it breaks the intent, and the adversary or adversaries that found it. Say "no verified findings" when none survive.
 - **Dropped**: for each adversary, the count of dropped findings and why.
+- **Coverage gaps**: unverified angles, why they are unverified, and what alternative coverage exists.
 
 ## One adversary is the default; upgrading is optional
 

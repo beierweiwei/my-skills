@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.2.5 — 2026-11-10
+
+### 修复
+
+- **BUG-025（F1）strict rc 文档口径**：2.2.1 条目末句改为「默认 profile 不升级为失败（rc 不变）；`--strict` 下按既有语义将 warn 计为失败（rc=1）」；strict 语义与代码均未改，补 dev-worktree fixture 下 strict/非 strict rc 断言与本文关键词断言。
+- **BUG-026（F2）稳定副本误报开发 worktree**：`doctor.py` / `init.py` 的 `linked_worktree_root` 只把 `.git` 文件解析到 `<common>/worktrees/<name>`（`git worktree add` 形态）时判为开发 worktree；submodule（`modules/`）、`--separate-git-dir` 与其他形态不报，读取/解析失败 fail-soft；补真实 git 正反例测试与两脚本行为一致性断言。
+- **BUG-027（F4）不存在 skillRoot 归因**：`init.py --check` 提示块先判 `is_dir()`，不存在时输出「skillRoot 不存在或不可读」+ 可执行 next，不再输出「开发 worktree」归因；rc 语义不变，`~nosuchuser` 不崩溃。
+- **T13 pane-audit 自定义总舵标签**：新增 `--root` 读取配置 `helm.tabLabel`（缺失/损坏/字段非法 fail-soft 回落「总舵」），总舵 tab 识别兼容「标签含总舵」；总舵识别优先于 `Captain·`/`流程优化·` 白名单前缀；docstring/`--help` 限定「空 tab（非总舵）--apply 自动关闭」并同步 `--helm-pane` 识别口径。
+
+### 变更
+
+- **NF-001 总舵派单落文件**：qoder/opencode helm 模板改为所有派单一律先落临时文件（不区分长短），统一用 `"$(cat <file>)"` 传递，禁止命令行内联 prompt。
+- **NF-002 interrogate 超时覆盖**：`Fan out`/`Verify` 要求派出前声明超时窗口、等待期间不结束回合、超时角度记 coverage gap；`Output` 新增 Coverage gaps；`autonomous-run` Phase 2 追加同口径 checklist。
+- **NF-003 herdr-cheatsheet 示例改 dispatch**：§1/§3/§5 的派活与建 tab 示例改走 `dispatch.py`，手工生命周期命令不再作主路径；只读命令与 `send-keys`（仅人工恢复）保留。
+
+### 测试
+
+- 新增 `scripts/tests/test_225_patch.py`（F1 口径、F4 提示、NF-001/002/003 grep 防回退与版本断言）；`test_doctor_config.py` / `test_init_v2.py` 补真实 git submodule 与 `--separate-git-dir` 反例、strict rc 与不存在 skillRoot 用例；`test_pane_audit.py` 补 `helm.tabLabel` 用例。
+- 版本 2.2.5：`SKILL.md` frontmatter 与标题、`init.py` fallback、`test_crew_lint.py`、`test_220_final.py` 与 `test_224_retro.py` 版本断言同步。
+
 ## 2.2.4 — 2026-11-10
 
 ### 新增
@@ -50,7 +70,7 @@
 
 ### 修复
 
-- **BUG-022 开发 worktree skillRoot 风险提示**：消费项目 `skillRoot` 解析后位于项目根之外、且落在 linked worktree（祖先含 `.git` 文件而非目录，即开发 worktree）时，`doctor` 的 `skill.source` 与 `init.py --check` 给出 warn/风险提示：message 含「开发 worktree / 漂移」，next 指向改指稳定分发副本；不升级为失败（rc 不变）。稳定分发副本（主仓工作树，`.git` 为目录）与项目内 skillRoot（`.qoder/skills/`、`.opencode/skills/`）不误报；不新增 doctor 检查项名（维持 42 项）。
+- **BUG-022 开发 worktree skillRoot 风险提示**：消费项目 `skillRoot` 解析后位于项目根之外、且落在 linked worktree（祖先含 `.git` 文件而非目录，即开发 worktree）时，`doctor` 的 `skill.source` 与 `init.py --check` 给出 warn/风险提示：message 含「开发 worktree / 漂移」，next 指向改指稳定分发副本；默认 profile 不升级为失败（rc 不变）；`--strict` 下按既有语义将 warn 计为失败（rc=1）。稳定分发副本（主仓工作树，`.git` 为目录）与项目内 skillRoot（`.qoder/skills/`、`.opencode/skills/`）不误报；不新增 doctor 检查项名（维持 42 项）。
 
 ## 2.2.0 — 2026-11-10
 
