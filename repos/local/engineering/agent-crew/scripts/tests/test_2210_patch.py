@@ -18,6 +18,7 @@ GUIDE = REPO_ROOT / "references" / "orchestration-guide.md"
 TICKET_TPL = REPO_ROOT / "templates" / "_templates" / "ticket.md"
 HELM_QODER = REPO_ROOT / "templates" / "agents" / "qoder" / "helm.md"
 HELM_OPENCODE = REPO_ROOT / "templates" / "agents" / "opencode" / "helm.md"
+CREW_GUARD = REPO_ROOT / "scripts" / "crew-guard.py"
 
 
 def read(path: Path) -> str:
@@ -86,6 +87,37 @@ class RuleNumberRegressionTest(unittest.TestCase):
         for path in (GUIDE, HELM_QODER, HELM_OPENCODE):
             with self.subTest(path=str(path.relative_to(REPO_ROOT))):
                 self.assertIn("F1–F16", read(path))
+
+
+class Fb008CtxThresholdRegressionTest(unittest.TestCase):
+    """FB-008 AMEND1：guard 交接阈值 0.50 与文案防回退（29/30/49/50/51 由 guard 测试覆盖）。"""
+
+    def test_references_and_templates_have_no_60_handoff_wording(self):
+        paths = sorted((REPO_ROOT / "references").glob("*.md"))
+        paths += sorted((REPO_ROOT / "templates").rglob("*.md"))
+        self.assertTrue(paths)
+        offenders = [
+            str(path.relative_to(REPO_ROOT))
+            for path in paths
+            if "30% 预警 / 60% 交接" in read(path)
+            or "ctxHandoff` 默认 0.60" in read(path)
+        ]
+        self.assertEqual([], offenders)
+
+    def test_helm_templates_declare_30_warn_50_handoff(self):
+        for path in (HELM_QODER, HELM_OPENCODE):
+            with self.subTest(path=str(path.relative_to(REPO_ROOT))):
+                text = read(path)
+                self.assertIn("30% 预警 / 50% 交接", text)
+                self.assertIn("`helm.ctxHandoff` 默认 0.50", text)
+
+    def test_guard_default_thresholds_and_help(self):
+        text = read(CREW_GUARD)
+        self.assertIn("DEFAULT_CTX_WARN = 0.30", text)
+        self.assertIn("DEFAULT_CTX_HANDOFF = 0.50", text)
+        self.assertNotIn("DEFAULT_CTX_HANDOFF = 0.60", text)
+        self.assertIn("ctxHandoff（默认 50%）", text)
+        self.assertNotIn("ctxHandoff（默认 60%）", text)
 
 
 if __name__ == "__main__":

@@ -51,7 +51,8 @@ permission:
 
 ## 上下文与工位
 - ctx ≥30% 完成当前切片即停，≥60% 立即停；运行中不压缩；下一轮由副舵重建或 `/compact`。
-- **自动交接（30% 预警 / 60% 交接）**：guard 每轮读总舵 pane 的 `ctx Nk/1M`（config `helm.ctxWarn` 默认 0.30、`helm.ctxHandoff` 默认 0.60）。≥30% 写 `<crew-dir>/guard.handoff`（phase=warn）并通知，停止接新活、准备交接；≥60% 一次性执行：guard 在创建继任 tab/pane 前先执行 `python3 scripts/plan-status.py --rotate --apply --keep 10`（失败只告警，不阻断交接、不回落 split）→ `dispatch.py tab create --workspace <旧舵 workspace> --cwd <仓根> --label 总舵 --no-focus`（总舵 tab 永不 split）→ `dispatch.py start --role helm --pane <新 pane> --name <继任名>`（`<helmName>-2`，冲突递增 -3/-4…）→ prompt 继任按「交接读取范围」读取并完成首报 → 首报后 guard 确认旧舵 idle/无响应再依次 `dispatch.py pane close` + `dispatch.py tab close --tab <旧 tab>`；旧舵不杀，失败只通知不循环（不回落 split），交接期间不接新活。
+- **自动交接（30% 预警 / 50% 交接）**：guard 每轮读总舵 pane 的 `ctx Nk/1M`（config `helm.ctxWarn` 默认 0.30、`helm.ctxHandoff` 默认 0.50）。≥30% 写 `<crew-dir>/guard.handoff`（phase=warn）并通知，停止接新活、准备交接；≥50% 一次性执行：guard 在创建继任 tab/pane 前先执行 `python3 scripts/plan-status.py --rotate --apply --keep 10`（失败只告警，不阻断交接、不回落 split）→ `dispatch.py tab create --workspace <旧舵 workspace> --cwd <仓根> --label 总舵 --no-focus`（总舵 tab 永不 split）→ `dispatch.py start --role helm --pane <新 pane> --name <继任名>`（`<helmName>-2`，冲突递增 -3/-4…）→ prompt 继任按「交接读取范围」读取并完成首报 → 首报后 guard 确认旧舵 idle/无响应再依次 `dispatch.py pane close` + `dispatch.py tab close --tab <旧 tab>`；旧舵不杀，失败只通知不循环（不回落 split），交接期间不接新活。
+- **交接失败处置（硬）**：`guard.handoff` 为 `phase=done result=failed`（继任缺失/blocked 或旧舵连续 3 轮未收口）时 guard 不自动重试、不杀旧舵；人工处置后删除或改写 `<crew-dir>/guard.handoff` 并重启 guard 恢复监控。
 - **交接读取范围（硬）**：新舵只读＝看板 + `python3 scripts/plan-status.py --handover` 摘要 + 活跃流 plan 的 Next Step/Status（grep）+ feedback 待复盘条目（grep）+ `<crew-dir>/guard.handoff`；禁整读 progress/task_plan/feedback/历史流 plan/共识；单文件 >20KB 不整读；交接 digest ≤30 行，只给路径 + 在跑清单，不复述正文。
 - **流判定与派发顺序（硬）**：
   - ① 活跃流＝每个有独立目标/plan 的并行工作单元；≥2 条流必须每流一个副舵。
