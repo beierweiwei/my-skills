@@ -14,9 +14,23 @@
     python3 scripts/plan-status.py --selftest # 对当前 plan 跑一遍解析断言
     python3 scripts/plan-status.py --archive docs/历史/进度追踪-截至20260101.md --write
                                               # 一次性在看板头部写入归档链接（显式动作）
+    python3 scripts/plan-status.py --handover
+                                              # ≤40 行交接摘要到 stdout（只读：Goal/Next Step/
+                                              # 活跃流/待 Captain/最近 3 条 progress/最近 3 条完成/
+                                              # 证据入口/看板新鲜；progress 只读尾部）
+    python3 scripts/plan-status.py --rotate [--keep N] [--apply]
+                                              # portfolio progress 轮转：默认 dry-run 只打印
+                                              # before/after、保留区间与归档路径；--apply 才写
+                                              # `.planning/_archive/progress-<YYYYMMDD>.md`
+                                              # （flock `.planning/.plan-rotate.lock` + 临时文件
+                                              # + os.replace；条目=`## 自动驾驶里程` 节内
+                                              # `- YYYY-MM-DD` 块含缩进续行；保留最近 N 条与
+                                              # 尾部非条目区块；只归档不删除）
 
 刷新时机：收口回执后立即 --write；guard 每 5 分钟 --write；
-交接第 0 步 --write 后接 --check-fresh。
+交接第 0 步 --write 后接 --check-fresh，再 --handover（必要时先 --rotate --apply）。
+体量告警：--write 时 portfolio progress ≥40960 字节或 ≥100 条 → stderr 提示
+「建议交接时 --rotate」（阈值见 PROGRESS_WARN_BYTES / PROGRESS_WARN_ENTRIES 常量）。
 
 配置：`<仓根>/.planning/orchestration.json`（单一参数载体，键见 templates/project.config.json）。
 可配置项：board.path / board.title / board.archive（空=不写归档链接行）/
@@ -47,9 +61,11 @@ todo 条目一律标准 md 语法：行首 `- [x]` / `- [ ]`；待 Captain 项 `
 from __future__ import annotations
 
 import argparse
+import fcntl
 import fnmatch
 import hashlib
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -67,6 +83,26 @@ BOARD_VERSION = "v1"
 FINGERPRINT_RE = re.compile(r"^<!--\s*plan-sources:\s*(.*?)\s*-->$")
 CONFIG_REL = ".planning/orchestration.json"
 WRITE_HINT = "请运行 `python3 scripts/plan-status.py --write` 重刷看板"
+
+# —— 交接瘦身（2.2.7）：--handover 摘要 / --rotate 归档 / --write 体量告警 ——
+# 阈值以常量落代码（--help 与模块 docstring 同步；单测直接构造边界夹具）：
+#   progress ≥ PROGRESS_WARN_BYTES 字节或 ≥ PROGRESS_WARN_ENTRIES 条 → --write stderr 告警；
+#   --handover 恒 ≤ HANDOVER_MAX_LINES 行（结构上限：活跃流/待 Captain 各 8 条 + 溢出注 1 行）；
+#   --rotate 默认 dry-run；apply 走 flock + 临时文件 + os.replace，只归档不删除。
+HANDOVER_MAX_LINES = 40
+HANDOVER_MAX_STREAMS = 8
+HANDOVER_MAX_CAPTAIN = 8
+HANDOVER_RECENT = 3
+PROGRESS_TAIL_BYTES = 16384
+PROGRESS_RECENT_WINDOWS = (PROGRESS_TAIL_BYTES, 65536, None)  # 尾窗不足 3 条时逐级扩大
+PROGRESS_SECTION = "自动驾驶里程"
+PROGRESS_ENTRY_RE = re.compile(r"^- \d{4}-\d{2}-\d{2}")
+PROGRESS_WARN_BYTES = 40960
+PROGRESS_WARN_ENTRIES = 100
+ROTATE_DEFAULT_KEEP = 10
+PROGRESS_NAME = "progress.md"
+ARCHIVE_DIR = ".planning/_archive"
+ROTATE_LOCK_REL = ".planning/.plan-rotate.lock"
 
 HEALTH_DONE, HEALTH_WIP, HEALTH_BLOCKED = "🟢", "🟡", "🔴"
 # 看板「当前阶段」自动推导（S7-b1 缺陷1）：一律取 Phases 中首个 Status≠complete 的阶段名，
@@ -409,6 +445,304 @@ def check_fresh(root: Path, cfg: dict, plans: list[Plan]) -> int:
         return 1
     print(f"看板新鲜：{board_rel} 与 {len(sources)} 个 plan 一致。")
     return 0
+
+
+# —— 交接瘦身：--handover（只读摘要）/ --rotate（progress 轮转归档）——
+# 条目块口径：仅 `## 自动驾驶里程` 节内、行首匹配 `- YYYY-MM-DD` 起（含缩进续行）；
+# 遇到下一个 `## ` 标题即停止计条目，其后内容（含 `- ` 开头的 digest 行）原样保留。
+# 无该节时按日期前缀全文件兜底（dry-run 输出提示）。rotate 只移除条目块字节，其余字节
+# （文件头、节标题、尾部非条目区块、空行）原样保留；live 尾部追加一行 `> ` 归档指针
+# （非 `- ` 开头，不会被二次 rotate 计为条目）。
+
+def _progress_path(root: Path, cfg: dict) -> Path:
+    return root / str(cfg.get("portfolioDir") or ".planning/portfolio") / PROGRESS_NAME
+
+
+def _entry_blocks(lines: list[str]) -> tuple[list[tuple[int, int]], bool]:
+    """条目块行下标区间 [(start, end)) 与 fallback 标记：`- YYYY-MM-DD` 行首起 +
+    后随缩进续行；仅 `## 自动驾驶里程` 节内计入，遇下一个 `## ` 标题停止；
+    无该节时全文件按日期前缀兜底（fallback=True）。"""
+    has_section = any(line.strip().startswith("## ") and PROGRESS_SECTION in line
+                      for line in lines)
+    blocks, i = [], 0
+    in_section = not has_section
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if stripped.startswith("## "):
+            if has_section:
+                in_section = PROGRESS_SECTION in stripped
+            i += 1
+            continue
+        if in_section and PROGRESS_ENTRY_RE.match(lines[i]):
+            j = i + 1
+            while j < len(lines) and lines[j][:1] in (" ", "\t"):
+                j += 1
+            blocks.append((i, j))
+            i = j
+        else:
+            i += 1
+    return blocks, not has_section
+
+
+def _read_tail(path: Path, max_bytes: int = PROGRESS_TAIL_BYTES) -> str:
+    """只读文件尾部 max_bytes（大文件禁止整读）；start>0 时丢弃首个不完整行。"""
+    with open(path, "rb") as fh:
+        fh.seek(0, 2)
+        start = max(0, fh.tell() - max_bytes)
+        fh.seek(start)
+        data = fh.read()
+    if start > 0:
+        newline = data.find(b"\n")
+        data = data[newline + 1:] if newline >= 0 else b""
+    return data.decode("utf-8", errors="replace")
+
+
+def _one_line(lines: list[str]) -> str:
+    return " ".join(line.strip() for line in lines if line.strip())
+
+
+def _recent_progress(path: Path, count: int = HANDOVER_RECENT) -> list[str]:
+    """最近 count 个 progress 条目块，每块压成一行（续行并入条目行，不输出碎片）。
+    尾部 16KB 内条目块不足 count（如最后一条超长）时，扩到 64KB 再退全文。"""
+    if not path.is_file():
+        return ["无（progress 缺失）"]
+    lines: list[str] = []
+    blocks: list[tuple[int, int]] = []
+    for window in PROGRESS_RECENT_WINDOWS:
+        if window is None:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        else:
+            lines = _read_tail(path, window).splitlines()
+        blocks, _fallback = _entry_blocks(lines)
+        if len(blocks) >= count:
+            break
+    picked = blocks[-count:] if count > 0 else []
+    out = [" ".join(part.strip() for part in lines[s:e] if part.strip()) for s, e in picked]
+    return list(reversed(out)) or ["无"]
+
+
+def _fresh_state(root: Path, cfg: dict, plans: list[Plan]) -> str:
+    """看板新鲜状态（新鲜/过期）；不打印、不改文件，供 --handover 单行引用。"""
+    board_path = root / cfg["board"]["path"]
+    try:
+        board_rel = board_path.relative_to(root).as_posix()
+    except ValueError:
+        board_rel = str(board_path)
+    if not board_path.is_file():
+        return f"过期（看板不存在：{board_rel}）"
+    embedded = parse_fingerprint(board_path.read_text(encoding="utf-8"))
+    if embedded is None:
+        return f"过期（看板缺少源指纹：{board_rel}）"
+    version, cfg_hash, sources = _fingerprint_parts(plans, cfg)
+    if embedded != (version, cfg_hash, sources):
+        return f"过期（{board_rel} 落后于 plan/配置）"
+    return f"新鲜（{board_rel}）"
+
+
+def handover(root: Path, cfg: dict, plans: list[Plan]) -> int:
+    """≤HANDOVER_MAX_LINES 行交接摘要到 stdout；只读 .planning，不写任何文件。"""
+    pattern = cfg["portfolioMatch"]
+    portfolio = next((p for p in plans if fnmatch.fnmatch(p.path.parent.name, pattern)), None)
+    pdir = str(cfg.get("portfolioDir") or ".planning/portfolio").rstrip("/")
+
+    active: list[str] = []
+    captain: list[str] = []
+    if portfolio is not None:
+        index = {p.rel: p for p in plans}
+        name_by_rel: dict[str, str] = {}
+        for name, lines in _iter_streams(portfolio):
+            ref = next((PLAN_REF_RE.match(l).group(1) for l in lines if PLAN_REF_RE.match(l)), "")
+            target = index.get(ref.split("#")[0])
+            if target is None or target.complete >= target.total:
+                continue
+            name_by_rel[target.rel] = name
+            next_step = (_next_step_lines(target) or ["—"])[0]
+            active.append(
+                f"- **{cell(name)}**（`{ref or target.rel}`）— 当前阶段："
+                f"{cell(current_phase(target))}；Next Step：{next_step}"
+            )
+        cap_prefix = cfg["backlog"]["captainPrefix"]
+        captain = _captain_lines(plans, portfolio, cap_prefix, name_by_rel)
+    if len(active) > HANDOVER_MAX_STREAMS:
+        more = len(active) - HANDOVER_MAX_STREAMS
+        active = active[:HANDOVER_MAX_STREAMS] + [f"- …另有 {more} 个活跃流（见看板流表）"]
+    if len(captain) > HANDOVER_MAX_CAPTAIN:
+        more = len(captain) - HANDOVER_MAX_CAPTAIN
+        captain = captain[:HANDOVER_MAX_CAPTAIN] + [f"- …另有 {more} 条待 Captain（见看板）"]
+
+    recent_done: list[str] = []
+    if portfolio is not None:
+        recent_done = [_todo_line(l.strip())
+                       for l in portfolio.sections.get("最近完成", []) if l.strip()]
+    out = ["## Goal", _one_line(portfolio.sections.get("Goal", [])) if portfolio else "—"]
+    out += ["## Next Step", _one_line(portfolio.sections.get("Next Step", [])) if portfolio else "—"]
+    out += ["## 活跃流"] + (active or ["- 无"])
+    out += ["## 待 Captain"] + (captain or ["无"])
+    out += ["## 最近 progress（尾 3 条）"] + _recent_progress(_progress_path(root, cfg))
+    out += ["## 最近完成（最近 3 条）"] + (recent_done[:HANDOVER_RECENT] or ["—"])
+    out += [
+        "## 证据入口",
+        f"- task_plan: `{pdir}/task_plan.md`",
+        f"- progress: `{pdir}/progress.md`",
+        f"- feedback: `{pdir}/feedback.md`",
+        f"- archive: `{ARCHIVE_DIR}/`",
+        "## 看板",
+        _fresh_state(root, cfg, plans),
+    ]
+    # 结构上限已保证 ≤HANDOVER_MAX_LINES（见常量注释）；防御性兜底不静默丢块。
+    assert len(out) <= HANDOVER_MAX_LINES, f"交接摘要超行数上限：{len(out)}"
+    sys.stdout.write("\n".join(out) + "\n")
+    return 0
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """同目录临时文件 + fsync + os.replace 原子替换；失败清理临时文件后原样抛出。"""
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _rotate_plan(root: Path, cfg: dict, keep: int) -> dict | None:
+    """计算轮转产物（纯函数式，不落盘）；条目数 ≤ keep 时返回 None（幂等）。"""
+    path = _progress_path(root, cfg)
+    if not path.is_file():
+        return None
+    source = path.read_text(encoding="utf-8")
+    raw_lines = source.splitlines(keepends=True)
+    lines = [line.rstrip("\r\n") for line in raw_lines]
+    blocks, fallback = _entry_blocks(lines)
+    total = len(blocks)
+    if total <= keep:
+        return None
+    removed, kept = blocks[: total - keep], blocks[total - keep:]
+    drop = {i for start, end in removed for i in range(start, end)}
+    remaining = "".join(raw_lines[i] for i in range(len(raw_lines)) if i not in drop)
+    if remaining and not remaining.endswith("\n"):
+        remaining += "\n"
+    date = datetime.now().strftime("%Y%m%d")
+    archive_path = root / ARCHIVE_DIR / f"progress-{date}.md"
+    archive_rel = archive_path.relative_to(root).as_posix()
+    pointer = (f"> {date[:4]}-{date[4:6]}-{date[6:]} 归档：{len(removed)} 条 progress "
+               f"已移入 `{archive_rel}`（--keep {keep}）。\n")
+    new_live = remaining + pointer
+
+    def _entry_date(block: tuple[int, int]) -> str:
+        m = re.match(r"- (\d{4}-\d{2}-\d{2})", lines[block[0]])
+        return m.group(1) if m else "—"
+
+    before_lines, before_bytes = len(source.splitlines()), len(source.encode("utf-8"))
+    after_lines, after_bytes = len(new_live.splitlines()), len(new_live.encode("utf-8"))
+    body = "\n\n".join("".join(raw_lines[s:e]).rstrip("\r\n") for s, e in removed)
+    role = os.environ.get("CREW_ROLE") or "unknown"
+    archive_text = (
+        f"# progress 归档（{date[:4]}-{date[4:6]}-{date[6:]}）\n\n"
+        f"> 来源：`{path.relative_to(root).as_posix()}`\n"
+        f"> 归档日期：{datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+        f"> 截止边界：移出源文件第 {removed[0][0] + 1}–{removed[-1][1]} 行，"
+        f"共 {len(removed)} 条（{_entry_date(removed[0])} → {_entry_date(removed[-1])}）；"
+        f"保留最近 {keep} 条\n"
+        f"> 行数：{before_lines} → {after_lines}；字节：{before_bytes} → {after_bytes}\n"
+        f"> 源文件归档前 sha256：{hashlib.sha256(source.encode('utf-8')).hexdigest()}\n"
+        f"> 操作角色：{role}\n\n"
+    ) + body + "\n"
+    return {
+        "path": path, "total": total, "keep": keep, "fallback": fallback,
+        "removed": len(removed), "kept_start": kept[0][0] + 1,
+        "before_lines": before_lines, "before_bytes": before_bytes,
+        "after_lines": after_lines, "after_bytes": after_bytes,
+        "archive_path": archive_path, "archive_rel": archive_rel,
+        "archive_text": archive_text, "new_live": new_live,
+    }
+
+
+def rotate(root: Path, cfg: dict, keep: int, apply: bool) -> int:
+    """progress 轮转：默认 dry-run 零写入；--apply 走 flock + 原子替换落盘。"""
+    if keep < 1:
+        print(f"--keep 必须 ≥1（收到 {keep}），不做任何写入。", file=sys.stderr)
+        return 1
+    path = _progress_path(root, cfg)
+    if not path.is_file():
+        print(f"progress 不存在：{path}", file=sys.stderr)
+        return 1
+    plan = _rotate_plan(root, cfg, keep)
+    if plan is None:
+        print(f"progress 条目数 ≤ keep {keep}，无需轮转（零写入）。")
+        return 0
+
+    rel = path.relative_to(root).as_posix()
+    print(f"[rotate] progress：{rel}")
+    print(f"  条目：{plan['total']} → 保留 {plan['keep']}，移出 {plan['removed']}")
+    print(f"  行数：{plan['before_lines']} → {plan['after_lines']}；"
+          f"字节：{plan['before_bytes']} → {plan['after_bytes']}")
+    print(f"  保留条目：源文件第 {plan['kept_start']} 行起（最近 {plan['keep']} 条）")
+    print(f"  归档：{plan['archive_rel']}（{plan['removed']} 条）")
+    if plan["fallback"]:
+        print(f"  提示：未找到 `## {PROGRESS_SECTION}` 节，已按行首 `- YYYY-MM-DD` 兜底计条目。")
+    if not apply:
+        print("  提示：dry-run 未写入；--apply 才落盘（flock + 临时文件 + os.replace）。")
+        return 0
+
+    lock_path = root / ROTATE_LOCK_REL
+    try:
+        lock_fd = open(lock_path, "a", encoding="utf-8")
+    except OSError as exc:
+        print(f"[rotate] 无法创建锁文件 {ROTATE_LOCK_REL}：{exc}", file=sys.stderr)
+        return 1
+    try:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print(f"[rotate] 已有 rotate 在运行（锁 {ROTATE_LOCK_REL} 被占用），本次零写入。",
+                  file=sys.stderr)
+            return 2
+        try:
+            archive_path = plan["archive_path"]
+            archive_path.parent.mkdir(parents=True, exist_ok=True)
+            archive_text = plan["archive_text"]
+            if archive_path.exists():
+                # 同日再次轮转：追加新段，绝不覆盖既有归档（只归档、不删除）
+                archive_text = (archive_path.read_text(encoding="utf-8").rstrip("\n")
+                                + "\n\n---\n\n" + archive_text)
+            _atomic_write(archive_path, archive_text)
+            _atomic_write(plan["path"], plan["new_live"])
+        except OSError as exc:
+            print(f"[rotate] 写入失败（live progress 保持不变）：{exc}", file=sys.stderr)
+            return 1
+    finally:
+        lock_fd.close()
+    print(f"  已写入：{rel} + {plan['archive_rel']}（原始条目全部保留在归档）。")
+    return 0
+
+
+def progress_size_warning(root: Path, cfg: dict) -> str | None:
+    """--write 体量告警：progress ≥40960 字节或 ≥100 条时返回 stderr 提示，否则 None。"""
+    path = _progress_path(root, cfg)
+    if not path.is_file():
+        return None
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    entries = len(_entry_blocks(data.decode("utf-8", errors="replace").splitlines())[0])
+    reasons = []
+    if len(data) >= PROGRESS_WARN_BYTES:
+        reasons.append(f"{len(data)} 字节 ≥ {PROGRESS_WARN_BYTES}")
+    if entries >= PROGRESS_WARN_ENTRIES:
+        reasons.append(f"{entries} 条 ≥ {PROGRESS_WARN_ENTRIES}")
+    if not reasons:
+        return None
+    return (f"[警告] portfolio progress 体量偏大（{'；'.join(reasons)}），"
+            f"建议交接时 --rotate --apply --keep {ROTATE_DEFAULT_KEEP} 归档。")
 
 
 # —— create-time lint（--lint）：只报结构问题，不改 plan ——
@@ -793,7 +1127,13 @@ def main(argv: list[str] | None = None) -> int:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--write", action="store_true", help="写入看板文件（路径读配置 board.path）")
+    parser.add_argument(
+        "--write",
+        action="store_true",
+        help="写入看板文件（路径读配置 board.path）；portfolio progress ≥40960 字节或 ≥100 条时"
+             "在 stderr 提示「建议交接时 --rotate」（阈值常量 PROGRESS_WARN_BYTES/"
+             "PROGRESS_WARN_ENTRIES）",
+    )
     parser.add_argument("--selftest", action="store_true", help="对当前 plan 跑解析断言")
     parser.add_argument(
         "--check-fresh",
@@ -820,6 +1160,30 @@ def main(argv: list[str] | None = None) -> int:
         "--archive",
         help="一次性在看板头部写入归档链接（显式动作，不改配置；配置 board.archive 为空时不写归档行）",
     )
+    parser.add_argument(
+        "--handover",
+        action="store_true",
+        help="打印 ≤40 行交接摘要（Goal/Next Step/活跃流/待 Captain/最近 3 条 progress 与完成/"
+             "证据入口/看板新鲜）；只读 .planning，不写文件，progress 只读尾部",
+    )
+    parser.add_argument(
+        "--rotate",
+        action="store_true",
+        help="portfolio progress 轮转归档（默认 dry-run；--apply 才落盘；"
+             f"保留最近 --keep 条，默认 {ROTATE_DEFAULT_KEEP}；锁 {ROTATE_LOCK_REL}，"
+             "flock 非阻塞，冲突 rc=2）",
+    )
+    parser.add_argument(
+        "--keep",
+        type=int,
+        default=ROTATE_DEFAULT_KEEP,
+        help=f"--rotate 保留最近条目数（默认 {ROTATE_DEFAULT_KEEP}；N<1 拒绝 rc=1）",
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="--rotate 实写（临时文件 + os.replace 原子替换；只归档不删除）",
+    )
     args = parser.parse_args(argv)
 
     root = resolve_root(args.root)
@@ -830,7 +1194,11 @@ def main(argv: list[str] | None = None) -> int:
             return 3
         return lint_playbooks(target)
     cfg = load_config(root)
+    if args.rotate:
+        return rotate(root, cfg, args.keep, args.apply)
     plans = load_plans(root)
+    if args.handover:
+        return handover(root, cfg, plans)
     if args.selftest:
         selftest(plans, cfg)
         return 0
@@ -845,6 +1213,9 @@ def main(argv: list[str] | None = None) -> int:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(board, encoding="utf-8")
         print(f"写入 {target.relative_to(root).as_posix()}（{len(board.splitlines())} 行）")
+        warning = progress_size_warning(root, cfg)
+        if warning:
+            print(warning, file=sys.stderr)
     else:
         sys.stdout.write(board)
     return 0

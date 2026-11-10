@@ -156,10 +156,10 @@ python3 scripts/agent-watch.py --interval 15
 - 一个 ticket 一个会话；换 ticket 在下一轮开始前 `/compact`、`/clear` 或重建 tab。
 - worker `ctx` ≥ 30% 不再接新切片，完成当前切片后停止；≥ 60% 立即停止。
 - 主控 `ctx` ≥ 60% 停止接新任务；运行中不压缩。
-- 恢复顺序：`{{doc_context}}` → `{{portfolio_dir}}` 三文件 → 对应流 plan（三文件）→ 工单 → `{{doc_req}}` / `{{doc_accept}}` → 派生看板。
+- 恢复顺序：派生看板 → `python3 scripts/plan-status.py --handover` 摘要 → 活跃流 plan 的 Next Step/Status（grep）→ 工单/当前需求章节；`{{doc_context}}`/AGENTS.md 仍必读（小文件）；禁整读 progress/task_plan/feedback/历史流 plan/共识；单文件 >20KB 不整读。
 - opencode 的配置、agent、skill 不热重载；改完必须重启会话。
 - 不另建台账文件；每轮回复前更新 `{{portfolio_dir}}/progress.md`（各流由对应 owner 更新自己的 `progress.md`），记四项：①近三轮待决策；②当前待决策（来源/选项/推荐）；③将来事项与已派 worker；④本切片完成摘要 + 证据/commit。
-- 汇报前先读 portfolio plan 的 Backlog/Deviation 与各流 Next Step；交接＝三文件 + progress 尾部，只给路径与在跑清单，不复述正文。
+- 汇报前先读 portfolio plan 的 Backlog/Deviation 与各流 Next Step；交接＝看板 + `--handover` 摘要 + 在跑清单 + 待接/待 Captain；只给路径，不复述正文；交接前 `--check-fresh`。
 
 ## 8. 常见故障
 

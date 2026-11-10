@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.2.7 — 2026-11-10
+
+### 新增
+
+- **A 交接摘要 `plan-status.py --handover`**：只读输出 ≤40 行交接摘要（Goal/Next Step/活跃流含 plan 引用与当前阶段/待 Captain/最近 3 条 progress 与完成/证据入口/看板新鲜），progress 只读尾 16KB（不足 3 条时扩 64KB→全文），不写任何文件；空 portfolio/缺文件给可读降级。
+- **B progress 轮转 `plan-status.py --rotate`**：默认 dry-run 零写入，`--apply --keep N`（默认 10）才落盘；条目=`## 自动驾驶里程` 节内 `- YYYY-MM-DD` 块（含缩进续行），保留最近 N 条 + 尾部非条目区块，其余按原序归档 `.planning/_archive/progress-<YYYYMMDD>.md`（头含来源/日期/截止边界/before-after 行数与字节/源 sha256/操作角色）；live 尾部加归档指针；flock 非阻塞（冲突 rc=2）+ 临时文件 + fsync + `os.replace`；只归档不删除、可 `git revert`。无 `## 自动驾驶里程` 节时按日期前缀兜底并在 dry-run 提示。
+- **C guard 交接前置归档**：`crew-guard.py` 的 `_start_handoff` 在创建继任 tab/pane **之前**执行 `plan-status.py --rotate --apply --keep 10`（`ROTATE_KEEP` 常量）；成功记日志，失败/异常只告警，不阻断交接、不回落 split；`handoff_attempted` 保证多轮只执行一次；新增 `run_plan_status_args` 按 argv 列表传多参数。
+- **D 交接规则瘦身**：qoder/opencode helm 模板新增「交接读取范围（硬）」（看板 + `--handover` 摘要 + 活跃流 Next Step/Status grep + feedback 待复盘 grep + `guard.handoff`；禁整读 progress/task_plan/feedback/历史流 plan/共识，单文件 >20KB 不整读）；`plan-discipline` §5.1–5.2 改为交接流程内 `--rotate` 归档，阈值 progress ≥40KB 或条目 ≥100，替换未内置的 `plan-archive.py` 口径；`firstmate-dispatch` 恢复/交接顺序同步。
+- **`--write` 体量告警**：portfolio progress ≥40960 字节或 ≥100 条时 stderr 提示「建议交接时 --rotate」，stdout/看板不变。
+
+### 测试
+
+- 新增 `test_plan_status_handover_rotate.py`（25 例）：摘要行数与分块、只读尾部、空仓降级、超量截断；rotate dry-run 零写入、归档头、指针、守恒、幂等、锁冲突 rc=2、rename 失败 live 不变且清理 temp、fsync、digest `- ` 行不计条目、无节兜底、超长尾条目扩窗。
+- `test_crew_guard.py` 新增 9 例：rotate 先于 tab create、成功日志、失败/异常继续交接、两轮只 rotate 一次、warn 轮不 rotate、生产 argv 分元素传递。
+- 全量 pytest 539 passed + 99 subtests；`crew-lint`/`plan-status --lint`/`--playbooks` 绿。
+- 版本 2.2.7：`SKILL.md` frontmatter 与标题、`init.py` fallback、`test_crew_lint.py`、`test_220_final.py`、`test_224_retro.py`、`test_225_patch.py` 版本断言同步。
+
 ## 2.2.6 — 2026-11-10
 
 ### 修复
