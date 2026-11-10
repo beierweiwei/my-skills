@@ -40,21 +40,21 @@ class RuleLayerTest(unittest.TestCase):
     def test_r5_defined_and_indexed(self):
         rules = read(CREW_RULES)
         self.assertIn("**R5 反馈分诊**", rules)
-        self.assertIn("| R | 回执与反馈 | R1–R5 |", rules)
+        self.assertIn("| R | 回执与反馈 | R1–R6 |", rules)
         for phrase in ("阻断级", "Errors Encountered", "inone", "预判去向", "待复盘未清零"):
             self.assertIn(phrase, rules)
 
     def test_guide_pointers_updated(self):
         guide = read(GUIDE)
-        self.assertIn("**R1–R5**", guide)
-        self.assertIn("（R1–R5）", guide)
+        self.assertIn("**R1–R6**", guide)
+        self.assertIn("（R1–R6）", guide)
         self.assertNotIn("R1–R4", guide)
 
 
 class TemplateLayerTest(unittest.TestCase):
     def test_helm_templates_have_triage_and_retro(self):
         qoder = read(HELM_QODER)
-        self.assertIn("R1–R5 回执与反馈", qoder)
+        self.assertIn("R1–R6 回执与反馈", qoder)
         self.assertIn("\n8. 自学习分诊（R5）", qoder)
         self.assertIn("\n9. 复盘：大收口必跑", qoder)
         self.assertIn("\n10. 每轮开工先检查", qoder)
@@ -63,7 +63,7 @@ class TemplateLayerTest(unittest.TestCase):
                        "INONE_AGENT_NAME=helm", "信箱只进不出"):
             self.assertIn(phrase, qoder)
         opencode = read(HELM_OPENCODE)
-        self.assertIn("R1–R5 回执与反馈", opencode)
+        self.assertIn("R1–R6 回执与反馈", opencode)
         self.assertIn("\n13. 自学习分诊与复盘（R5）", opencode)
         for phrase in ("四路归类", "retro-<YYYYMMDD>.md", "INONE_AGENT_NAME=helm",
                        "预判去向", "单 agent 读 feedback", "收口 gap",
@@ -74,7 +74,7 @@ class TemplateLayerTest(unittest.TestCase):
         for path in (FIRSTMATE_QODER, FIRSTMATE_OPENCODE):
             with self.subTest(path=path.name):
                 text = read(path)
-                self.assertIn("R1–R5", text)
+                self.assertIn("R1–R6", text)
                 self.assertIn("INONE_AGENT_NAME=firstmate", text)
                 self.assertIn("船员只报不推", text)
                 self.assertIn("auto-memory", text)
@@ -85,7 +85,7 @@ class TemplateLayerTest(unittest.TestCase):
                 text = read(path)
                 rule_line = next(
                     line for line in text.splitlines() if line.startswith("- 规则："))
-                self.assertIn("R1–R5", rule_line)
+                self.assertIn("R1–R6", rule_line)
                 self.assertNotIn("R1–R4", rule_line)
                 self.assertNotIn("inone", text)
 
@@ -127,10 +127,10 @@ class TemplateLayerTest(unittest.TestCase):
 
 class VersionTest(unittest.TestCase):
     def test_version_225_in_three_places(self):
-        self.assertIn("version: 2.2.7", read(SKILL_MD))
-        self.assertIn("v2.2.7", read(SKILL_MD))
-        self.assertIn('SKILL_VERSION_FALLBACK = "2.2.7"', read(INIT))
-        self.assertIn("## 2.2.7", read(CHANGELOG))
+        self.assertIn("version: 2.2.8", read(SKILL_MD))
+        self.assertIn("v2.2.8", read(SKILL_MD))
+        self.assertIn('SKILL_VERSION_FALLBACK = "2.2.8"', read(INIT))
+        self.assertIn("## 2.2.8", read(CHANGELOG))
 
 
 if __name__ == "__main__":

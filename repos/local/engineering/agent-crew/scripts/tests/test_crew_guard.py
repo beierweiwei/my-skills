@@ -483,6 +483,252 @@ class WakeConditionTest(GuardTestBase):
         self.assertTrue(any("残留待办B" in line for line in self.logs))
 
 
+class BlockedSlaTest(GuardTestBase):
+    """2.2.8 工单 02：blocked 年龄 / 重复叫醒 / grace 提示。"""
+
+    def setUp(self):
+        super().setUp()
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.agents = [{"name": "builder-1", "agent_status": "blocked"}]
+
+    def write_guard_config(self, **guard) -> None:
+        write_file(
+            self.root / ".planning" / "orchestration.json",
+            json.dumps({"guard": guard}, ensure_ascii=False),
+        )
+
+    def test_first_blocked_wake_still_respects_global_cooldown(self):
+        guard = self.make_guard()
+        guard.last_wake_at = 0.0
+        self.now[0] = 300
+        result = guard.run_once()
+        self.assertFalse(result["woke"])
+        self.assertEqual([], self.prompt_calls)
+        self.assertTrue(any("冷却中" in line for line in self.logs))
+
+        self.now[0] = 600
+        self.assertTrue(guard.run_once()["woke"])
+        self.assertEqual(1, len(self.prompt_calls))
+
+    def test_repeat_wake_boundary_14_59_vs_15_00(self):
+        guard = self.make_guard()
+        self.assertTrue(guard.run_once()["woke"])
+        self.assertEqual(1, len(self.prompt_calls))
+
+        self.now[0] = 14 * 60 + 59
+        self.assertFalse(guard.run_once()["woke"])
+        self.assertEqual(1, len(self.prompt_calls))
+        self.assertTrue(any("未到重复叫醒间隔" in line for line in self.logs))
+
+        self.now[0] = 15 * 60
+        result = guard.run_once()
+        self.assertTrue(result["woke"])
+        self.assertEqual(2, len(self.prompt_calls))
+        self.assertEqual({"builder-1": 15}, result["blockedAges"])
+        self.assertIn("已 blocked 15 分钟", self.prompt_calls[1][1])
+
+    def test_repeat_interval_respects_guard_config(self):
+        self.write_guard_config(blockedRepeatMinutes=2)
+        guard = self.make_guard()
+        self.assertTrue(guard.run_once()["woke"])
+
+        self.now[0] = 119
+        self.assertFalse(guard.run_once()["woke"])
+        self.now[0] = 120
+        self.assertTrue(guard.run_once()["woke"])
+        self.assertEqual(2, len(self.prompt_calls))
+
+    def test_repeat_wake_bypasses_global_cooldown(self):
+        guard = self.make_guard()
+        self.assertTrue(guard.run_once()["woke"])
+
+        self.now[0] = 850
+        guard.last_wake_at = 850.0  # 50 秒前有其它叫醒，全局冷却中
+        self.now[0] = 900
+        self.assertTrue(guard.run_once()["woke"])
+        self.assertEqual(2, len(self.prompt_calls))
+
+    def test_grace_prompt_at_30_minutes(self):
+        guard = self.make_guard()
+        self.assertTrue(guard.run_once()["woke"])
+
+        self.now[0] = 15 * 60
+        self.assertTrue(guard.run_once()["woke"])
+        message_15 = self.prompt_calls[1][1]
+        self.assertIn("已 blocked 15 分钟", message_15)
+        self.assertNotIn("应关闭工位或升级 Captain", message_15)
+
+        self.now[0] = 30 * 60
+        self.assertTrue(guard.run_once()["woke"])
+        message_30 = self.prompt_calls[2][1]
+        self.assertIn("已 blocked 30 分钟", message_30)
+        for token in ("按 R6 处置", "re-task / close / escalate",
+                      "应关闭工位或升级 Captain", "guard 不自动关闭/杀 agent"):
+            self.assertIn(token, message_30)
+
+    def test_grace_threshold_respects_guard_config(self):
+        self.write_guard_config(blockedRepeatMinutes=2, blockedGraceMinutes=4)
+        guard = self.make_guard()
+        self.assertTrue(guard.run_once()["woke"])
+
+        self.now[0] = 2 * 60
+        self.assertTrue(guard.run_once()["woke"])
+        self.assertNotIn("应关闭工位或升级 Captain", self.prompt_calls[1][1])
+
+        self.now[0] = 4 * 60
+        self.assertTrue(guard.run_once()["woke"])
+        message = self.prompt_calls[2][1]
+        self.assertIn("已 blocked 4 分钟", message)
+        self.assertIn("应关闭工位或升级 Captain", message)
+
+    def test_unblock_clears_age_and_reblock_wakes_fresh(self):
+        guard = self.make_guard()
+        self.assertTrue(guard.run_once()["woke"])
+
+        self.now[0] = 300
+        self.agents = [{"name": "builder-1", "agent_status": "idle"}]
+        guard.run_once()
+        self.assertEqual({}, guard.blocked_since)
+        self.assertEqual({}, guard.blocked_last_wake)
+
+        self.now[0] = 700
+        self.agents = [{"name": "builder-1", "agent_status": "blocked"}]
+        result = guard.run_once()
+        self.assertTrue(result["woke"])
+        self.assertEqual({"builder-1": 0}, result["blockedAges"])
+        self.assertNotIn("应关闭工位或升级 Captain", self.prompt_calls[1][1])
+
+    def test_disappeared_agent_clears_age(self):
+        guard = self.make_guard()
+        self.assertTrue(guard.run_once()["woke"])
+
+        self.now[0] = 300
+        self.agents = []
+        guard.run_once()
+        self.assertEqual({}, guard.blocked_since)
+        self.assertEqual({}, guard.blocked_last_wake)
+
+    def test_multiple_blocked_merged_into_one_wake(self):
+        self.agents = [
+            {"name": "builder-1", "agent_status": "blocked"},
+            {"name": "builder-2", "agent_status": "blocked"},
+        ]
+        guard = self.make_guard()
+        first = guard.run_once()
+        self.assertTrue(first["woke"])
+        self.assertEqual(1, len(self.prompt_calls))
+        self.assertEqual({"builder-1": 0, "builder-2": 0}, first["blockedAges"])
+        for name in ("builder-1", "builder-2"):
+            self.assertIn(name, self.prompt_calls[0][1])
+
+        self.now[0] = 15 * 60
+        second = guard.run_once()
+        self.assertTrue(second["woke"])
+        self.assertEqual(2, len(self.prompt_calls))
+        self.assertEqual({"builder-1": 15, "builder-2": 15}, second["blockedAges"])
+
+    def test_pane_id_identity_when_name_missing(self):
+        self.agents = [{"name": "", "pane_id": "w1:p9", "agent_status": "blocked"}]
+        guard = self.make_guard()
+        self.assertTrue(guard.run_once()["woke"])
+        self.assertIn("w1:p9", guard.blocked_since)
+
+        self.now[0] = 15 * 60
+        self.assertTrue(guard.run_once()["woke"])
+        self.assertEqual(2, len(self.prompt_calls))
+        self.assertIn("w1:p9", self.prompt_calls[1][1])
+
+    def test_probe_blocked_over_60_minutes_never_wakes_or_counts(self):
+        self.agents = [{"name": "probe-alpha", "agent_status": "blocked",
+                        "cwd": "/tmp/probe"}]
+        guard = self.make_guard(project_roots={self.root})
+        for minute in range(61):
+            if minute:
+                self.now[0] = minute * 60
+            result = guard.run_once()
+            self.assertFalse(result["woke"])
+            self.assertEqual(0, result["blocked"])
+        self.assertEqual([], self.prompt_calls)
+        self.assertEqual({}, guard.blocked_since)
+        self.assertEqual({}, guard.blocked_last_wake)
+
+    def test_excluded_agents_never_enter_age_tracking(self):
+        self.agents = [
+            {"name": "builder-1", "agent_status": "blocked"},
+            {"name": "helm-1", "agent_status": "blocked"},
+            {"name": "Captain-1", "agent_status": "blocked"},
+            {"name": "external-1", "agent_status": "blocked", "cwd": "/tmpfoo/x"},
+        ]
+        guard = self.make_guard(project_roots={self.root})
+        result = guard.run_once()
+        self.assertEqual({"builder-1": 0}, result["blockedAges"])
+        self.assertEqual({"builder-1"}, set(guard.blocked_since))
+
+    def test_blocked_ages_accumulate_during_handoff_then_wake(self):
+        self.crew.mkdir(parents=True, exist_ok=True)
+        (self.crew / "guard.handoff").write_text(
+            "phase=started\nold=helm-1\noldPane=wX:pOLD\noldTab=wX:tOLD\n"
+            "new=helm-1-2\nnewPane=wX:pNEW\nnewTab=wX:tNEW\n"
+            "time=2026-11-10T00:00:00Z\nreason=test\n",
+            encoding="utf-8",
+        )
+        self.agents = [
+            {"name": "helm-1", "pane_id": "wX:pOLD", "agent_status": "idle"},
+            {"name": "helm-1-2", "pane_id": "wX:pNEW", "agent_status": "working"},
+            {"name": "builder-1", "agent_status": "blocked"},
+        ]
+        guard = self.make_guard()
+
+        first = guard.run_once()
+        self.assertEqual("wait", first["handoff"]["action"])
+        self.assertFalse(first["woke"])
+        self.assertEqual([], self.prompt_calls)
+        self.assertEqual({"builder-1": 0}, first["blockedAges"])
+
+        self.now[0] = 30 * 60
+        self.agents = [
+            {"name": "helm-1", "pane_id": "wX:pOLD", "agent_status": "idle"},
+            {"name": "helm-1-2", "pane_id": "wX:pNEW", "agent_status": "idle"},
+            {"name": "builder-1", "agent_status": "blocked"},
+        ]
+        second = guard.run_once()
+        self.assertEqual("done", second["handoff"]["action"])
+        self.assertFalse(second["woke"])
+        self.assertEqual({"builder-1": 30}, second["blockedAges"])
+
+        third = guard.run_once()
+        self.assertTrue(third["woke"])
+        self.assertEqual(1, len(self.prompt_calls))
+        message = self.prompt_calls[0][1]
+        self.assertIn("已 blocked 30 分钟", message)
+        self.assertIn("应关闭工位或升级 Captain", message)
+
+    def test_load_config_guard_defaults_and_clamps(self):
+        self.assertEqual(
+            {"blockedRepeatMinutes": 15, "blockedGraceMinutes": 30},
+            cg.load_config(self.root)["guard"],
+        )
+        cases = (
+            ({"blockedRepeatMinutes": 240}, 240),
+            ({"blockedRepeatMinutes": 0}, 1),
+            ({"blockedRepeatMinutes": 999}, 240),
+            ({"blockedRepeatMinutes": "x"}, 15),
+            ({"blockedRepeatMinutes": True}, 15),
+            ({"blockedRepeatMinutes": 15.5}, 15),
+        )
+        for guard, expected in cases:
+            with self.subTest(guard=guard):
+                self.write_guard_config(**guard)
+                self.assertEqual(
+                    expected,
+                    cg.load_config(self.root)["guard"]["blockedRepeatMinutes"],
+                )
+        self.write_guard_config(blockedGraceMinutes=0)
+        self.assertEqual(1, cg.load_config(self.root)["guard"]["blockedGraceMinutes"])
+        self.write_guard_config(blockedGraceMinutes="30")
+        self.assertEqual(30, cg.load_config(self.root)["guard"]["blockedGraceMinutes"])
+
+
 class WakeChannelTest(GuardTestBase):
     def test_focused_helm_uses_wake_file_and_notify(self):
         self.write_fixture()
@@ -622,6 +868,10 @@ class LockAndOutputTest(GuardTestBase):
             "tab create",
             "oldTab",
             "newTab",
+            "blockedRepeatMinutes",
+            "blockedGraceMinutes",
+            "R6",
+            "不自动关闭",
         ):
             self.assertIn(token, text)
 

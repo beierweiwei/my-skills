@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.2.8 — 2026-11-10
+
+### 新增
+
+- **R6 blocked 回执处置闭环**：`references/crew-rules.md` 新增 R6——blocked 回执由 owner **当轮**处置（re-task / close / escalate）并在回执或原工位留痕；blocked 工位不适用 W4 的 2 小时保留，超过 worker 建议保留窗（含最晚处置时间）未处置即关闭工位或升级 Captain；只改 plan、不回写原工位视为未处置；区分「等 helm 决策」与「等人工权限/扫码」，后者标 Captain 项并释放工位，不空挂。索引改 R1–R6，W4/G4 交叉说明。
+- **模板 blocked 处置动作**：qoder/opencode 的 helm、firstmate 模板加「每轮先处理 blocked/⏸ 回执再开新活」；builder/planner/reviewer/runner/scout 模板加 blocked 回执处置动作（14 模板各 +1 动作句）。
+- **guard blocked 年龄与重复叫醒**：`crew-guard.py` 按 agent 身份（name，缺省 pane_id）记录首次 blocked 时间；首次叫醒沿用 10 分钟全局冷却，仍 blocked 且距该 agent 上次 blocked 叫醒 ≥ `guard.blockedRepeatMinutes`（默认 15，夹取 1–240）再叫醒，重复叫醒不受全局冷却压制；累计 ≥ `guard.blockedGraceMinutes`（默认 30，夹取 1–240）时叫醒消息提示「按 R6 处置（re-task / close / escalate），应关闭工位或升级 Captain」；不自动关闭/杀 agent，agent 解除或消失即清除年龄；探针/外部 cwd/helm/Captain 排除与 handoff 优先级保持不变。
+- **pane-audit blocked 超时巡检**：`pane-audit.py` 读 `<crew-dir>/inbox/*.json` 中该 agent 最新回执（`work_slot == pane_id` 优先、其次 `from == name`，按 `ts` 最大），最新回执仍为 blocked 且年龄 > `--blocked-grace`（默认 30 分钟）报 `blocked-overdue`；仅报告，`--apply` 不关；helm/白名单 tab 跳过，回执损坏或 ts 缺失/非法 fail-soft。
+- **doctor 登记 `guard` 配置键**：`CORE_TOP_KEYS` 加 `guard`，轻校验 `guard.blockedRepeatMinutes` / `guard.blockedGraceMinutes` 为 1–240 整数（缺省不写配置即可用，不新增检查项）。
+
+### 修复
+
+- G4 在跑口径更新为「blocked 单独作为卡住叫醒理由，达到 15 分钟未处置再叫醒，达到 blockedGrace（默认 30 分钟）提示应关闭或升级」，与 `guard.blockedRepeatMinutes`/`guard.blockedGraceMinutes` 一致。
+
+### 测试
+
+- `test_crew_guard.py` 新增 blocked 年龄/重复叫醒/grace 边界（14:59/15:00/30:00）/解除重置/多工位合并/handoff 优先；`test_pane_audit.py` 新增回执年龄边界、按 work_slot/agent 名匹配、最新回执口径、无回执不报、`--apply` 不关；`test_doctor_config.py` 新增 guard 配置合法/非法用例；`test_224_retro.py` 同步 R1–R6 断言与模板 token。
+- 全量 pytest 582 passed + 117 subtests；`crew-lint`（含 `--purity`）、本仓 `plan-status --lint`/`--playbooks` 绿。
+- 版本 2.2.8：`SKILL.md` frontmatter 与标题、`init.py` fallback、`test_crew_lint.py`、`test_220_final.py`、`test_224_retro.py`、`test_225_patch.py` 版本断言同步。
+
 ## 2.2.7 — 2026-11-10
 
 ### 新增

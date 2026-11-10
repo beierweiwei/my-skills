@@ -10,7 +10,7 @@
 | 前缀 | 领域 | 编号 |
 |---|---|---|
 | D | 派单 | D1–D6 |
-| R | 回执与反馈 | R1–R5 |
+| R | 回执与反馈 | R1–R6 |
 | W | 工位 | W1–W5 |
 | O | 占用 | O1–O3 |
 | F | 收口 | F1–F16 |
@@ -43,13 +43,14 @@
 - **R3 去重**：回执按 `receipt_id` 去重，同一 `receipt_id` 只处理一次。
 - **R4 触发器不是状态**：回执只触发收口与审计，任务状态只认 plan；回执与 plan 不一致时以 plan 为准并触发核对。
 - **R5 反馈分诊**：发现先分四路，不混用——①阻断级（流程跑不下去/工具坏）走回执 `blocked` + 即时推送总舵/副舵，20–30 分钟自检兜底，不进 feedback；②repo 犯错记该流 plan `## Errors Encountered`（回执 findings 带出），correct 启用后转其队列；③跨项目认知由总舵/大副当场 inone 推送（`INONE_AGENT_NAME` 用角色名），船员只报不推；④仅编排/流程/提示词问题进 feedback 信箱（项目 portfolio 目录 `feedback.md`），上报者预分诊填「预判去向」（改规则 R* / 改 SOP 步骤 / 改脚本 / 改模板措辞），格式与生命周期按 [plan-discipline.md](plan-discipline.md) §5.3。复盘去向必须留痕（已改 R*/已改文件、转_correct、已_inone、归档+原因）；待复盘未清零且无去向视为复盘未完成。
+- **R6 blocked 回执处置闭环**：①`status=blocked` 回执由 owner（总舵/副舵）**当轮**处置：re-task / close / escalate，并在回执或原工位留痕；②blocked 工位**不适用** W4 的 2 小时保留，超过 worker 报 blocked 时建议的保留窗（含最晚处置时间）仍未处置即关闭工位或升级 Captain（升级须写明），未给出保留窗时当轮处置；③只改 plan、不回写原工位的视为未处置；处置后回执状态标「已闭环 / 已转出 / 待 Captain」；④区分「等 helm 决策」与「等人工权限/扫码」：后者标 Captain 项并**释放工位**，不空挂。
 
 ## W 工位
 
 - **W1 建与复用**：同流任务复用已有工位；同类任务可共用专用组 tab 的分 pane；新建工位用独立 tab，核验 workspace 与 cwd 后再启动 agent。
 - **W2 容量与来源**：每 tab 最多 6 个 pane（含 root），超出另开组 tab；不得从总舵或他人 worker 的 tab 分裂出工位；迁移失败即关 pane，不留残位。总舵 tab 只保留总舵自身 1 个 pane，不得 split；总舵换舵另开新 tab，继任首报后关旧 pane/旧 tab。
 - **W3 标签**：工位标签必须含「需求·任务」，禁用角色泛称；一个 pane 只跑一个 agent。
-- **W4 回收窗**：one-shot 工位收口即关；builder 仅在「同资产下一件」时保留，窗口 2 小时；空 tab 自动关闭；保留工位标签标「·保留至 HH:MM」。
+- **W4 回收窗**：one-shot 工位收口即关；builder 仅在「同资产下一件」时保留，窗口 2 小时；空 tab 自动关闭；保留工位标签标「·保留至 HH:MM」。blocked 工位见 R6，不适用本窗。
 - **W5 巡检**：单 tab 超容、有 pane 无注册、有注册无 pane 均须告警；working 状态的 pane 不得关闭；白名单工位不自动清理。
 
 ## O 占用
@@ -88,7 +89,7 @@
 - **G1 单实例轮询**：guard 单实例运行、固定周期轮询；多实例时后启动者退出。
 - **G2 唤醒条件**：仅当「有待办且无在跑 worker」连续两轮成立才叫醒；冷却期内同一待办不重复叫醒。
 - **G3 待办口径**：活跃流 plan 中未勾选且未标 ⏸/待 Captain 的 Phase 待办，加 portfolio Backlog 中无阻塞的 T 行；已完成 Phase 的残留待办只记日志，不叫醒。
-- **G4 在跑口径**：只有 working 算在跑；blocked 单独作为「卡住」叫醒理由；idle/done/unknown 不算在跑。
+- **G4 在跑口径**：只有 working 算在跑；blocked 单独作为「卡住」叫醒理由，叫醒带年龄与重复叫醒——达到 15 分钟未处置再叫醒，达到 blockedGrace（默认 30 分钟）提示「应关闭或升级」，不自动杀 agent；idle/done/unknown 不算在跑。
 - **G5 零输出与边界**：正常零输出；可提示「回执 done 但 plan 未更新」，不代写 plan；外置定时只检查 guard 存活；人工抽查工具不承担自动叫醒。
 
 ## S 状态机

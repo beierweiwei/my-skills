@@ -16,6 +16,12 @@ cwd 隔离：只统计 cwd 在本仓或 `git worktree list --porcelain` 列出�
 内的 agent；外部项目（如 CASE）不参与 running/blocked/快速叫醒。cwd 缺失或不可解析时
 沿用旧口径包含（无法确认归属时不改变既有行为）。
 快速叫醒：上一轮有 working、本轮全部转 idle 且有待办时立即叫醒（仍受 10 分钟冷却）。
+blocked 年龄与重复叫醒：按 agent 身份（name，缺省 pane_id）记录首次 blocked 时间；
+首次叫醒沿用 10 分钟全局冷却；仍 blocked 且距该 agent 上次 blocked 叫醒
+≥ config `guard.blockedRepeatMinutes`（默认 15，夹取 1–240）再叫醒，该重复叫醒
+不受全局冷却压制；blocked 累计 ≥ `guard.blockedGraceMinutes`（默认 30，夹取 1–240）
+时叫醒消息提示「按 R6 处置（re-task / close / escalate），应关闭工位或升级 Captain」；
+guard 不自动关闭/杀 agent；agent 不再 blocked 或消失即清除年龄。
 自动交接：每轮读总舵 pane 的 `ctx Nk/1M`（`herdr pane read <pane> --lines 80`），
 按 config `helm.ctxWarn`（默认 0.30）/`helm.ctxHandoff`（默认 0.60）写
 <crew-dir>/guard.handoff 并通知；≥交接阈值一次性新建 tab/继任/首报后关旧 pane
@@ -73,6 +79,10 @@ RETRO_OPEN_STATUS = "待复盘"
 RETRO_MARKER_NAME = "retro.wake"
 RETRO_FILE_RE = re.compile(r"^retro-(\d{8})\.md$")
 DEFAULT_RETRO_PERIOD_DAYS = 7
+DEFAULT_BLOCKED_REPEAT_MINUTES = 15
+DEFAULT_BLOCKED_GRACE_MINUTES = 30
+BLOCKED_MINUTES_MIN = 1
+BLOCKED_MINUTES_MAX = 240
 
 
 @dataclass(frozen=True)
@@ -151,6 +161,10 @@ def load_config(root: Path) -> dict:
             "tabLabel": DEFAULT_TAB_LABEL,
         },
         "retro": {"enabled": True, "periodDays": DEFAULT_RETRO_PERIOD_DAYS},
+        "guard": {
+            "blockedRepeatMinutes": DEFAULT_BLOCKED_REPEAT_MINUTES,
+            "blockedGraceMinutes": DEFAULT_BLOCKED_GRACE_MINUTES,
+        },
     }
     path = root / ".planning" / "orchestration.json"
     try:
@@ -185,6 +199,16 @@ def load_config(root: Path) -> dict:
         period = retro.get("periodDays")
         if isinstance(period, int) and not isinstance(period, bool):
             config["retro"]["periodDays"] = max(1, min(30, period))
+    guard = data.get("guard")
+    if isinstance(guard, dict):
+        for key, default in (
+            ("blockedRepeatMinutes", DEFAULT_BLOCKED_REPEAT_MINUTES),
+            ("blockedGraceMinutes", DEFAULT_BLOCKED_GRACE_MINUTES),
+        ):
+            value = guard.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                config["guard"][key] = max(BLOCKED_MINUTES_MIN,
+                                           min(BLOCKED_MINUTES_MAX, value))
     return config
 
 
@@ -572,6 +596,8 @@ class Guard:
     prev_working: int = field(default=0, init=False)
     last_wake_at: float | None = field(default=None, init=False)
     last_write_at: float | None = field(default=None, init=False)
+    blocked_since: dict[str, float] = field(default_factory=dict, init=False)
+    blocked_last_wake: dict[str, float] = field(default_factory=dict, init=False)
     handoff_attempted: bool = field(default=False, init=False)
     project_roots: set[Path] | None = None
     roots_cache: set[Path] | None = field(default=None, init=False)
@@ -1003,6 +1029,73 @@ class Guard:
         name = str(agent.get("name") or "")
         return name == self.helm or name.startswith("Captain")
 
+    @staticmethod
+    def _blocked_key(agent: dict) -> str:
+        """blocked 年龄身份：name，缺省 pane_id；两者皆空返回空串（不计数）。"""
+        name = str(agent.get("name") or "").strip()
+        if name:
+            return name
+        return str(agent.get("pane_id") or agent.get("pane") or "").strip()
+
+    @staticmethod
+    def _blocked_label(agent: dict) -> str:
+        return Guard._blocked_key(agent) or "?"
+
+    def _track_blocked(self, now: float, blocked: list[dict]) -> dict[str, float]:
+        """更新 blocked 年龄表；agent 不再 blocked 或消失时清除（含上次叫醒时间）。"""
+        active: dict[str, float] = {}
+        for agent in blocked:
+            key = self._blocked_key(agent)
+            if key:
+                active[key] = self.blocked_since.get(key, now)
+        for key in list(self.blocked_since):
+            if key not in active:
+                del self.blocked_since[key]
+                self.blocked_last_wake.pop(key, None)
+        self.blocked_since.update(active)
+        return active
+
+    def _blocked_minutes(self, now: float, agent: dict,
+                         since_map: dict[str, float]) -> int:
+        key = self._blocked_key(agent)
+        since = since_map.get(key, now) if key else now
+        return max(0, int((now - since) // 60))
+
+    def _blocked_ages(self, now: float, blocked: list[dict],
+                      since_map: dict[str, float]) -> dict[str, int]:
+        return {self._blocked_label(agent): self._blocked_minutes(now, agent, since_map)
+                for agent in blocked}
+
+    def _blocked_due(self, now: float, blocked: list[dict],
+                     repeat_seconds: int) -> tuple[list[dict], bool]:
+        """返回（到期叫醒的 agent，是否含重复叫醒）；重复叫醒不受全局冷却压制。"""
+        due: list[dict] = []
+        repeat_due = False
+        for agent in blocked:
+            key = self._blocked_key(agent)
+            last = self.blocked_last_wake.get(key) if key else None
+            if last is None:
+                due.append(agent)
+            elif now - last >= repeat_seconds:
+                due.append(agent)
+                repeat_due = True
+        return due, repeat_due
+
+    def _blocked_wake_lines(self, now: float, blocked: list[dict],
+                            since_map: dict[str, float],
+                            grace_seconds: int) -> list[str]:
+        lines: list[str] = []
+        for agent in blocked:
+            key = self._blocked_key(agent)
+            since = since_map.get(key, now) if key else now
+            text = (f"- {self._blocked_label(agent)}："
+                    f"已 blocked {self._blocked_minutes(now, agent, since_map)} 分钟")
+            if now - since >= grace_seconds:
+                text += ("（按 R6 处置（re-task / close / escalate），"
+                         "应关闭工位或升级 Captain；guard 不自动关闭/杀 agent）")
+            lines.append(text)
+        return lines
+
     def _periodic_write(self, now: float) -> None:
         if self.last_write_at is not None and now - self.last_write_at < WRITE_INTERVAL_SECONDS:
             return
@@ -1084,6 +1177,8 @@ class Guard:
             agent for agent in workers
             if str(agent.get("agent_status")) == "blocked" and not is_probe_agent(agent)
         ]
+        # 年龄表先于 handoff 分支更新：交接期间 blocked 时长继续累计。
+        blocked_since = self._track_blocked(now, blocked)
         pending, residual = scan_todos(self.root)
 
         for todo in residual:
@@ -1123,6 +1218,7 @@ class Guard:
             "residual": len(residual),
             "running": len(running),
             "blocked": len(blocked),
+            "blockedAges": self._blocked_ages(now, blocked, blocked_since),
             "consecutive": self.consecutive,
             "woke": False,
             "reason": reason,
@@ -1162,11 +1258,28 @@ class Guard:
                 return result
         if not reason:
             return result
-        if self.last_wake_at is not None and now - self.last_wake_at < COOLDOWN_SECONDS:
+        guard_cfg = load_config(self.root)["guard"]
+        if blocked:
+            due, repeat_due = self._blocked_due(
+                now, blocked, guard_cfg["blockedRepeatMinutes"] * 60)
+            if not due:
+                self.log(f"blocked 未到重复叫醒间隔，跳过叫醒：{reason}")
+                return result
+            # 首次叫醒受全局冷却；重复叫醒按每 agent 自限速，不受全局冷却压制。
+            if (not repeat_due and self.last_wake_at is not None
+                    and now - self.last_wake_at < COOLDOWN_SECONDS):
+                self.log(f"冷却中，跳过叫醒：{reason}")
+                return result
+        elif self.last_wake_at is not None and now - self.last_wake_at < COOLDOWN_SECONDS:
             self.log(f"冷却中，跳过叫醒：{reason}")
             return result
 
         lines = [f"guard 叫醒：{reason}"]
+        if blocked:
+            lines.append("已 blocked 时长：")
+            lines.extend(self._blocked_wake_lines(
+                now, blocked, blocked_since,
+                guard_cfg["blockedGraceMinutes"] * 60))
         if pending:
             lines.append(f"待办（前 {min(5, len(pending))} 条）：")
             lines.extend(f"- {todo.label}" for todo in pending[:5])
@@ -1178,6 +1291,11 @@ class Guard:
         except Exception as exc:  # noqa: BLE001
             self.log(f"叫醒失败：{type(exc).__name__}: {exc}")
         self.last_wake_at = now
+        if blocked:
+            for agent in blocked:
+                key = self._blocked_key(agent)
+                if key:
+                    self.blocked_last_wake[key] = now
         result["woke"] = True
         return result
 
@@ -1200,6 +1318,13 @@ cwd 在本仓或 linked worktree（git worktree list --porcelain）内的 agent�
 忽略；cwd 缺失/不可解析时沿用旧口径包含。优先 herdr agent prompt <helm>；总舵 pane
 聚焦时写 <crew-dir>/guard.wake + 通知。叫醒时执行 plan-status.py --check-fresh；
 每 5 分钟顺带执行 plan-status.py --write。正常零 stdout，事件写 <crew-dir>/guard.log。
+
+blocked 年龄与重复叫醒：按 agent 身份（name，缺省 pane_id）记录首次 blocked 时间；
+首次叫醒沿用 10 分钟全局冷却；仍 blocked 且距该 agent 上次 blocked 叫醒
+≥ guard.blockedRepeatMinutes（默认 15，夹取 1–240）再叫醒，不受全局冷却压制；
+累计 ≥ guard.blockedGraceMinutes（默认 30，夹取 1–240）时叫醒消息提示
+「按 R6 处置（re-task / close / escalate），应关闭工位或升级 Captain」；
+guard 不自动关闭/杀 agent。配置位于 .planning/orchestration.json。
 
 自动交接：每轮 `herdr pane read <pane> --lines 80` 解析总舵 `ctx Nk/1M`；
 ctxWarn（默认 30%）写 <crew-dir>/guard.handoff phase=warn 并通知；

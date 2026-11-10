@@ -43,8 +43,8 @@ CORE_IDS = set(dispatch_lib.CORE_ROLES)
 CORE_TOP_KEYS = {
     "projectId", "projectName", "skillRoot", "skillVersion", "portfolioDir",
     "portfolioMatch", "board", "backlog", "docNames", "captainDecisions",
-    "redLines", "dataDir", "aopReference", "helm", "retro", "roles", "hooks",
-    "schemaVersion",
+    "redLines", "dataDir", "aopReference", "helm", "retro", "guard", "roles",
+    "hooks", "schemaVersion",
 }
 RUNTIME_DIRECT_PATTERNS = (
     re.compile(r"herdr\s+agent\s+(?:start|prompt|close)\b"),
@@ -884,6 +884,18 @@ class Doctor:
                         isinstance(period, bool) or not isinstance(period, int)
                         or not 1 <= period <= 30):
                     problems.append(f"retro.periodDays 必须是 1–30 的整数：{period!r}")
+        guard = config.get("guard")
+        if guard is not None:
+            if not isinstance(guard, dict):
+                problems.append(f"guard 必须是对象：{guard!r}")
+            else:
+                for key in ("blockedRepeatMinutes", "blockedGraceMinutes"):
+                    value = guard.get(key)
+                    if value is not None and (
+                            isinstance(value, bool) or not isinstance(value, int)
+                            or not 1 <= value <= 240):
+                        problems.append(
+                            f"guard.{key} 必须是 1–240 的整数：{value!r}")
         roles = config.get("roles")
         if roles is None:
             problems.append("缺 roles.enabled")

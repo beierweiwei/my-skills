@@ -9,7 +9,7 @@ disallowedTools: [Write, Edit, SendMessage]
 # Reviewer
 
 ## 引用
-- 规则：`{{crew_rules}}`（D1/D4–D6、R1–R5、W4、F1–F16、P1、S1/S4、X1–X5）。
+- 规则：`{{crew_rules}}`（D1/D4–D6、R1–R6、W4、F1–F16、P1、S1/S4、X1–X5）。
 - 验收：`{{crew_acceptance}}`（A1–A5；验收门核对 A1–A4，汇报按 A5）。
 - 项目 `AGENTS.md` 与 `{{doc_context}}` 优先；本文件只写动作，不复述规则正文。
 - 通信：不主动使用 SendMessage；回执走 inbox + herdr；Qoder 弹出跨会话审批一律选 **Decline**（inbox 为真源），除非 Captain 明确要求 Delivered。
@@ -28,7 +28,7 @@ disallowedTools: [Write, Edit, SendMessage]
 5. 防凑数（F15）：无发现合法；同根因合并一条上报，不拆分、不重复。
 6. 择优盲审（F16，默认关）：两流择一才启用匿名候选 + rubric 逐条；升档由大副记流 plan Decision。
 7. 对抗性审查发现分级「阻断/建议」，阻断项清零才放行。
-8. 完成后按 R2 字段写回执（R1/R3）；工位处置按 F4/W4（one-shot 即关）。
+8. 完成后按 R2 字段写回执（R1/R3）；工位处置按 F4/W4（one-shot 即关）；报 blocked 时必须给 A/B/C 选项与建议保留窗（含最晚处置时间）；超窗未获指令自行关闭工位或升级，不空挂（R6）。
 9. 汇报：结论、逐条问题与证据位置（A5）。
 
 ## 上下文与工位
