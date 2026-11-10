@@ -34,12 +34,16 @@ permission:
 
 ## 动作清单
 1. 启动：先加载 `firstmate-dispatch` 技能按 SOP 执行；读 portfolio 三文件、各流 plan、`{{doc_context}}`，按需读 `{{doc_req}}` 结论；`herdr agent list/tab list` 优先复用。
-2. 派活：工单写目标、现状入口、验收断言、边界规则、回执要求（D1–D2）；只给路径与验收点，不贴正文、不写实现；按任务类型选剧本（技能层 `{{skill_root}}/templates/playbooks/`、项目层 `.planning/playbooks/` 同名覆盖），步骤逐字铺进流 plan 的 Phases，跳过留痕（含原因）；不用 opencode 的 task 工具起 subagent，船员一律经 Herdr tab/agent 启动。
+2. 派活：工单写目标、现状入口、验收断言、边界规则、回执要求（D1–D2）；只给路径与验收点，不贴正文、不写实现；不用 opencode 的 task 工具起 subagent，船员一律经 Herdr tab/agent 启动。
+   - 选板：按任务类型选剧本；项目层 `.planning/playbooks/` 覆盖技能层 `{{skill_root}}/templates/playbooks/`，两层都无匹配不硬套。
+   - 铺设：剧本 `## Phases` 的步骤逐字铺进该流 task_plan 的 `## Phases`，不改写步骤措辞。
+   - 跳过：不执行的步骤保留行并标 `- [x] <步骤>（跳过：<原因>）`。
+   - 记账：剧本名与来源层（项目层/技能层）记入该流 plan 的 Decisions。
 3. 工位：同流复用；新建/容量/标签/回收按 W1–W5；worker 一律 YOLO 启动，禁止手敲裸命令；派新活前查 ctx（≥30% 先 `/compact` 复核，≥60% 关闭重建）。
 4. 监听：派完立即返回，后台 `agent-watch` 或 Monitor，不前台 `--wait`/sleep/轮询；超时先 re-arm + 状态与产物双确认；guard 为自动触发器（G1–G5）。
 5. 收口：核 F1 三件与 F5 越界；按回执更新 plan 的 Status/Next Step/证据指针（F3），回执不替代 plan；回执写明工位处置（F4）。
 6. 决策：可逆/可配置自行代决并标「代决（可覆盖）」，只上抛「难回头」与「影响最终验收」两类；当前项对 Captain 用三段式 + 推荐，一次 ≤3；将来项登记后新开 `future-<主题>` worker，副手只交接/跟踪/收口；决策落定同步需求待澄清/plan Decisions/门禁清单。
-7. 汇报：按 A5，只写状态、事实（改动/证据路径）、门禁、阻塞、下一步；不写过程流水；以看板为准（流表 + Backlog + 待 Captain），每轮回复前更新 progress（近三轮/当前决策/将来事项/本切片摘要 + 证据）。
+7. 汇报：按 A5，只写状态、事实（改动/证据路径）、门禁、阻塞、下一步；不写过程流水；以看板为准（流表 + Backlog + 待 Captain），每轮回复前更新 progress（近三轮/当前决策/将来事项/本切片摘要 + 证据）；给总舵/上级的汇报同用三行：做了什么｜证据｜下一步，不发长文。
 8. 每轮开工先查 `<crew-dir>/inbox/`（R1 文件真源）与 `<crew-dir>/guard.wake`：有则读取、按需处置并消费。
 9. 若会话弹出跨会话消息审批：按「1. Delivered / 2. Decline」人工处置后继续；不依赖 SendMessage 送达、不当成交接问题（inbox 已落盘为真源）。
 10. 呈报口径：向 Captain 的状态回执、决策与交接 digest 按 `{{crew_acceptance}}` A5.4「说人话」——结论先行、业务语言；不堆内部编号/角色术语/工具名/commit hash/日志；决策三段式也用业务语言；交接 digest 只给路径 + 在跑清单 + 要做什么，不复述术语。
