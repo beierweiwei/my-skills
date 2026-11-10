@@ -223,5 +223,52 @@ class InitV2Test(unittest.TestCase):
         self.assertIn('"warn": 1', proc.stdout)
 
 
+class FeedbackSkeletonTest(unittest.TestCase):
+    """2.2.4：portfolio feedback.md 骨架（缺失才写、不覆盖、幂等）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name) / "proj"
+        self.root.mkdir()
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True,
+                       capture_output=True)
+
+    def run_init(self, *extra: str) -> tuple[int, str]:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = init_v2.run(["--root", str(self.root), *extra])
+        return code, out.getvalue()
+
+    def feedback_path(self) -> Path:
+        return self.root / ".planning" / "portfolio" / "feedback.md"
+
+    def test_feedback_skeleton_created_and_retro_config_written(self):
+        code, out = self.run_init("--yes")
+        self.assertEqual(0, code, out)
+        text = self.feedback_path().read_text(encoding="utf-8")
+        self.assertIn("## 流程反馈（复盘信箱）", text)
+        self.assertIn("2026-11-10 冻结", text)
+        cfg = json.loads(
+            (self.root / ".planning" / "orchestration.json").read_text(encoding="utf-8"))
+        self.assertEqual({"enabled": True, "periodDays": 7}, cfg["retro"])
+
+    def test_feedback_skeleton_not_overwritten(self):
+        target = self.feedback_path()
+        target.parent.mkdir(parents=True)
+        target.write_text("# 项目自有反馈\n\n不覆盖。\n", encoding="utf-8")
+        code, out = self.run_init("--yes")
+        self.assertEqual(0, code, out)
+        self.assertEqual("# 项目自有反馈\n\n不覆盖。\n",
+                         target.read_text(encoding="utf-8"))
+
+    def test_feedback_skeleton_idempotent(self):
+        self.assertEqual(0, self.run_init("--yes")[0])
+        before = sha(self.feedback_path())
+        code, out = self.run_init("--yes")
+        self.assertEqual(0, code, out)
+        self.assertEqual(before, sha(self.feedback_path()))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

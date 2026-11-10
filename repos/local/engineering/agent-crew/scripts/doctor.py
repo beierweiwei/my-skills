@@ -43,7 +43,7 @@ CORE_IDS = set(dispatch_lib.CORE_ROLES)
 CORE_TOP_KEYS = {
     "projectId", "projectName", "skillRoot", "skillVersion", "portfolioDir",
     "portfolioMatch", "board", "backlog", "docNames", "captainDecisions",
-    "redLines", "dataDir", "aopReference", "helm", "roles", "hooks",
+    "redLines", "dataDir", "aopReference", "helm", "retro", "roles", "hooks",
     "schemaVersion",
 }
 RUNTIME_DIRECT_PATTERNS = (
@@ -848,6 +848,19 @@ class Doctor:
             problems.append("缺 skillRoot")
         if not isinstance(config.get("skillVersion"), str) or not config.get("skillVersion"):
             problems.append("缺 skillVersion")
+        retro = config.get("retro")
+        if retro is not None:
+            if not isinstance(retro, dict):
+                problems.append(f"retro 必须是对象：{retro!r}")
+            else:
+                enabled = retro.get("enabled")
+                if enabled is not None and not isinstance(enabled, bool):
+                    problems.append(f"retro.enabled 必须是布尔：{enabled!r}")
+                period = retro.get("periodDays")
+                if period is not None and (
+                        isinstance(period, bool) or not isinstance(period, int)
+                        or not 1 <= period <= 30):
+                    problems.append(f"retro.periodDays 必须是 1–30 的整数：{period!r}")
         roles = config.get("roles")
         if roles is None:
             problems.append("缺 roles.enabled")

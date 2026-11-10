@@ -70,6 +70,10 @@
     "expectedModel": "",
     "agentName": ""
   },
+  "retro": {
+    "enabled": true,
+    "periodDays": 7
+  },
   "roles": {
     "enabled": ["helm", "firstmate", "builder", "planner", "reviewer", "runner", "scout"],
     "instances": {}

@@ -136,6 +136,7 @@ python3 scripts/agent-watch.py --interval 15
 - Builder 的自检 `code-review` 不能替代独立 Reviewer。
 - 评审报告按 reviewer 三态（PASS / BLOCK / 可延后）+ 证据验收；同根因合并、「无发现」合法；两流择一开工前声明盲审开关（默认关）。
 - 验收必须有 `{{doc_accept}}` + 真实数据回放；演示样例不算验收。
+- 收口发现跨项目教训 → 当场 inone 推送（INONE_AGENT_NAME=firstmate）；流程/提示词问题 → feedback 表并填「预判去向」（R5）；阻断与 repo 犯错按 R5 走回执/Errors，不进 feedback。
 - **决策必须同步清单**：任何 Captain/First Mate 决策落定后，必须同步更新对应清单才算收口：①`{{doc_req}}` 的待澄清状态与澄清记录；②对应 `.planning/<task>/task_plan.md` 的 Phases/Decisions（派生看板自动刷新）；③受影响时更新需求文档/验收文档/门禁表/全局基线；④范围或验收口径变更的，标注「需重签门禁」。未更新清单的决策视为未完成。
 
 ## 6. 三道门与合并

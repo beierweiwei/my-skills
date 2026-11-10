@@ -10,7 +10,7 @@
 | 要查什么 | 去哪里 |
 |---|---|
 | 派单 | crew-rules.md **D1–D6** |
-| 回执 | crew-rules.md **R1–R4** |
+| 回执 | crew-rules.md **R1–R5** |
 | 工位 | crew-rules.md **W1–W5** |
 | 占用与并发 | crew-rules.md **O1–O3、P1–P3** |
 | 收口 | crew-rules.md **F1–F12** |
@@ -208,7 +208,7 @@
 ### 7.2 Herdr 与 plan-with-files 的协作原理
 
 - **分工**：Herdr 管「活的」——进程、pane、workspace、worktree、互调与状态；plan-with-files 管「记得的」——目标、阶段、决策、错误、Next Step。Herdr 只保活进程，不保存对话上下文；重启或换机后靠文件恢复。
-- **桥**：回执把运行时事件固化成文件（R1–R4）；编排者按回执收口、更新 plan（F1–F12），再由 plan 派生看板。运行时状态目录统一由 `scripts/crew_paths.py` 解析为 `<git-common-dir>/crew/`（linked worktree 取主仓 common dir；非 git 用 `<root>/.crew`）。
+- **桥**：回执把运行时事件固化成文件（R1–R5）；编排者按回执收口、更新 plan（F1–F12），再由 plan 派生看板。运行时状态目录统一由 `scripts/crew_paths.py` 解析为 `<git-common-dir>/crew/`（linked worktree 取主仓 common dir；非 git 用 `<root>/.crew`）。
 - **恢复顺序**：`{{doc_context}}` → 工单 → `{{doc_req}}` → plan/进度；不依赖旧聊天或自动记忆。这样换人、换机、重启后都能接上。
 - 这条分工也解释了为什么「派活/等结果/读输出」走 Herdr，而「做到哪、为什么这样做」永远写 plan：前者是瞬时协调，后者是持久事实。
 

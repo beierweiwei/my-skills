@@ -31,6 +31,21 @@ class DoctorConfigTest(unittest.TestCase):
         self.assertEqual(1, rc, report)
         self.assertIn("bogusKey", self.fx.item(report, "config.schema")["detail"])
 
+    def test_retro_config_registered_and_validated(self):
+        self.fx.config["retro"] = {"enabled": True, "periodDays": 30}
+        self.fx.write_config()
+        rc, report = self.fx.doctor_json("--only", "config.schema")
+        self.assertEqual(0, rc, report)
+        self.assertEqual("pass", self.fx.item(report, "config.schema")["status"])
+
+        self.fx.config["retro"] = {"enabled": "yes", "periodDays": 0}
+        self.fx.write_config()
+        rc, report = self.fx.doctor_json("--only", "config.schema")
+        self.assertEqual(1, rc, report)
+        detail = self.fx.item(report, "config.schema")["detail"]
+        self.assertIn("retro.enabled", detail)
+        self.assertIn("retro.periodDays", detail)
+
     def test_skill_source_rule_copy_fails_and_absolute_warns(self):
         copy = self.fx.root / "docs/crew-rules.md"
         copy.write_text("# rules copy\n", encoding="utf-8")

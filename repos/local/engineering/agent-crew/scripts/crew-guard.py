@@ -42,7 +42,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -64,6 +64,11 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 DEFAULT_CTX_WARN = 0.30
 DEFAULT_CTX_HANDOFF = 0.60
 DEFAULT_TAB_LABEL = "总舵"
+RETRO_SECTION = "流程反馈（复盘信箱）"
+RETRO_OPEN_STATUS = "待复盘"
+RETRO_MARKER_NAME = "retro.wake"
+RETRO_FILE_RE = re.compile(r"^retro-(\d{8})\.md$")
+DEFAULT_RETRO_PERIOD_DAYS = 7
 
 
 @dataclass(frozen=True)
@@ -141,6 +146,7 @@ def load_config(root: Path) -> dict:
             "ctxHandoff": DEFAULT_CTX_HANDOFF,
             "tabLabel": DEFAULT_TAB_LABEL,
         },
+        "retro": {"enabled": True, "periodDays": DEFAULT_RETRO_PERIOD_DAYS},
     }
     path = root / ".planning" / "orchestration.json"
     try:
@@ -167,6 +173,14 @@ def load_config(root: Path) -> dict:
         label = helm.get("tabLabel")
         if isinstance(label, str) and label.strip():
             config["helm"]["tabLabel"] = label.strip()
+    retro = data.get("retro")
+    if isinstance(retro, dict):
+        enabled = retro.get("enabled")
+        if isinstance(enabled, bool):
+            config["retro"]["enabled"] = enabled
+        period = retro.get("periodDays")
+        if isinstance(period, int) and not isinstance(period, bool):
+            config["retro"]["periodDays"] = max(1, min(30, period))
     return config
 
 
@@ -311,6 +325,59 @@ def scan_todos(root: Path) -> tuple[list[Todo], list[Todo]]:
         if path.resolve() == portfolio:
             _parse_backlog(root, path, rel, pending)
     return pending, residual
+
+
+def parse_feedback_open(path: Path, log: Callable[[str], None] | None = None) -> int | None:
+    """统计「流程反馈（复盘信箱）」表 `状态=待复盘` 行数；缺失或损坏返回 None（fail-safe）。"""
+    def note(message: str) -> None:
+        if log is not None:
+            log(message)
+
+    try:
+        lines = _section_lines(path, RETRO_SECTION)
+    except (OSError, ValueError) as exc:
+        note(f"feedback.md 读取失败，跳过复盘提醒：{exc}")
+        return None
+    table = [line for line in lines if line.strip().startswith("|")]
+    if not table:
+        note("feedback.md 缺「流程反馈（复盘信箱）」表，跳过复盘提醒")
+        return None
+    header = [cell.strip() for cell in table[0].strip().strip("|").split("|")]
+    if "状态" not in header:
+        note("feedback.md 复盘信箱表头缺「状态」列，跳过复盘提醒")
+        return None
+    status_idx = header.index("状态")
+    open_rows = 0
+    for raw in table[1:]:
+        cells = [cell.strip() for cell in raw.strip().strip("|").split("|")]
+        if all(set(cell) <= set("-: ") for cell in cells):
+            continue
+        if len(cells) != len(header):
+            note(f"feedback.md 复盘信箱行格式损坏，跳过复盘提醒：{raw.strip()[:80]}")
+            return None
+        if cells[status_idx] == RETRO_OPEN_STATUS:
+            open_rows += 1
+    return open_rows
+
+
+def latest_retro_date(portfolio: Path) -> date | None:
+    """扫描 `<portfolio>/retro-YYYYMMDD.md`，返回最大有效日期；无报告返回 None。"""
+    latest: date | None = None
+    try:
+        names = [entry.name for entry in portfolio.iterdir()]
+    except OSError:
+        return None
+    for name in names:
+        match = RETRO_FILE_RE.match(name)
+        if not match:
+            continue
+        try:
+            value = datetime.strptime(match.group(1), "%Y%m%d").date()
+        except ValueError:
+            continue
+        if latest is None or value > latest:
+            latest = value
+    return latest
 
 
 def herdr_agents() -> list[dict]:
@@ -835,6 +902,46 @@ class Guard:
             return {"action": "warn", "reason": reason}
         return {"action": "none"}
 
+    def _retro_due(self, running: list[dict], handoff: dict) -> str:
+        """返回周复盘提醒文案；不满足（未到期/有在跑/交接中/同日已提醒）返回空串。"""
+        if running or handoff.get("action") in ("started", "wait"):
+            return ""
+        config = load_config(self.root)
+        retro = config["retro"]
+        if not retro["enabled"]:
+            return ""
+        portfolio_rel = str(config["portfolioDir"])
+        portfolio = self.root / portfolio_rel
+        open_count = parse_feedback_open(portfolio / "feedback.md", self.log)
+        if not open_count:
+            return ""
+        today = datetime.fromtimestamp(self.clock()).date()
+        latest = latest_retro_date(portfolio)
+        if latest is not None and (today - latest).days <= retro["periodDays"]:
+            return ""
+        marker = self.crew_dir / RETRO_MARKER_NAME
+        try:
+            last = marker.read_text(encoding="utf-8").strip()
+        except OSError:
+            last = ""
+        except ValueError as exc:
+            self.log(f"retro.wake 读取失败，跳过复盘提醒：{exc}")
+            return ""
+        if last == today.isoformat():
+            return ""
+        latest_text = latest.strftime("%Y%m%d") if latest else "无"
+        report = f"{portfolio_rel}/retro-{today.strftime('%Y%m%d')}.md"
+        return (f"周复盘到期：feedback 待复盘 {open_count} 条，最近复盘 {latest_text}；"
+                f"请按 helm 模板「复盘」执行，报告 {report}。")
+
+    def _mark_retro_wake(self) -> None:
+        today = datetime.fromtimestamp(self.clock()).date()
+        try:
+            atomic_write_text(
+                self.crew_dir / RETRO_MARKER_NAME, today.isoformat() + "\n")
+        except OSError as exc:
+            self.log(f"retro.wake 写入失败：{exc}")
+
     def _roots(self) -> set[Path]:
         if self.project_roots is not None:
             return {Path(root).expanduser().resolve() for root in self.project_roots}
@@ -996,6 +1103,22 @@ class Guard:
             return result
         if handoff.get("action") != "none":
             result["handoff"] = handoff
+        if not blocked:
+            retro_reason = self._retro_due(running, handoff)
+            if retro_reason:
+                result["reason"] = retro_reason
+                result["retro"] = True
+                woke = False
+                try:
+                    self._wake(retro_reason, agents)
+                    woke = True
+                except Exception as exc:  # noqa: BLE001
+                    self.log(f"复盘叫醒失败：{type(exc).__name__}: {exc}")
+                if woke:
+                    self._mark_retro_wake()
+                    self.last_wake_at = now
+                    result["woke"] = True
+                return result
         if not reason:
             return result
         if self.last_wake_at is not None and now - self.last_wake_at < COOLDOWN_SECONDS:
@@ -1045,6 +1168,10 @@ ctxHandoff（默认 60%）一次性 `dispatch.py tab create` 新 tab（配置 he
 总舵 tab 永不 split。失败只通知+记录（phase=done, result=failed），不循环、不杀旧舵、
 不回落 pane split；旧 tab 有剩余 pane/无法确认或关闭失败只记 note，由人工或
 pane-audit --apply 兜底。
+
+周复盘兜底：仅当 feedback 复盘信箱 `待复盘` >0、无在跑 worker 且最近 retro 报告超期
+（config retro.periodDays，默认 7，夹取 1–30）时叫醒，每日最多一次
+（<crew-dir>/retro.wake 记 YYYY-MM-DD）；与普通待办叫醒分开判定。
 
 兜底建议：30–60 分钟 cron 只检查 guard 进程存活（如 pgrep -f crew-guard.py），
 本脚本不自动创建 cron。
