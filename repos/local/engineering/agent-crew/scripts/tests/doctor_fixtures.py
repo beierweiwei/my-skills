@@ -148,6 +148,33 @@ def make_skill(base: Path) -> Path:
     return skill
 
 
+def make_linked_worktree(base: Path) -> tuple[Path, Path]:
+    """建「主仓 + linked worktree」（真实 git worktree），两处都铺技能源骨架。
+
+    返回 (主仓技能源目录, worktree 技能源目录)。worktree 根的 .git 为文件，
+    主仓根的 .git 为目录，用于区分「稳定分发副本」与「开发 worktree」。
+    """
+    base.mkdir(parents=True, exist_ok=True)
+    repo = base / "src-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "README.md").write_text("# src repo\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+                    "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "seed"], check=True)
+    wt = base / "dev-wt"
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", str(wt)], check=True)
+    skill_rel = Path("repos/local/engineering/agent-crew")
+    for root in (repo, wt):
+        skill = root / skill_rel
+        (skill / "references").mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            "---\nname: agent-crew\nversion: 2.1.0\n---\n# skill fixture\n",
+            encoding="utf-8")
+    return repo / skill_rel, wt / skill_rel
+
+
 class ProjectFixture:
     """一个最小合法项目：skill 源 + 配置 + 角色 + AGENTS 块 + manifest + install-log。"""
 

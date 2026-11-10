@@ -8,11 +8,15 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+from doctor_fixtures import ProjectFixture, make_linked_worktree
 
 _SCRIPTS = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location("init_v2_mod", _SCRIPTS / "init.py")
@@ -34,11 +38,14 @@ class InitV2Test(unittest.TestCase):
         subprocess.run(["git", "init", "-q", str(self.root)], check=True,
                        capture_output=True)
 
-    def run_init(self, *extra: str) -> tuple[int, str]:
+    def run_init_at(self, root: Path, *extra: str) -> tuple[int, str]:
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-            code = init_v2.run(["--root", str(self.root), *extra])
+            code = init_v2.run(["--root", str(root), *extra])
         return code, out.getvalue()
+
+    def run_init(self, *extra: str) -> tuple[int, str]:
+        return self.run_init_at(self.root, *extra)
 
     def test_existing_config_values_preserved_version_stamped(self):
         self.assertEqual(self.run_init("--yes")[0], 0)
@@ -154,6 +161,53 @@ class InitV2Test(unittest.TestCase):
             self.assertIn(key, entry)
         self.assertEqual(entry["action"], "init")
         self.assertEqual(entry["result"], "ok")
+
+    def test_check_dev_worktree_skill_root_hints_without_failing(self):
+        base = Path(self._tmp.name) / "fx"
+        repo_skill, wt_skill = make_linked_worktree(base)
+        fx = ProjectFixture(base)
+        for skill in (repo_skill, wt_skill):  # --check 需组合基础代理模板
+            shutil.copytree(fx.skill, skill, dirs_exist_ok=True)
+        fx.config["skillVersion"] = init_v2.read_skill_version()
+
+        def apply_skill_root(skill: Path) -> None:
+            fx.config["skillRoot"] = os.path.relpath(skill, fx.root).replace(os.sep, "/")
+            fx.write_config()
+            fx.composed_entries = fx.write_composed_agents()
+            fx.write_manifest()
+
+        apply_skill_root(repo_skill)
+        code, out = self.run_init_at(fx.root, "--check")
+        self.assertEqual(0, code, out)
+        self.assertNotIn("开发 worktree", out)
+
+        apply_skill_root(wt_skill)
+        code, out = self.run_init_at(fx.root, "--check")
+        self.assertEqual(0, code, out)  # 提示不升级为失败
+        self.assertIn("[风险提示]", out)
+        self.assertIn("开发 worktree", out)
+        self.assertIn("稳定分发副本", out)
+
+        # 项目内 skillRoot：不误报
+        installed = fx.root / ".qoder/skills/agent-crew"
+        shutil.copytree(fx.skill, installed)
+        apply_skill_root(installed)
+        code, out = self.run_init_at(fx.root, "--check")
+        self.assertEqual(0, code, out)
+        self.assertNotIn("开发 worktree", out)
+
+    def test_check_unresolvable_tilde_skill_root_skips_hint_without_traceback(self):
+        base = Path(self._tmp.name) / "fx"
+        fx = ProjectFixture(base)
+        fx.config["skillVersion"] = init_v2.read_skill_version()
+        fx.config["skillRoot"] = "~nosuchuser4242/agent-crew"
+        fx.write_config()
+        fx.write_manifest()
+        code, out = self.run_init_at(fx.root, "--check")
+        self.assertEqual(1, code, out)  # 报告问题但不崩溃（HEAD 行为）
+        self.assertIn("检查结果", out)
+        self.assertNotIn("Traceback", out)
+        self.assertNotIn("开发 worktree", out)
 
     def test_absolute_skill_root_warns(self):
         self.run_init("--yes")
