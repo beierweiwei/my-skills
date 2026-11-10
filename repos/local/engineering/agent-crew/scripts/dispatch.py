@@ -870,6 +870,32 @@ def parse_pane_id(output: str, action: str) -> str:
     return pane_id
 
 
+def extract_tab_id(data: object) -> str | None:
+    """全树找 tab_id/tabId（herdr `tab create` 返回 result.tab.tab_id）。"""
+    return extract_pane_id(data, ("tab_id", "tabId"))
+
+
+def lookup_tab_id(pane_id: str | None) -> str | None:
+    """herdr `tab create` 未返回 tab_id 时，按 pane_id 反查 `pane list` 兜底。"""
+    if not pane_id:
+        return None
+    try:
+        data = json.loads(run_herdr(["herdr", "pane", "list"]))
+    except (DispatchError, ValueError):
+        return None
+    result = data.get("result") if isinstance(data, dict) else None
+    panes = result.get("panes") if isinstance(result, dict) else None
+    if not isinstance(panes, list):
+        return None
+    for pane in panes:
+        if not isinstance(pane, dict) or pane.get("pane_id") != pane_id:
+            continue
+        tab_id = pane.get("tab_id")
+        if isinstance(tab_id, str) and tab_id:
+            return tab_id
+    return None
+
+
 # ---------------------------------------------------------------------------
 # 注册表与 agent-log
 # ---------------------------------------------------------------------------
@@ -1310,12 +1336,22 @@ def cmd_tab(args: argparse.Namespace, root: Path) -> int:
         if args.no_focus:
             argv.append("--no-focus")
         output = run_herdr(argv)
-        pane_id = extract_pane_id(json.loads(output))
+        data = json.loads(output)
+        pane_id = extract_pane_id(data)
+        tab_id = extract_tab_id(data) or lookup_tab_id(pane_id)
+        result = "ok"
+        if not tab_id:
+            result = "partial"
+            print(
+                "dispatch: 警告：herdr tab create 未返回 tab_id，agent-log 记 partial"
+                "（guard 将 fail-closed）",
+                file=sys.stderr,
+            )
         append_log(root, {
             "ts": utc_now(), "action": "tab", "op": "create",
-            "pane": pane_id, "label": args.label, "result": "ok",
+            "tab": tab_id, "pane": pane_id, "label": args.label, "result": result,
         })
-        print_json({"pane": pane_id})
+        print_json({"tab": tab_id, "pane": pane_id})
         return 0
     run_herdr(["herdr", "tab", "close", args.tab])
     append_log(root, {"ts": utc_now(), "action": "tab", "op": "close", "tab": args.tab, "result": "ok"})

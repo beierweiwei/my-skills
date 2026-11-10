@@ -77,6 +77,10 @@ if args[:2] == ["agent", "list"]:
     print(json.dumps({"result": {"agents": [{"name": name} for name in names]}}))
 elif args[:2] == ["pane", "split"]:
     print(json.dumps({"result": {"pane_id": "wX:pNEW"}}))
+elif args[:2] == ["tab", "create"]:
+    print(json.dumps({"result": {
+        "tab": {"tab_id": "wX:tNEW"}, "root_pane": {"pane_id": "wX:pNEW"},
+    }}))
 else:
     print(json.dumps({"result": {"ok": True}}))
 """
@@ -610,6 +614,69 @@ class DispatchTest(unittest.TestCase):
                                  "--direction", "right")
         self.assertEqual(0, proc.returncode, proc.stderr)
         self.assertEqual("wX:pREAL", json.loads(proc.stdout)["pane"])
+
+    def test_tab_create_outputs_tab_and_pane(self):
+        proc = self.run_dispatch(
+            "tab", "create", "--workspace", "wX", "--cwd", str(self.root),
+            "--label", "总舵", "--no-focus",
+        )
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertEqual("wX:tNEW", payload["tab"])
+        self.assertEqual("wX:pNEW", payload["pane"])  # pane 键保留（start-helm.sh 兼容）
+        self.assertEqual(
+            [["tab", "create", "--workspace", "wX", "--cwd", str(self.root),
+              "--label", "总舵", "--no-focus"]],
+            self.herdr_calls(),
+        )
+
+    def test_tab_create_falls_back_to_pane_list_for_tab_id(self):
+        stub = self.bin / "herdr"
+        stub.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            "args = sys.argv[1:]\n"
+            "if args[:2] == ['tab', 'create']:\n"
+            "    print(json.dumps({'result': {'root_pane': {'pane_id': 'wX:pNEW'}}}))\n"
+            "elif args[:2] == ['pane', 'list']:\n"
+            "    print(json.dumps({'result': {'panes': ["
+            "{'pane_id': 'wX:pNEW', 'tab_id': 'wX:tLIST'}]}}))\n"
+            "else:\n"
+            "    print(json.dumps({'result': {'ok': True}}))\n",
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+        proc = self.run_dispatch("tab", "create", "--workspace", "wX", "--label", "总舵")
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertEqual("wX:tLIST", payload["tab"])
+        self.assertEqual("wX:pNEW", payload["pane"])
+
+    def test_tab_create_missing_tab_id_logs_partial_and_warns(self):
+        stub = self.bin / "herdr"
+        stub.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            "args = sys.argv[1:]\n"
+            "if args[:2] == ['tab', 'create']:\n"
+            "    print(json.dumps({'result': {'root_pane': {'pane_id': 'wX:pNEW'}}}))\n"
+            "elif args[:2] == ['pane', 'list']:\n"
+            "    print(json.dumps({'result': {'panes': []}}))\n"
+            "else:\n"
+            "    print(json.dumps({'result': {'ok': True}}))\n",
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+        proc = self.run_dispatch("tab", "create", "--workspace", "wX", "--label", "总舵")
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        self.assertIn("未返回 tab_id", proc.stderr)
+        self.assertIn("partial", proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertIsNone(payload["tab"])
+        self.assertEqual("wX:pNEW", payload["pane"])
+        row = self.agent_log()[-1]
+        self.assertEqual("partial", row["result"])
+        self.assertIsNone(row["tab"])
 
     def test_project_role_file_zero_write_and_no_second_copy(self):
         self._write_composed("qoder", "builder")

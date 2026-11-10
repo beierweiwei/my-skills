@@ -36,7 +36,7 @@ disallowedTools: [SendMessage]
 10. 长 prompt/含反引号等特殊字符的派单：先落临时文件，再用 `"$(cat <file>)"` 传递（BUG-010，避免 shell 转义/长度问题）。
 11. 每轮开工在检查 `<crew-dir>/guard.wake` 的同时查 `<crew-dir>/inbox/`（R1 文件真源）：有则读取、按需处置并消费。
 12. 若 Qoder 弹出跨会话消息审批：按「1. Delivered / 2. Decline」人工处置后继续；不依赖 SendMessage 送达、不当成交接问题（inbox 已落盘为真源）。
-13. 每轮开工先查 `<crew-dir>/guard.handoff`：存在则停止接新活、收口当前切片，按记录等待继任首报；首报后自关或由继任关闭旧 pane。phase=warn 只准备交接，phase=started/done 不得重复启动继任。
+13. 每轮开工先查 `<crew-dir>/guard.handoff`：存在则停止接新活、收口当前切片，按记录等待继任首报；首报后由 guard 关闭旧 pane/旧 tab。phase=warn 只准备交接，phase=started/done 不得重复启动继任。
 14. 呈报口径：向 Captain 的状态回执、决策与交接 digest 按 `{{crew_acceptance}}` A5.4「说人话」——结论先行、业务语言；不堆内部编号/角色术语/工具名/commit hash/日志；决策三段式也用业务语言；交接 digest 只给路径 + 在跑清单 + 要做什么，不复述术语。
 
 ## 回复格式（固定；进度/解释/决策类回复都用它）
@@ -48,7 +48,7 @@ disallowedTools: [SendMessage]
 
 ## 上下文与工位
 - ctx ≥30% 停止接新活，按 `{{portfolio_dir}}/progress.md` 尾部交接；≥60% 立即交接；不在运行中压缩。
-- **自动交接（30% 预警 / 60% 交接）**：guard 每轮读总舵 pane 的 `ctx Nk/1M`（config `helm.ctxWarn` 默认 0.30、`helm.ctxHandoff` 默认 0.60）。≥30% 写 `<crew-dir>/guard.handoff`（phase=warn）并通知，停止接新活、准备交接；≥60% 一次性执行：同 tab `dispatch.py pane split --pane <旧> --direction right` → `dispatch.py start --role helm --pane <新> --name <继任名>`（`<helmName>-2`，冲突递增 -3/-4…）→ prompt 继任读 portfolio 三文件 + progress 尾部 + 各流 plan Next Step/Status 并完成首报 → 首报后 guard 确认旧舵 idle/无响应再 `dispatch.py pane close`；旧舵不杀，失败只通知不循环，交接期间不接新活。
+- **自动交接（30% 预警 / 60% 交接）**：guard 每轮读总舵 pane 的 `ctx Nk/1M`（config `helm.ctxWarn` 默认 0.30、`helm.ctxHandoff` 默认 0.60）。≥30% 写 `<crew-dir>/guard.handoff`（phase=warn）并通知，停止接新活、准备交接；≥60% 一次性执行：`dispatch.py tab create --workspace <旧舵 workspace> --cwd <仓根> --label 总舵 --no-focus`（总舵 tab 永不 split）→ `dispatch.py start --role helm --pane <新 pane> --name <继任名>`（`<helmName>-2`，冲突递增 -3/-4…）→ prompt 继任读 portfolio 三文件 + progress 尾部 + 各流 plan Next Step/Status 并完成首报 → 首报后 guard 确认旧舵 idle/无响应再依次 `dispatch.py pane close` + `dispatch.py tab close --tab <旧 tab>`；旧舵不杀，失败只通知不循环（不回落 split），交接期间不接新活。
 - **流判定与派发顺序（硬）**：
   - ① 活跃流＝每个有独立目标/plan 的并行工作单元；≥2 条流必须每流一个副舵。
   - ② 任何新任务先判流数：≥2 先建副舵，单流也建 1 个副舵；**总舵不直接 start/prompt worker（含 runner/scout），worker 一律由副舵派**。

@@ -46,7 +46,7 @@
 ## W 工位
 
 - **W1 建与复用**：同流任务复用已有工位；同类任务可共用专用组 tab 的分 pane；新建工位用独立 tab，核验 workspace 与 cwd 后再启动 agent。
-- **W2 容量与来源**：每 tab 最多 3 个 pane（含 root），超出另开组 tab；不得从总舵或他人 worker 的 tab 分裂出工位；迁移失败即关 pane，不留残位。
+- **W2 容量与来源**：每 tab 最多 6 个 pane（含 root），超出另开组 tab；不得从总舵或他人 worker 的 tab 分裂出工位；迁移失败即关 pane，不留残位。总舵 tab 只保留总舵自身 1 个 pane，不得 split；总舵换舵另开新 tab，继任首报后关旧 pane/旧 tab。
 - **W3 标签**：工位标签必须含「需求·任务」，禁用角色泛称；一个 pane 只跑一个 agent。
 - **W4 回收窗**：one-shot 工位收口即关；builder 仅在「同资产下一件」时保留，窗口 2 小时；空 tab 自动关闭；保留工位标签标「·保留至 HH:MM」。
 - **W5 巡检**：单 tab 超容、有 pane 无注册、有注册无 pane 均须告警；working 状态的 pane 不得关闭；白名单工位不自动清理。
