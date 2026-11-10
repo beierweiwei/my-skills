@@ -51,7 +51,7 @@ TEMPLATES = SKILL_DIR / "templates"
 MARK_START = "<!-- agent-crew:orchestration:start -->"
 MARK_END = "<!-- agent-crew:orchestration:end -->"
 MARK_PREFIX = "<!-- agent-crew:orchestration:"
-SKILL_VERSION_FALLBACK = "2.2.4"
+SKILL_VERSION_FALLBACK = "2.2.5"
 
 CONFIG_REL = Path(".planning/orchestration.json")
 MANIFEST_REL = Path("docs/crew/manifest.json")
@@ -264,14 +264,37 @@ def is_inside(path: Path, base: Path) -> bool:
 
 
 def linked_worktree_root(path: Path) -> Path | None:
-    """path 位于 linked worktree（祖先含 .git 文件而非目录）时返回该 worktree 根。"""
+    """path 位于 linked worktree 时返回该 worktree 根。
+
+    仅认 `git worktree add` 形态：祖先 `.git` 是文件且其 `gitdir:` 目标解析后
+    父目录名为 `worktrees`（即 `<common>/worktrees/<name>`）。submodule（`modules/`）、
+    `--separate-git-dir`、外部 gitdir 与其他形态返回 None；读取/解析失败 fail-soft。
+    """
     resolved = path.resolve()
     for parent in (resolved, *resolved.parents):
         git = parent / ".git"
-        if git.is_file():
-            return parent
         if git.is_dir():
             return None
+        if not git.is_file():
+            continue
+        try:
+            text = git.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return None
+        prefix = "gitdir:"
+        if not text.lower().startswith(prefix):
+            return None
+        target = text[len(prefix):].strip()
+        if not target:
+            return None
+        target_path = Path(target)
+        if not target_path.is_absolute():
+            target_path = parent / target_path
+        try:
+            target_path = target_path.resolve()
+        except (OSError, RuntimeError):
+            return None
+        return parent if target_path.parent.name == "worktrees" else None
     return None
 
 
@@ -1089,13 +1112,19 @@ def run_check(root: Path, templates: Path, skill_version: str) -> int:
         if skill_root_path is not None:
             if not skill_root_path.is_absolute():
                 skill_root_path = root / skill_root_path
-            worktree = linked_worktree_root(skill_root_path)
-            if worktree is not None and not is_inside(skill_root_path, root):
+            if not skill_root_path.is_dir():
                 hints.append(
-                    f"skillRoot 指向开发 worktree：{worktree}"
-                    "（源随开发分支漂移，安装版本易失配）；"
-                    "下一步：将 skillRoot 改指稳定分发副本（如 skills/engineering/agent-crew "
-                    "指向 repos/local 实体）")
+                    f"skillRoot 不存在或不可读：{skill_root_path}；"
+                    "下一步：修正 .planning/orchestration.json 的 skillRoot "
+                    "指向实际存在的技能目录（绝对路径或项目相对路径）")
+            else:
+                worktree = linked_worktree_root(skill_root_path)
+                if worktree is not None and not is_inside(skill_root_path, root):
+                    hints.append(
+                        f"skillRoot 指向开发 worktree：{worktree}"
+                        "（源随开发分支漂移，安装版本易失配）；"
+                        "下一步：将 skillRoot 改指稳定分发副本（如 skills/engineering/agent-crew "
+                        "指向 repos/local 实体）")
     for stub in manifest.get("roleStubs", []) if isinstance(manifest.get("roleStubs"), list) else []:
         if not isinstance(stub, dict) or not stub.get("path"):
             continue

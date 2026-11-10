@@ -3,13 +3,35 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import os
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from doctor_fixtures import ProjectFixture, make_linked_worktree
+from doctor_fixtures import (
+    ProjectFixture,
+    make_linked_worktree,
+    make_separate_git_dir_clone,
+    make_submodule_checkout,
+)
+
+_SCRIPTS = Path(__file__).resolve().parent.parent
+
+
+def _load_module(name: str, filename: str):
+    spec = importlib.util.spec_from_file_location(name, _SCRIPTS / filename)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+DOCTOR_MOD = _load_module("doctor_config_under_test", "doctor.py")
+INIT_MOD = _load_module("init_config_under_test", "init.py")
 
 
 class DoctorConfigTest(unittest.TestCase):
@@ -157,6 +179,11 @@ class DoctorConfigTest(unittest.TestCase):
         self.assertTrue(item["next"])
         self.assertIn("稳定分发副本", item["next"])
 
+        # F1 口径：strict 下既有语义把 warn 计为失败（rc=1），非 strict rc=0
+        rc, report = self.fx.doctor_json("--only", "skill.source", "--strict")
+        self.assertEqual(1, rc, report)
+        self.assertEqual("warn", self.fx.item(report, "skill.source")["status"])
+
         # 稳定分发副本形态（主仓工作树，.git 为目录）：不误报
         self.fx.config["skillRoot"] = "../" + repo_skill.relative_to(self.fx.base).as_posix()
         self.fx.write_config()
@@ -174,6 +201,36 @@ class DoctorConfigTest(unittest.TestCase):
         rc, report = self.fx.doctor_json("--only", "skill.source")
         self.assertEqual(0, rc, report)
         self.assertEqual("pass", self.fx.item(report, "skill.source")["status"])
+
+    def test_skill_source_fixed_checkouts_are_not_dev_worktrees(self):
+        # F2：真实 git submodule / --separate-git-dir 检出是版本固定副本，不报开发 worktree
+        cases = (
+            ("submodule", make_submodule_checkout(self.fx.base / "subfx")),
+            ("separate-git-dir", make_separate_git_dir_clone(self.fx.base / "sepfx")),
+        )
+        for name, (_stable, skill) in cases:
+            with self.subTest(case=name):
+                self.fx.config["skillRoot"] = os.path.relpath(
+                    skill, self.fx.root).replace(os.sep, "/")
+                self.fx.write_config()
+                rc, report = self.fx.doctor_json("--only", "skill.source")
+                self.assertEqual(0, rc, report)
+                item = self.fx.item(report, "skill.source")
+                self.assertEqual("pass", item["status"], item)
+                self.assertNotIn("开发 worktree", item["detail"])
+                self.assertNotIn("漂移", item["detail"])
+
+    def test_linked_worktree_helper_semantics_align(self):
+        for make in (make_linked_worktree, make_submodule_checkout,
+                     make_separate_git_dir_clone):
+            with self.subTest(fixture=make.__name__):
+                _stable, skill = make(self.fx.base / f"align-{make.__name__}")
+                doctor_result = DOCTOR_MOD.linked_worktree_root(skill)
+                init_result = INIT_MOD.linked_worktree_root(skill)
+                self.assertEqual(doctor_result, init_result)
+        wt_root = make_linked_worktree(self.fx.base / "align-positive")[1].parents[3]
+        self.assertEqual(DOCTOR_MOD.linked_worktree_root(wt_root), wt_root)
+        self.assertEqual(INIT_MOD.linked_worktree_root(wt_root), wt_root)
 
     def test_install_version_mismatch_fails_then_restores(self):
         self.fx.config["skillVersion"] = "9.9.9"

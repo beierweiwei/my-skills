@@ -16,7 +16,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from doctor_fixtures import ProjectFixture, make_linked_worktree
+from doctor_fixtures import (
+    ProjectFixture,
+    make_linked_worktree,
+    make_separate_git_dir_clone,
+    make_submodule_checkout,
+)
 
 _SCRIPTS = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location("init_v2_mod", _SCRIPTS / "init.py")
@@ -208,6 +213,46 @@ class InitV2Test(unittest.TestCase):
         self.assertIn("检查结果", out)
         self.assertNotIn("Traceback", out)
         self.assertNotIn("开发 worktree", out)
+
+    def test_check_missing_skill_root_reports_missing_not_worktree(self):
+        # F4：不存在路径先报「不存在」，不再归因为开发 worktree；rc 不因提示改变
+        base = Path(self._tmp.name) / "fx"
+        _repo_skill, wt_skill = make_linked_worktree(base)
+        fx = ProjectFixture(base)
+        gone = wt_skill.parent / "gone-skill"  # worktree 内、不存在
+        fx.config["skillVersion"] = init_v2.read_skill_version()
+        fx.config["skillRoot"] = os.path.relpath(gone, fx.root).replace(os.sep, "/")
+        fx.write_config()
+        manifest = fx.manifest()
+        manifest["composedAgents"] = []  # 隔离提示块，避免既有组合校验干扰 rc
+        fx.write_manifest(manifest)
+        code, out = self.run_init_at(fx.root, "--check")
+        self.assertEqual(0, code, out)
+        self.assertIn("skillRoot 不存在或不可读", out)
+        self.assertIn("下一步", out)
+        self.assertNotIn("开发 worktree", out)
+
+    def test_check_fixed_checkouts_do_not_hint_worktree(self):
+        # F2：真实 submodule / --separate-git-dir 检出不再提示开发 worktree
+        base = Path(self._tmp.name) / "fx"
+        fx = ProjectFixture(base)
+        cases = (
+            ("submodule", make_submodule_checkout(base / "subfx")),
+            ("separate-git-dir", make_separate_git_dir_clone(base / "sepfx")),
+        )
+        for name, (_stable, skill) in cases:
+            with self.subTest(case=name):
+                shutil.copytree(fx.skill, skill, dirs_exist_ok=True)
+                fx.config["skillVersion"] = init_v2.read_skill_version()
+                fx.config["skillRoot"] = os.path.relpath(
+                    skill, fx.root).replace(os.sep, "/")
+                fx.write_config()
+                fx.composed_entries = fx.write_composed_agents()
+                fx.write_manifest()
+                code, out = self.run_init_at(fx.root, "--check")
+                self.assertEqual(0, code, out)
+                self.assertNotIn("开发 worktree", out)
+                self.assertNotIn("不存在或不可读", out)
 
     def test_absolute_skill_root_warns(self):
         self.run_init("--yes")

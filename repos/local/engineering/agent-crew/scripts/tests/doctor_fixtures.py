@@ -148,31 +148,75 @@ def make_skill(base: Path) -> Path:
     return skill
 
 
+SKILL_REL = Path("repos/local/engineering/agent-crew")
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+         "-c", "protocol.file.allow=always", *args],
+        check=True, capture_output=True,
+    )
+
+
+def _seed_repo(repo: Path) -> None:
+    repo.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "README.md").write_text("# src repo\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "seed")
+
+
+def _write_skill_skeleton(root: Path) -> Path:
+    skill = root / SKILL_REL
+    (skill / "references").mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: agent-crew\nversion: 2.1.0\n---\n# skill fixture\n",
+        encoding="utf-8")
+    return skill
+
+
 def make_linked_worktree(base: Path) -> tuple[Path, Path]:
     """建「主仓 + linked worktree」（真实 git worktree），两处都铺技能源骨架。
 
     返回 (主仓技能源目录, worktree 技能源目录)。worktree 根的 .git 为文件，
     主仓根的 .git 为目录，用于区分「稳定分发副本」与「开发 worktree」。
     """
-    base.mkdir(parents=True, exist_ok=True)
     repo = base / "src-repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    (repo / "README.md").write_text("# src repo\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
-                    "add", "-A"], check=True)
-    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
-                    "commit", "-qm", "seed"], check=True)
+    _seed_repo(repo)
     wt = base / "dev-wt"
     subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", str(wt)], check=True)
-    skill_rel = Path("repos/local/engineering/agent-crew")
-    for root in (repo, wt):
-        skill = root / skill_rel
-        (skill / "references").mkdir(parents=True)
-        (skill / "SKILL.md").write_text(
-            "---\nname: agent-crew\nversion: 2.1.0\n---\n# skill fixture\n",
-            encoding="utf-8")
-    return repo / skill_rel, wt / skill_rel
+    return _write_skill_skeleton(repo), _write_skill_skeleton(wt)
+
+
+def make_submodule_checkout(base: Path) -> tuple[Path, Path]:
+    """建「主仓 + 真实 git submodule 检出」，返回 (主仓技能源目录, submodule 技能源目录)。
+
+    submodule 根的 .git 为文件、gitdir 指向 <super>/.git/modules/<name>，属版本固定副本。
+    """
+    repo = base / "src-repo"
+    _seed_repo(repo)
+    super_repo = base / "super"
+    super_repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(super_repo)], check=True)
+    _git(super_repo, "submodule", "add", "-q", str(repo), "skills-src")
+    return _write_skill_skeleton(repo), _write_skill_skeleton(super_repo / "skills-src")
+
+
+def make_separate_git_dir_clone(base: Path) -> tuple[Path, Path]:
+    """建「主仓 + git clone --separate-git-dir 检出」，返回 (主仓, 检出) 技能源目录。
+
+    检出根的 .git 为文件、gitdir 指向外部 git 目录，属版本固定副本。
+    """
+    repo = base / "src-repo"
+    _seed_repo(repo)
+    clone = base / "sep-clone"
+    subprocess.run(
+        ["git", "-c", "protocol.file.allow=always", "clone", "-q",
+         "--separate-git-dir", str(base / "sep-gitdir"), str(repo), str(clone)],
+        check=True, capture_output=True,
+    )
+    return _write_skill_skeleton(repo), _write_skill_skeleton(clone)
 
 
 class ProjectFixture:

@@ -4,16 +4,18 @@
 巡检口径（decisions §3）：
 - registry 指 Herdr 运行时 agent 注册表（`herdr agent list`）；
 - 单 tab 最多 6 个 pane（含 root），超出告警（仅报告，人工决定迁出/关闭）；
-- 总舵 tab（标签含「总舵」）只允许 1 个 pane，多 pane 告警；空 tab 与无 registry 的
-  pane 也报告（均仅报告，不自动关）；
+- 总舵 tab（标签含「总舵」或配置 `helm.tabLabel`）只允许 1 个 pane，多 pane 告警；
+  空 tab 与无 registry 的 pane 也报告（均仅报告，不自动关）；
 - 有 pane 无 registry（agent list 无对应 pane）告警；孤儿 pane 无法区分人工终端与
   失联 agent，只报告不自动关；
 - 有 registry 无 pane（registry 指向不存在的 pane）告警；
-- 空 tab（无 pane）告警，--apply 时自动关闭（唯一安全自动动作）；
+- 空 tab（无 pane，非总舵）告警，--apply 时自动关闭（唯一安全自动动作）；
 - working 永不关闭；
-- 白名单默认：tab 标签前缀 `Captain·` / `流程优化·` 整体跳过；tab 标签含「总舵」只做
-  单 pane / 空 tab / 孤儿 pane 检查（均仅报告）；agent 名 `helm*`；另可用
-  `--whitelist-prefix` / `--helm-pane` 追加。
+- 白名单默认：tab 标签前缀 `Captain·` / `流程优化·` 整体跳过；总舵识别优先于这两个
+  前缀（标签同时命中时按总舵 tab 处理），helm tab 只做单 pane / 空 tab / 孤儿 pane
+  检查（均仅报告）；agent 名 `helm*`；另可用 `--whitelist-prefix` / `--helm-pane` 追加。
+- `--root`（默认 `.`）读取 `<root>/.planning/orchestration.json` 的 `helm.tabLabel`；
+  缺失/损坏/字段非法 fail-soft 回落默认「总舵」。
 
 数据源：默认 `herdr api snapshot`，失败退回 `tab list` + `pane list` + `agent list`；
 `--snapshot FILE` 注入 fixture JSON（测试/复算用，不调用 herdr）。
@@ -22,7 +24,7 @@
   python3 scripts/pane-audit.py                       # dry-run 只报告
   python3 scripts/pane-audit.py --apply               # 关闭白名单外的空 tab
   python3 scripts/pane-audit.py --snapshot snap.json  # fixture 数据源
-  python3 scripts/pane-audit.py --whitelist-prefix '实验·' --helm-pane wQ:p1
+  python3 scripts/pane-audit.py --root <项目> --whitelist-prefix '实验·' --helm-pane wQ:p1
 """
 
 from __future__ import annotations
@@ -162,13 +164,33 @@ def filter_workspace(items: list[dict], workspace: str | None) -> list[dict]:
 # 巡检
 # ---------------------------------------------------------------------------
 
-def is_whitelisted_tab(tab: dict, prefixes: tuple[str, ...]) -> bool:
+def is_whitelisted_tab(
+    tab: dict,
+    prefixes: tuple[str, ...],
+    helm_labels: tuple[str, ...] = (HELM_TAB_PREFIX,),
+) -> bool:
     label = str(tab.get("label") or "").strip()
-    return label.startswith(prefixes) or HELM_TAB_PREFIX in label
+    return label.startswith(prefixes) or is_helm_tab(tab, helm_labels)
 
 
-def is_helm_tab(tab: dict) -> bool:
-    return HELM_TAB_PREFIX in str(tab.get("label") or "").strip()
+def is_helm_tab(tab: dict, helm_labels: tuple[str, ...] = (HELM_TAB_PREFIX,)) -> bool:
+    label = str(tab.get("label") or "").strip()
+    return any(name in label for name in helm_labels)
+
+
+def load_helm_labels(root: str | Path = ".") -> tuple[str, ...]:
+    """读取 <root>/.planning/orchestration.json 的 helm.tabLabel；非法时回落「总舵」。"""
+    path = Path(root).expanduser() / ".planning/orchestration.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return (HELM_TAB_PREFIX,)
+    helm = data.get("helm") if isinstance(data, dict) else None
+    label = helm.get("tabLabel") if isinstance(helm, dict) else None
+    if not isinstance(label, str) or not label.strip():
+        return (HELM_TAB_PREFIX,)
+    label = label.strip()
+    return (HELM_TAB_PREFIX,) if label == HELM_TAB_PREFIX else (HELM_TAB_PREFIX, label)
 
 
 def is_helm_agent(agent: dict) -> bool:
@@ -185,6 +207,7 @@ def audit(
     snapshot: dict,
     whitelist_prefixes: tuple[str, ...] = DEFAULT_WHITELIST_PREFIXES,
     helm_panes: frozenset[str] = frozenset(),
+    helm_labels: tuple[str, ...] = (HELM_TAB_PREFIX,),
 ) -> list[Finding]:
     tabs = snapshot.get("tabs") or []
     panes = snapshot.get("panes") or []
@@ -207,7 +230,7 @@ def audit(
     for tab_id, tab in tab_by_id.items():
         label = _label(tab)
         child_panes = panes_by_tab.get(tab_id, [])
-        if is_helm_tab(tab):
+        if is_helm_tab(tab, helm_labels):
             if not child_panes:
                 findings.append(Finding(
                     "empty-tab", tab_id, label, "无 pane（总舵 tab 仅报告，不自动关）",
@@ -223,7 +246,7 @@ def audit(
                     f"{tab_id}`）；总舵换舵请另开新 tab",
                 ))
             continue
-        if is_whitelisted_tab(tab, whitelist_prefixes):
+        if is_whitelisted_tab(tab, whitelist_prefixes, helm_labels):
             continue
         if not child_panes:
             findings.append(Finding(
@@ -243,7 +266,8 @@ def audit(
             continue
         pane_id = str(pane_id)
         tab = tab_by_id.get(str(pane.get("tab_id")))
-        if tab and is_whitelisted_tab(tab, whitelist_prefixes) and not is_helm_tab(tab):
+        if tab and is_whitelisted_tab(tab, whitelist_prefixes, helm_labels) \
+                and not is_helm_tab(tab, helm_labels):
             continue
         if pane_id in helm_panes:
             continue
@@ -265,7 +289,7 @@ def audit(
         if is_helm_agent(agent):
             continue
         tab = tab_by_id.get(str(agent.get("tab_id") or ""))
-        if tab and is_whitelisted_tab(tab, whitelist_prefixes):
+        if tab and is_whitelisted_tab(tab, whitelist_prefixes, helm_labels):
             continue
         name = str(agent.get("name") or pane_id or "?")
         findings.append(Finding(
@@ -323,12 +347,13 @@ def build_parser() -> argparse.ArgumentParser:
     return argparse.ArgumentParser(
         description="工位/tab 巡检：默认 dry-run 只报告，--apply 才关闭安全项。",
         epilog=(
-            "巡检口径：单 tab ≤6 pane（含 root）；总舵 tab 只允许 1 个 pane（多 pane 仅报告），"
-            "空 tab / 孤儿 pane 也仅报告；pane 无 registry / registry 无 pane / 空 tab 告警；"
-            "working 永不关闭。\n"
-            "白名单默认：tab 标签前缀 Captain· / 流程优化· 整体跳过；tab 标签含「总舵」只做单 pane/"
-            "空 tab/孤儿 pane 检查（均仅报告）；agent 名 helm*；可用 --whitelist-prefix / --helm-pane 追加。\n"
-            "安全自动动作仅「关闭空 tab」，其余告警给出手动下一步。\n"
+            "巡检口径：单 tab ≤6 pane（含 root）；总舵 tab（标签含「总舵」或配置 helm.tabLabel）"
+            "只允许 1 个 pane（多 pane 仅报告），空 tab / 孤儿 pane 也仅报告；"
+            "pane 无 registry / registry 无 pane / 空 tab 告警；working 永不关闭。\n"
+            "白名单默认：tab 标签前缀 Captain· / 流程优化· 整体跳过；总舵识别优先于这两个前缀"
+            "（标签同时命中时按总舵 tab 处理），helm tab 只做单 pane/空 tab/孤儿 pane 检查"
+            "（均仅报告）；agent 名 helm*；可用 --whitelist-prefix / --helm-pane 追加。\n"
+            "安全自动动作仅「关闭非总舵空 tab」，其余告警给出手动下一步。\n"
             "示例：python3 scripts/pane-audit.py --snapshot snapshot.json\n"
             "      python3 scripts/pane-audit.py --apply"
         ),
@@ -337,6 +362,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.add_argument(
+        "--root",
+        default=".",
+        help="项目根（读取 .planning/orchestration.json 的 helm.tabLabel；默认 cwd）",
+    )
     parser.add_argument(
         "--snapshot",
         help="fixture JSON 数据源（不调用 herdr；接受 {tabs,panes,agents} 或 herdr result 包装）",
@@ -357,7 +387,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--helm-pane",
         action="append",
         default=[],
-        help="总舵本 pane_id（可重复；默认按 agent 名 helm* 或 tab 标签「总舵」识别）",
+        help="总舵本 pane_id（可重复；默认按 agent 名 helm* 或 tab 标签含「总舵」/配置 helm.tabLabel 识别）",
     )
     return parser
 
@@ -374,7 +404,8 @@ def main(argv: list[str] | None = None) -> int:
         snapshot[key] = filter_workspace(snapshot[key], args.workspace)
 
     prefixes = tuple(DEFAULT_WHITELIST_PREFIXES) + tuple(args.whitelist_prefix)
-    findings = audit(snapshot, prefixes, frozenset(args.helm_pane))
+    helm_labels = load_helm_labels(args.root)
+    findings = audit(snapshot, prefixes, frozenset(args.helm_pane), helm_labels)
     if not findings:
         print(
             f"pane 巡检通过：{len(snapshot['tabs'])} 个 tab / {len(snapshot['panes'])} 个 pane / "

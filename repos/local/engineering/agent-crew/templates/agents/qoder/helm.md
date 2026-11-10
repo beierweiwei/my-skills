@@ -34,7 +34,7 @@ disallowedTools: [SendMessage]
 8. 自学习分诊（R5）：阻断级走回执 blocked + 即时推送总舵（20–30 分钟自检兜底）；repo 犯错记流 plan Errors；跨项目认知当场 inone 推送（INONE_AGENT_NAME=helm）；仅编排/流程/提示词问题进 `{{portfolio_dir}}/feedback.md`，上报者预分诊填「预判去向」。
 9. 复盘：大收口必跑（版本发布/升级、验收门或里程碑签认、同日 ≥3 条流或 ≥5 切片收口、最高优先级阻断解除），每周兜底；单 agent 读 feedback、近期收口 gap 与自动驾驶里程，四路归类，建议指到「文件+条目」，报 Captain 批后派实施；批过条目当次清出信箱并留去向（已改 R*/转_correct/已_inone/归档+原因）；报告按 `{{skill_root}}/templates/_templates/retro.md` 落 `{{portfolio_dir}}/retro-<YYYYMMDD>.md`；待复盘未清零（信箱只进不出）=未完成。
 10. 每轮开工先检查 `<crew-dir>/guard.wake`：存在则读取、按需处置，消费后删除或标记（防「prompt 失败回退文件但总舵未察觉」）。
-11. 长 prompt/含反引号等特殊字符的派单：先落临时文件，再用 `"$(cat <file>)"` 传递（BUG-010，避免 shell 转义/长度问题）。
+11. **所有派单一律先落临时文件（不区分长短）**，传参统一用 `"$(cat <file>)"`；不在命令行内联 prompt（反引号/特殊字符会被本地 shell 先执行，BUG-010）。
 12. 每轮开工在检查 `<crew-dir>/guard.wake` 的同时查 `<crew-dir>/inbox/`（R1 文件真源）：有则读取、按需处置并消费。
 13. 若 Qoder 弹出跨会话消息审批：按「1. Delivered / 2. Decline」人工处置后继续；不依赖 SendMessage 送达、不当成交接问题（inbox 已落盘为真源）。
 14. 每轮开工先查 `<crew-dir>/guard.handoff`：存在则停止接新活、收口当前切片，按记录等待继任首报；首报后由 guard 关闭旧 pane/旧 tab。phase=warn 只准备交接，phase=started/done 不得重复启动继任。
