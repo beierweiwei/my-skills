@@ -397,6 +397,34 @@ def atomic_write_text(path: Path, text: str) -> None:
         raise
 
 
+def read_handoff_state(crew_dir: Path) -> dict[str, str]:
+    try:
+        text = (crew_dir / "guard.handoff").read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    fields: dict[str, str] = {}
+    for line in text.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key:
+            fields[key] = value.strip()
+    return fields if fields.get("phase") else {}
+
+
+def resolve_guard_helm(root: Path, crew_dir: Path, explicit: str | None) -> str:
+    """交接后重启 guard 时优先沿用 handoff 记录的继任名（显式 --helm 不覆盖）。"""
+    current = resolve_helm_name(root, explicit)
+    if explicit:
+        return current
+    state = read_handoff_state(crew_dir)
+    if (state.get("phase") in ("started", "done")
+            and state.get("old") == current and state.get("new")):
+        return state["new"]
+    return current
+
+
 @dataclass
 class Guard:
     root: Path
@@ -430,20 +458,7 @@ class Guard:
             pass
 
     def _read_handoff(self) -> dict[str, str]:
-        path = self.crew_dir / "guard.handoff"
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
-            return {}
-        fields: dict[str, str] = {}
-        for line in text.splitlines():
-            if "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            key = key.strip()
-            if key:
-                fields[key] = value.strip()
-        return fields if fields.get("phase") else {}
+        return read_handoff_state(self.crew_dir)
 
     def _write_handoff(self, **updates: object) -> None:
         fields = self._read_handoff()
@@ -922,7 +937,7 @@ def main(argv: list[str] | None = None) -> int:
     guard = Guard(
         root=root,
         crew_dir=crew_dir,
-        helm=resolve_helm_name(root, args.helm),
+        helm=resolve_guard_helm(root, crew_dir, args.helm),
         interval=args.interval,
         list_agents=herdr_agents,
         prompt=herdr_prompt,

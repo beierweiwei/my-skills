@@ -772,6 +772,26 @@ class HandoffTest(GuardTestBase):
         self.assertEqual(1, len(starts))
         self.assertEqual("helm-1-4", starts[0][starts[0].index("--name") + 1])
 
+    def test_restart_resolver_uses_handoff_successor(self):
+        self.write_fixture(
+            stream=EMPTY_STREAM,
+            portfolio=EMPTY_PORTFOLIO,
+            config={
+                "portfolioDir": ".planning/portfolio",
+                "helm": {"agentName": "helm-1"},
+            },
+        )
+        self.crew.mkdir(parents=True, exist_ok=True)
+        (self.crew / "guard.handoff").write_text(
+            "phase=done\nold=helm-1\nnew=helm-1-2\n", encoding="utf-8",
+        )
+        self.assertEqual(
+            "helm-1-2", cg.resolve_guard_helm(self.root, self.crew, None)
+        )
+        self.assertEqual(
+            "helm-explicit", cg.resolve_guard_helm(self.root, self.crew, "helm-explicit")
+        )
+
     def test_successor_start_reuses_registered_helm_runtime(self):
         self.prepare_handoff(ctx_k=650)
         self.crew.mkdir(parents=True, exist_ok=True)

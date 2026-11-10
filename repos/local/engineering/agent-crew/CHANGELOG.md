@@ -4,7 +4,7 @@
 
 ### 新增
 
-- `crew-guard.py` 自动交接：每轮用 `herdr pane read <pane> --lines 80` 读取总舵 `ctx Nk/1M`；按 config `helm.ctxWarn`（默认 0.30）/`helm.ctxHandoff`（默认 0.60）写 `<crew-dir>/guard.handoff`（phase=warn/started/done，含旧名/新名/pane/时间/原因）并通知。≥交接阈值一次性执行 split 新 pane → `dispatch.py start --role helm --name <继任名>`（`-2` 起、冲突递增）→ prompt 继任首报 → 首报后旧舵 idle/无响应则 close 旧 pane；任一失败只通知+记录（phase=done, result=failed），不循环、不杀旧舵；ctx 解析失败只记日志，正常叫醒（B/C/D/快速叫醒）不受影响。
+- `crew-guard.py` 自动交接：每轮用 `herdr pane read <pane> --lines 80` 读取总舵 `ctx Nk/1M`；按 config `helm.ctxWarn`（默认 0.30）/`helm.ctxHandoff`（默认 0.60）写 `<crew-dir>/guard.handoff`（phase=warn/started/done，含旧名/新名/pane/时间/原因）并通知。≥交接阈值一次性执行 split 新 pane → `dispatch.py start --role helm --name <继任名>`（`-2` 起、冲突递增；有注册表 runtime 时透传 `--runtime`）→ prompt 继任首报 → 首报后旧舵 idle/无响应则 close 旧 pane；任一失败只通知+记录（phase=done, result=failed），不循环、不杀旧舵；ctx 解析失败只记日志，正常叫醒（B/C/D/快速叫醒）不受影响。guard 重启时若 handoff 的 old 与配置 helm 名一致，优先按 new 继任名恢复监控。
 - `dispatch.py start` 新增 `--name` 显式 Herdr/dispatch 实例名：沿用 `INSTANCE_NAME_RE` 校验与已存在拒绝；不传时保持原派生行为（helm 用 `helm.agentName`，其余按 projectId/role/instance 派生）。
 - helm 模板（Qoder/opencode）补 `guard.handoff` 检查与自动交接步骤（30%/60%、`--name`、首报后关旧 pane），并写明多流建副舵：活跃流/并行切片 ≥2 时为每流建 `<流>-firstmate`（tab「副舵·<流>」），总舵只派副舵、不直接派 worker。
 
