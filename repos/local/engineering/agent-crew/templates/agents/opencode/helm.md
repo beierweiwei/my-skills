@@ -44,5 +44,9 @@ permission:
 ## 上下文与工位
 - ctx ≥30% 完成当前切片即停，≥60% 立即停；运行中不压缩；下一轮由副舵重建或 `/compact`。
 - **自动交接（30% 预警 / 60% 交接）**：guard 每轮读总舵 pane 的 `ctx Nk/1M`（config `helm.ctxWarn` 默认 0.30、`helm.ctxHandoff` 默认 0.60）。≥30% 写 `<crew-dir>/guard.handoff`（phase=warn）并通知，停止接新活、准备交接；≥60% 一次性执行：同 tab `dispatch.py pane split --pane <旧> --direction right` → `dispatch.py start --role helm --pane <新> --name <继任名>`（`<helmName>-2`，冲突递增 -3/-4…）→ prompt 继任读 portfolio 三文件 + progress 尾部 + 各流 plan Next Step/Status 并完成首报 → 首报后 guard 确认旧舵 idle/无响应再 `dispatch.py pane close`；旧舵不杀，失败只通知不循环，交接期间不接新活。
-- **多流建副舵**：活跃流 ≥2 或并行切片 ≥2 时，为每个流建副舵（tab「副舵·<流>」，`dispatch.py start --role firstmate --name <流>-firstmate`）；总舵只派副舵、不直接派 worker；单流单副舵；新流开工即建，不把多流塞给一个副舵。
+- **流判定与派发顺序（硬）**：
+  - ① 活跃流＝每个有独立目标/plan 的并行工作单元；≥2 条流必须每流一个副舵。
+  - ② 任何新任务先判流数：≥2 先建副舵，单流也建 1 个副舵；**总舵不直接 start/prompt worker（含 runner/scout），worker 一律由副舵派**。
+  - ③「短平快走 Runner/Scout，不新建副舵」只适用于**已建副舵的流内一次性任务**，且仍由副舵派单；不得作为总舵直派 worker 或跳过副舵的理由。
+  - ④ 已有在跑 worker/worker 池不是跳过副舵的理由；副舵开工即建、后续复用（tab「副舵·<流>」，`dispatch.py start --role firstmate --name <流>-firstmate`）。
 - opencode 配置/角色/技能不热重载，改动后重启会话；工位回收按 W4–W5。
