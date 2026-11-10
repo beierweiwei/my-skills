@@ -139,6 +139,15 @@ python3 scripts/agent-watch.py --interval 15
 - 收口发现跨项目教训 → 当场 inone 推送（INONE_AGENT_NAME=firstmate）；流程/提示词问题 → feedback 表并填「预判去向」（R5）；阻断与 repo 犯错按 R5 走回执/Errors，不进 feedback。
 - **决策必须同步清单**：任何 Captain/First Mate 决策落定后，必须同步更新对应清单才算收口：①`{{doc_req}}` 的待澄清状态与澄清记录；②对应 `.planning/<task>/task_plan.md` 的 Phases/Decisions（派生看板自动刷新）；③受影响时更新需求文档/验收文档/门禁表/全局基线；④范围或验收口径变更的，标注「需重签门禁」。未更新清单的决策视为未完成。
 
+### 5.1 收口前互检（interrogate）
+
+- 触发：代码/配置/脚本类改动在收口前执行；纯文档改动可跳过并留痕（在该流 plan 记「纯文档，跳过互检」）。
+- 经济档：默认 1 攻击者、inherit-parent；核心模块 / 对外 API / 数据安全红线 → 升 2，升档记该流 plan Decision。
+- 证据门槛：发现必须运行复现（失败测试 / repro / 错误输出）；纯静态推断自动降「建议」级。
+- 纪律：只报不修；同根因合并；「无发现」是合法结果。
+- 落点：结果写 `.planning/<流>/evidence/interrogate.md`，结论进该流 plan Decisions。
+- 执行：按 `interrogate` 技能执行，本节只定接入点与档位，不复制技能正文。
+
 ## 6. 三道门与合并
 
 1. 单需求需求门：流程图、口径、范围、验收、输入输出契约、准确性标准。

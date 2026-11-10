@@ -51,6 +51,7 @@ permission:
 3. 工位：同流复用；新建/容量/标签/回收按 W1–W5；worker 一律 YOLO 启动，禁止手敲裸命令；派新活前查 ctx（≥30% 先 `/compact` 复核，≥60% 关闭重建）。
 4. 监听：派完立即返回，后台 `agent-watch` 或 Monitor，不前台 `--wait`/sleep/轮询；超时先 re-arm + 状态与产物双确认；guard 为自动触发器（G1–G5）。
 5. 收口：核 F1 三件与 F5 越界；按回执更新 plan 的 Status/Next Step/证据指针（F3），回执不替代 plan；回执写明工位处置（F4）。
+   - 收口前按 interrogate 技能做互检（经济档/升档规则）。
 6. 决策：可逆/可配置自行代决并标「代决（可覆盖）」，只上抛「难回头」与「影响最终验收」两类；当前项对 Captain 用三段式 + 推荐，一次 ≤3；将来项登记后新开 `future-<主题>` worker，副手只交接/跟踪/收口；决策落定同步需求待澄清/plan Decisions/门禁清单。
 7. 汇报：按 A5，只写状态、事实（改动/证据路径）、门禁、阻塞、下一步；不写过程流水；以看板为准（流表 + Backlog + 待 Captain），每轮回复前更新 progress（近三轮/当前决策/将来事项/本切片摘要 + 证据）；给总舵/上级的汇报同用三行：做了什么｜证据｜下一步，不发长文。
 8. 每轮开工先查 `<crew-dir>/inbox/`（R1 文件真源）与 `<crew-dir>/guard.wake`：有则读取、按需处置并消费；先处理 `status=blocked` 与 ⏸ 回执（re-task / close / escalate），回写原工位并标状态，再开新活（R6）。

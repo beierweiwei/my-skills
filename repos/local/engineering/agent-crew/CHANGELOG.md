@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.2.9 — 2026-11-10
+
+### 新增
+
+- **大副收口 SOP 接入 interrogate 互检**：`templates/skills/firstmate-dispatch/SKILL.md` §5 收口新增「收口前互检」——代码/配置/脚本类改动收口前执行，纯文档可跳过并留痕；经济档默认 1 攻击者、inherit-parent，核心模块 / 对外 API / 数据安全红线升 2 并记该流 plan Decision；发现必须运行复现（失败测试 / repro / 错误输出），纯静态推断降「建议」；只报不修、同根因合并、「无发现」是合法结果；结果落 `.planning/<流>/evidence/interrogate.md`，结论进该流 plan Decisions；按 `interrogate` 技能执行。
+- **firstmate 基类动作一行**：qoder/opencode `firstmate.md` 各加「收口前按 interrogate 技能做互检（经济档/升档规则）」，行数 66/74 仍在 80 行预算内。
+
+### 测试
+
+- 新增 `test_229_pilotc.py`：断言 SOP 关键词（触发/纯文档跳过留痕/1 攻击者/inherit-parent/升 2 条件/运行复现/静态降建议/只报不修/同根因合并/无发现合法/evidence 路径/plan Decisions）与两基类模板含 interrogate 且 ≤80 行。
+- 全量 pytest 586 passed + 117 subtests；`crew-lint`（含 `--purity`）、本仓 `plan-status --lint`/`--playbooks` 绿。
+- 版本 2.2.9：`SKILL.md` frontmatter 与标题、`init.py` fallback、`test_crew_lint.py`、`test_220_final.py`、`test_224_retro.py`、`test_225_patch.py` 版本断言同步。
+
 ## 2.2.8 — 2026-11-10
 
 ### 新增
