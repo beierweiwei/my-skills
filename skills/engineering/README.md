@@ -9,6 +9,9 @@
 - **[experience-kb-init](./experience-kb-init/SKILL.md)**：初始化/补齐项目经验知识库（`docs/经验/`），并接线 AGENTS.md。
 - **[project-init](./project-init/SKILL.md)**：初始化项目/客户交付仓（目录、核心文档、项目 AGENTS.md、数据安全），可选接入经验知识库。
 - **[agent-crew](./agent-crew/SKILL.md)**：herdr 多 agent 编排/计划看板/角色工位一键装入项目。
+- **[create-verification-skill](./create-verification-skill/SKILL.md)**：为 repo 生成 feature map + 六段式验证技能（Launch/Doctor/Drive/Evidence/Cleanup/Helpers），生成后自跑通一个 feature 才交付（pstack MIT fork）。
+- **[maintain-verification-skill](./maintain-verification-skill/SKILL.md)**：周期审计验证技能与 feature map，防漂移（pstack MIT fork）。
+- **[interrogate](./interrogate/SKILL.md)**：多 adversary 子代理攻击 diff，只报经运行证实的问题、不修复（pstack MIT fork）。
 
 ## 上游（junction）
 
