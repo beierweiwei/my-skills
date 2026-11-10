@@ -892,6 +892,27 @@ class HandoffTest(GuardTestBase):
             self.root, ["--rotate", "--apply", "--keep", "10"])
         self.assertEqual("started", self.handoff_fields()["phase"])
 
+    def test_handoff_prompt_uses_handover_read_set(self):
+        self.prepare_handoff(ctx_k=650)
+        self.make_guard().run_once()
+        prompts = [c for c in self.dispatch_calls if c[:1] == ["prompt"]]
+        self.assertEqual(1, len(prompts))
+        message = prompts[0][-1]
+        for token in ("--handover", "feedback.md", "Next Step/Status",
+                      "guard.handoff", "禁整读", "20KB", "首报"):
+            self.assertIn(token, message)
+        self.assertNotIn("先读", message)
+        self.assertNotIn("findings.md", message)
+        self.assertNotIn("含 progress 尾部", message)
+
+    def test_rotate_noop_logs_zero_write(self):
+        self.prepare_handoff(ctx_k=650)
+        self.rotate_result = (0, "progress 条目数 ≤ keep 10，无需轮转（零写入）。")
+        self.make_guard().run_once()
+        self.assertTrue(
+            any("无需轮转（零写入）" in log for log in self.logs), self.logs)
+        self.assertFalse(any("已归档" in log for log in self.logs), self.logs)
+
     def test_rotate_once_across_two_rounds(self):
         self.prepare_handoff(ctx_k=650)
         guard = self.make_guard()
@@ -1416,6 +1437,21 @@ class RetroDueTest(GuardTestBase):
         message = self.prompt_calls[0][1]
         self.assertIn("guard 叫醒：有待办", message)
         self.assertNotIn("周复盘到期", message)
+
+
+class PeriodicWriteWarningTest(GuardTestBase):
+    """A-F3：周期 --write 成功但含 rotate 建议时写 guard.log 告警。"""
+
+    def test_rotate_hint_logged_without_changing_flow(self):
+        self.write_fixture()
+        self.status_result = (
+            0, "[警告] portfolio progress 体量偏大（100 条 ≥ 100），"
+               "建议交接时 --rotate --apply --keep 10 归档。")
+        result = self.make_guard().run_once()
+        self.assertTrue(any("体量告警" in log and "建议交接时 --rotate" in log
+                            for log in self.logs), self.logs)
+        self.assertEqual(["--write"], self.status_calls)
+        self.assertIn("woke", result)
 
 
 class PlanStatusArgsTest(GuardTestBase):

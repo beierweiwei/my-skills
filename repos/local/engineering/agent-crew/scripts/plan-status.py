@@ -67,6 +67,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -458,10 +459,12 @@ def _progress_path(root: Path, cfg: dict) -> Path:
     return root / str(cfg.get("portfolioDir") or ".planning/portfolio") / PROGRESS_NAME
 
 
-def _entry_blocks(lines: list[str]) -> tuple[list[tuple[int, int]], bool]:
+def _entry_blocks(lines: list[str], *, fallback_stops_at_heading: bool = False
+                  ) -> tuple[list[tuple[int, int]], bool]:
     """条目块行下标区间 [(start, end)) 与 fallback 标记：`- YYYY-MM-DD` 行首起 +
     后随缩进续行；仅 `## 自动驾驶里程` 节内计入，遇下一个 `## ` 标题停止；
-    无该节时全文件按日期前缀兜底（fallback=True）。"""
+    无该节时全文件按日期前缀兜底（fallback=True）；fallback_stops_at_heading=True 时
+    兜底模式遇 `## ` 标题即停止计条目（摘要/告警计数用，防 digest 日期行混入）。"""
     has_section = any(line.strip().startswith("## ") and PROGRESS_SECTION in line
                       for line in lines)
     blocks, i = [], 0
@@ -471,6 +474,8 @@ def _entry_blocks(lines: list[str]) -> tuple[list[tuple[int, int]], bool]:
         if stripped.startswith("## "):
             if has_section:
                 in_section = PROGRESS_SECTION in stripped
+            elif fallback_stops_at_heading:
+                break
             i += 1
             continue
         if in_section and PROGRESS_ENTRY_RE.match(lines[i]):
@@ -513,7 +518,7 @@ def _recent_progress(path: Path, count: int = HANDOVER_RECENT) -> list[str]:
             lines = path.read_text(encoding="utf-8").splitlines()
         else:
             lines = _read_tail(path, window).splitlines()
-        blocks, _fallback = _entry_blocks(lines)
+        blocks, _fallback = _entry_blocks(lines, fallback_stops_at_heading=True)
         if len(blocks) >= count:
             break
     picked = blocks[-count:] if count > 0 else []
@@ -595,14 +600,22 @@ def handover(root: Path, cfg: dict, plans: list[Plan]) -> int:
     return 0
 
 
-def _atomic_write(path: Path, text: str) -> None:
-    """同目录临时文件 + fsync + os.replace 原子替换；失败清理临时文件后原样抛出。"""
+def _atomic_write(path: Path, text: str, mode: int | None = None) -> None:
+    """同目录临时文件 + fsync + os.replace 原子替换；失败清理临时文件后原样抛出。
+    mode 缺省沿用目标现有权限（新建归档由调用方显式传源 progress 的 mode）。"""
+    if mode is None:
+        try:
+            mode = stat.S_IMODE(path.stat().st_mode)
+        except OSError:
+            mode = None
     tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
     try:
         with open(tmp, "w", encoding="utf-8", newline="") as fh:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
+        if mode is not None:
+            os.chmod(tmp, mode)
         os.replace(tmp, path)
     except OSError:
         try:
@@ -643,44 +656,35 @@ def _rotate_plan(root: Path, cfg: dict, keep: int) -> dict | None:
     before_lines, before_bytes = len(source.splitlines()), len(source.encode("utf-8"))
     after_lines, after_bytes = len(new_live.splitlines()), len(new_live.encode("utf-8"))
     body = "\n\n".join("".join(raw_lines[s:e]).rstrip("\r\n") for s, e in removed)
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    boundary = f"移出源文件第 {removed[0][0] + 1}–{removed[-1][1]} 行"
     role = os.environ.get("CREW_ROLE") or "unknown"
     archive_text = (
         f"# progress 归档（{date[:4]}-{date[4:6]}-{date[6:]}）\n\n"
         f"> 来源：`{path.relative_to(root).as_posix()}`\n"
         f"> 归档日期：{datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
-        f"> 截止边界：移出源文件第 {removed[0][0] + 1}–{removed[-1][1]} 行，"
+        f"> 截止边界：{boundary}，"
         f"共 {len(removed)} 条（{_entry_date(removed[0])} → {_entry_date(removed[-1])}）；"
         f"保留最近 {keep} 条\n"
         f"> 行数：{before_lines} → {after_lines}；字节：{before_bytes} → {after_bytes}\n"
-        f"> 源文件归档前 sha256：{hashlib.sha256(source.encode('utf-8')).hexdigest()}\n"
+        f"> 源文件归档前 sha256：{digest}\n"
         f"> 操作角色：{role}\n\n"
     ) + body + "\n"
     return {
-        "path": path, "total": total, "keep": keep, "fallback": fallback,
+        "path": path, "rel": path.relative_to(root).as_posix(),
+        "total": total, "keep": keep, "fallback": fallback,
         "removed": len(removed), "kept_start": kept[0][0] + 1,
         "before_lines": before_lines, "before_bytes": before_bytes,
         "after_lines": after_lines, "after_bytes": after_bytes,
         "archive_path": archive_path, "archive_rel": archive_rel,
         "archive_text": archive_text, "new_live": new_live,
+        "digest": digest, "boundary": boundary,
+        "mode": stat.S_IMODE(path.stat().st_mode),
     }
 
 
-def rotate(root: Path, cfg: dict, keep: int, apply: bool) -> int:
-    """progress 轮转：默认 dry-run 零写入；--apply 走 flock + 原子替换落盘。"""
-    if keep < 1:
-        print(f"--keep 必须 ≥1（收到 {keep}），不做任何写入。", file=sys.stderr)
-        return 1
-    path = _progress_path(root, cfg)
-    if not path.is_file():
-        print(f"progress 不存在：{path}", file=sys.stderr)
-        return 1
-    plan = _rotate_plan(root, cfg, keep)
-    if plan is None:
-        print(f"progress 条目数 ≤ keep {keep}，无需轮转（零写入）。")
-        return 0
-
-    rel = path.relative_to(root).as_posix()
-    print(f"[rotate] progress：{rel}")
+def _print_rotate_plan(plan: dict) -> None:
+    print(f"[rotate] progress：{plan['rel']}")
     print(f"  条目：{plan['total']} → 保留 {plan['keep']}，移出 {plan['removed']}")
     print(f"  行数：{plan['before_lines']} → {plan['after_lines']}；"
           f"字节：{plan['before_bytes']} → {plan['after_bytes']}")
@@ -688,7 +692,24 @@ def rotate(root: Path, cfg: dict, keep: int, apply: bool) -> int:
     print(f"  归档：{plan['archive_rel']}（{plan['removed']} 条）")
     if plan["fallback"]:
         print(f"  提示：未找到 `## {PROGRESS_SECTION}` 节，已按行首 `- YYYY-MM-DD` 兜底计条目。")
+
+
+def rotate(root: Path, cfg: dict, keep: int, apply: bool) -> int:
+    """progress 轮转：默认 dry-run 零写入；--apply 走 flock + 原子替换落盘。
+    apply 先取锁再计算轮转计划，避免「读旧 → 等锁 → 按旧计划写」竞态。"""
+    if keep < 1:
+        print(f"--keep 必须 ≥1（收到 {keep}），不做任何写入。", file=sys.stderr)
+        return 1
+    path = _progress_path(root, cfg)
+    if not path.is_file():
+        print(f"progress 不存在：{path}", file=sys.stderr)
+        return 1
     if not apply:
+        plan = _rotate_plan(root, cfg, keep)
+        if plan is None:
+            print(f"progress 条目数 ≤ keep {keep}，无需轮转（零写入）。")
+            return 0
+        _print_rotate_plan(plan)
         print("  提示：dry-run 未写入；--apply 才落盘（flock + 临时文件 + os.replace）。")
         return 0
 
@@ -705,22 +726,33 @@ def rotate(root: Path, cfg: dict, keep: int, apply: bool) -> int:
             print(f"[rotate] 已有 rotate 在运行（锁 {ROTATE_LOCK_REL} 被占用），本次零写入。",
                   file=sys.stderr)
             return 2
+        plan = _rotate_plan(root, cfg, keep)
+        if plan is None:
+            print(f"progress 条目数 ≤ keep {keep}，无需轮转（零写入）。")
+            return 0
+        _print_rotate_plan(plan)
         try:
             archive_path = plan["archive_path"]
             archive_path.parent.mkdir(parents=True, exist_ok=True)
             archive_text = plan["archive_text"]
             if archive_path.exists():
-                # 同日再次轮转：追加新段，绝不覆盖既有归档（只归档、不删除）
-                archive_text = (archive_path.read_text(encoding="utf-8").rstrip("\n")
-                                + "\n\n---\n\n" + archive_text)
-            _atomic_write(archive_path, archive_text)
+                prior = archive_path.read_text(encoding="utf-8")
+                already = (f"源文件归档前 sha256：{plan['digest']}" in prior
+                           and f"截止边界：{plan['boundary']}，" in prior)
+                if already:
+                    archive_text = None  # 同一批重试：归档已落，不重复追加
+                else:
+                    # 同日另一次轮转：追加新段，绝不覆盖既有归档（只归档、不删除）
+                    archive_text = prior.rstrip("\n") + "\n\n---\n\n" + archive_text
+            if archive_text is not None:
+                _atomic_write(archive_path, archive_text, mode=plan["mode"])
             _atomic_write(plan["path"], plan["new_live"])
         except OSError as exc:
             print(f"[rotate] 写入失败（live progress 保持不变）：{exc}", file=sys.stderr)
             return 1
     finally:
         lock_fd.close()
-    print(f"  已写入：{rel} + {plan['archive_rel']}（原始条目全部保留在归档）。")
+    print(f"  已写入：{plan['rel']} + {plan['archive_rel']}（原始条目全部保留在归档）。")
     return 0
 
 
@@ -733,7 +765,9 @@ def progress_size_warning(root: Path, cfg: dict) -> str | None:
         data = path.read_bytes()
     except OSError:
         return None
-    entries = len(_entry_blocks(data.decode("utf-8", errors="replace").splitlines())[0])
+    entries = len(_entry_blocks(
+        data.decode("utf-8", errors="replace").splitlines(),
+        fallback_stops_at_heading=True)[0])
     reasons = []
     if len(data) >= PROGRESS_WARN_BYTES:
         reasons.append(f"{len(data)} 字节 ≥ {PROGRESS_WARN_BYTES}")
@@ -1186,6 +1220,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    if args.apply and not args.rotate:
+        print("--apply 只能与 --rotate 一起使用（progress 轮转落盘）。", file=sys.stderr)
+        return 1
     root = resolve_root(args.root)
     if args.playbooks:
         target = Path(args.playbooks).expanduser()

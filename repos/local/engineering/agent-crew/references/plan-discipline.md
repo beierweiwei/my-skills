@@ -118,7 +118,7 @@
 | 归属 | 一 plan 一 owner：portfolio 由总舵归档，各流由对应 owner 归档；Runner 只做只读 `--report` |
 | 命令 | `python3 scripts/plan-status.py --rotate`（默认 dry-run，预览归档范围与 before/after）→ 确认后 `--rotate --apply --keep 10`；保留最近 10 条 + 尾部非条目区块，其余写归档 |
 | 静默校验 | 仅 owner 执行；apply 前后总量守恒（live 保留段 + 归档、行数与字节）；`flock .planning/.plan-rotate.lock`；活动 worker 检测（herdr 可用则查，否则显式确认）；mtime 仅提示 |
-| 落点 | `.planning/_archive/progress-<YYYYMMDD>.md`（入库）；一 task 一次运行一个归档文件 |
+| 落点 | `.planning/_archive/progress-<YYYYMMDD>.md`（入库）；一 task 一次运行一个归档文件；同日多次 rotate 在同一 `<YYYYMMDD>` 文件内以 `---` 追加分段，不覆盖 |
 | 备份 | 先写归档文件并 fsync，再「临时文件 + 原子 rename」重写 live；归档失败即中止；**禁止无备份删除** |
 | 对账 | 条目数/行数/字节守恒（归档 + live 前后相等）、`plan-status --selftest` 绿、看板 diff 仅归档行减少 |
 | 归档头 | 来源路径、归档日期、截止边界、before/after 行数与字节、**源文件归档前 sha256**、操作角色 |

@@ -10,11 +10,15 @@
 - **D 交接规则瘦身**：qoder/opencode helm 模板新增「交接读取范围（硬）」（看板 + `--handover` 摘要 + 活跃流 Next Step/Status grep + feedback 待复盘 grep + `guard.handoff`；禁整读 progress/task_plan/feedback/历史流 plan/共识，单文件 >20KB 不整读）；`plan-discipline` §5.1–5.2 改为交接流程内 `--rotate` 归档，阈值 progress ≥40KB 或条目 ≥100，替换未内置的 `plan-archive.py` 口径；`firstmate-dispatch` 恢复/交接顺序同步。
 - **`--write` 体量告警**：portfolio progress ≥40960 字节或 ≥100 条时 stderr 提示「建议交接时 --rotate」，stdout/看板不变。
 
+### 修复
+
+- interrogate A/B 复核收口：`--handover` 尾窗兜底遇 `## ` 标题停止计条目（digest 日期行不再冒充 progress，告警计数同口径）；guard 继任 prompt 改为「交接读取范围（硬）」不再要求整读三文件；rotate 空转记「无需轮转（零写入）」、`--write` 的 rotate 建议进 guard.log、`--apply` 缺 `--rotate` rc=1、`_atomic_write` 保留目标权限、apply 先取 flock 再算计划、归档重试按「sha256+截止边界」去重不重复追加；`plan-discipline` §5.2 补同日分段说明。
+
 ### 测试
 
-- 新增 `test_plan_status_handover_rotate.py`（25 例）：摘要行数与分块、只读尾部、空仓降级、超量截断；rotate dry-run 零写入、归档头、指针、守恒、幂等、锁冲突 rc=2、rename 失败 live 不变且清理 temp、fsync、digest `- ` 行不计条目、无节兜底、超长尾条目扩窗。
-- `test_crew_guard.py` 新增 9 例：rotate 先于 tab create、成功日志、失败/异常继续交接、两轮只 rotate 一次、warn 轮不 rotate、生产 argv 分元素传递。
-- 全量 pytest 539 passed + 99 subtests；`crew-lint`/`plan-status --lint`/`--playbooks` 绿。
+- 新增 `test_plan_status_handover_rotate.py`（29 例）：摘要行数与分块、只读尾部、空仓降级、超量截断、digest 日期行不冒充 progress；rotate dry-run 零写入、归档头、指针、守恒、幂等、锁冲突 rc=2、rename 失败 live 不变且清理 temp、fsync、权限保留、重试去重、digest `- ` 行不计条目、无节兜底、超长尾条目扩窗、`--apply` 缺 `--rotate` 拒绝。
+- `test_crew_guard.py` 新增 12 例：rotate 先于 tab create、成功日志、失败/异常继续交接、两轮只 rotate 一次、warn 轮不 rotate、空转记「无需轮转」、生产 argv 分元素传递、继任 prompt 新读取集、`--write` 体量告警入 log。
+- 全量 pytest 546 passed + 99 subtests；`crew-lint`/`plan-status --lint`/`--playbooks` 绿。
 - 版本 2.2.7：`SKILL.md` frontmatter 与标题、`init.py` fallback、`test_crew_lint.py`、`test_220_final.py`、`test_224_retro.py`、`test_225_patch.py` 版本断言同步。
 
 ## 2.2.6 — 2026-11-10
