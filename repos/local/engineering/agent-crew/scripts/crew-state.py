@@ -14,7 +14,7 @@
 
 工件约定（均在 <git-common-dir>/crew/，由 crew_paths.crew_dir 解析）：
   tickets/<id>.json   工单：goal|目标、acceptance|验收断言、boundary|边界规则（非空）
-  inbox/*.json        回执：task、status(done|blocked|captain|ack)、changed_files[]、
+  inbox/*.json        回执：task、status(done|blocked|captain)、changed_files[]、
                       evidence[]、work_slot
   occupancy.json      文件占用：{<path>: <slot>} 或 {"files": {...}}
   registry.json       工位路由瘦表：{<slot>: {...}} 或 {"slots": {...}}

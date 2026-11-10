@@ -45,40 +45,49 @@ description: 副舵/大副/First Mate/Orchestrator 派活 SOP。Use when 需要�
 4. 跳过留痕：不执行的步骤改写为 `- [x] <步骤>（跳过：<原因>）`，禁止直接删行。
 5. 记账：剧本名与来源层（项目层/技能层）写入流 plan 的 `## Decisions Made`。
 6. 目录与契约见 `{{skill_root}}/templates/playbooks/README.md`；校验 `python3 scripts/plan-status.py --playbooks .planning/playbooks`。
+7. 经济档（默认）与升档：
+
+   | 机制 | 经济档（默认） | 升档条件 |
+   |---|---|---|
+   | interrogate | 1 攻击者 inherit-parent | 核心模块 / 对外 API / 数据安全红线 → 2 |
+   | arena | 2 候选 + 跳过评委（主会话自评） | 架构/API 设计且方向分歧大 → 开评委 |
+   | swarm | 只分片不竞速 | 救火（速度比 token 贵）→ 竞速 |
+
+   升档判断权在大副，升档记该流 plan 的 Decisions。
 
 ## 3. Herdr 派活
 
 ### 3.1 建 tab
 
 ```bash
-herdr tab create --cwd "$PWD" --label "<task>-builder" --no-focus
+python3 scripts/dispatch.py tab create --cwd "$PWD" --label "<task>-builder" --no-focus
 ```
 
-从返回 JSON 取 `result.tab.tab_id` 与 `result.root_pane.pane_id`。Agent 名必须匹配 `[a-z][a-z0-9_-]{0,31}`；tab label 可用中文。
+从返回 JSON 取 `tab` 与 `pane`（root pane）。Agent 名必须匹配 `[a-z][a-z0-9_-]{0,31}`；tab label 可用中文。
 
 ### 3.2 启动 crew
 
-Qoder（默认）：
+Qoder（默认，薄包装）：
 
 ```bash
-herdr agent start <task>-builder --kind qodercli --pane <root-pane-id> -- --agent builder --permission-mode bypass_permissions
+scripts/start-agent.sh builder <root-pane-id> --name <task>-builder
 ```
 
 opencode（项目级角色在 `.opencode/agent/`）：
 
 ```bash
-herdr agent start <task>-builder --kind opencode --pane <root-pane-id> -- --agent builder
+python3 scripts/dispatch.py start --role builder --runtime opencode --pane <root-pane-id> --name <task>-builder
 ```
 
-- `--auto` 只用于隔离 worktree 内的 opencode worker；副舵自身不用 `--auto`。
+- 启动一律走 dispatch/薄包装，不直拼 `herdr agent start` 或 runtime `--agent`；`--auto` 只用于隔离 worktree 内的 opencode worker；副舵自身不用 `--auto`。
 - opencode crew 仅在 `.opencode/agent/<role>.md` 存在时可用；技能默认只带 `firstmate` 一份 opencode 角色，Builder/Reviewer/Scout/Runner/Planner 默认继续用 Qoder crew。需要 opencode crew 时先补角色文件并重启。
-- `--agent` 报 not found：Qoder 查 `.qoder/agents/<role>.md`，opencode 查 `.opencode/agent/<role>.md`，并先 `opencode agent list`；改完配置要重启会话。
+- 角色文件缺失：Qoder 查 `.qoder/agents/<role>.md`，opencode 查 `.opencode/agent/<role>.md`，并先 `opencode agent list`；改完配置要重启会话。
 - 启动后界面应显示对应角色；没有就停下来确认，不要靠每次发身份 prompt 兜底。
 
 ### 3.3 发任务
 
 ```bash
-herdr agent prompt <task>-builder "目标：<一句话>；读 <{{doc_req}}/工单路径>；只改 <文件>；验收：<命令/口径>；完成写 <报告路径>；ctx≥30% 停止接新切片。"
+python3 scripts/dispatch.py prompt --agent <task>-builder --message "目标：<一句话>；读 <{{doc_req}}/工单路径>；只改 <文件>；验收：<命令/口径>；完成写 <报告路径>；ctx≥30% 停止接新切片。"
 ```
 
 - 任何任务都不在前台 `--wait` 等结果；派活后立即返回，用后台 `agent-watch.py` 或 Monitor 监听，收到完成通知再读结果。
@@ -100,13 +109,13 @@ herdr agent get <task>-builder
 herdr agent read <task>-builder --source visible --lines 80
 ```
 
-先看清是权限确认、选择项还是提问。只读且与任务相关时再允许一次：
+先看清是权限确认、选择项还是提问。只读且与任务相关时，仅人工恢复可按键放行：
 
 ```bash
-herdr agent send-keys <task>-builder enter
+herdr agent send-keys <task>-builder enter   # 仅人工恢复，agent 不主动执行
 ```
 
-拿不准就 `esc` / `ctrl+c` 取消，交人工处理。
+拿不准就交人工处理，不自动按键。
 
 ## 4. 监听
 
@@ -125,6 +134,7 @@ python3 scripts/agent-watch.py --interval 15
 - 完成报告必须含：改动文件、执行命令、测试结果、未决问题、下一步。
 - 每次状态变化改对应 plan 的阶段 Status 并刷新 Next Step；看板由 `scripts/plan-status.py --write` 重新生成。
 - Builder 的自检 `code-review` 不能替代独立 Reviewer。
+- 评审报告按 reviewer 三态（PASS / BLOCK / 可延后）+ 证据验收；同根因合并、「无发现」合法；两流择一开工前声明盲审开关（默认关）。
 - 验收必须有 `{{doc_accept}}` + 真实数据回放；演示样例不算验收。
 - **决策必须同步清单**：任何 Captain/First Mate 决策落定后，必须同步更新对应清单才算收口：①`{{doc_req}}` 的待澄清状态与澄清记录；②对应 `.planning/<task>/task_plan.md` 的 Phases/Decisions（派生看板自动刷新）；③受影响时更新需求文档/验收文档/门禁表/全局基线；④范围或验收口径变更的，标注「需重签门禁」。未更新清单的决策视为未完成。
 

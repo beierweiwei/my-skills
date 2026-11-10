@@ -21,6 +21,7 @@
 | `babysit.md` | 已派活在跑，需收尾监护、逐个清阻塞到人工线 |
 | `session-pickup.md` | 换舵/重启后接续前任：读 plan/progress/inbox，不重做已完成 |
 | `investigation.md` | 只读调研、方案对比与结论输出，不产生代码改动 |
+| `arena.md` | 形状敏感、需多候选择优的方案/设计（经济档默认 2 候选、跳过评委） |
 
 ## 大副选板与铺设
 
