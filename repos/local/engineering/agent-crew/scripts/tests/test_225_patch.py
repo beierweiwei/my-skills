@@ -35,7 +35,8 @@ def read(path: Path) -> str:
 
 def changelog_section(version: str) -> str:
     text = read(CHANGELOG)
-    marker = f"## {version}"
+    # 版本号后带空白，避免 "2.2.1" 误命中 "## 2.2.10"
+    marker = f"## {version} "
     start = text.index(marker)
     rest = text[start + len(marker):]
     match = re.search(r"^## ", rest, re.MULTILINE)
@@ -127,12 +128,12 @@ class Nf003CheatsheetDispatchTest(unittest.TestCase):
 
 class Version225Test(unittest.TestCase):
     def test_version_225_synced(self):
-        self.assertIn("version: 2.2.9", read(SKILL_MD))
-        self.assertIn("v2.2.9", read(SKILL_MD))
-        self.assertIn('SKILL_VERSION_FALLBACK = "2.2.9"', read(INIT))
-        self.assertIn("## 2.2.9", read(CHANGELOG))
-        self.assertIn('"2.2.9"', read(TEST_CREW_LINT))
-        self.assertIn("2.2.9", read(TEST_220))
+        self.assertIn("version: 2.2.10", read(SKILL_MD))
+        self.assertIn("v2.2.10", read(SKILL_MD))
+        self.assertIn('SKILL_VERSION_FALLBACK = "2.2.10"', read(INIT))
+        self.assertIn("## 2.2.10", read(CHANGELOG))
+        self.assertIn('"2.2.10"', read(TEST_CREW_LINT))
+        self.assertIn("2.2.10", read(TEST_220))
 
 
 if __name__ == "__main__":

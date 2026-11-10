@@ -110,6 +110,48 @@ class UpgradeTest(unittest.TestCase):
             capture_output=True, text=True)
         self.assertEqual(doctor.returncode, 0, doctor.stdout)
 
+    def test_diff_report_follows_manifest_entries(self):
+        # D：diff_report 以 manifest entries（kind:file 且 scripts/*.py|*.sh）为准，
+        # 不再固定遍历 init_lib.SCRIPT_MANIFEST。
+        manifest_path = self.root / "docs/crew/manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["entries"] = [
+            entry for entry in manifest["entries"]
+            if entry.get("path") == "scripts/dispatch.py"
+        ]
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+                                 encoding="utf-8")
+        diff = self.upgrade("--diff", "--json")
+        self.assertEqual(diff.returncode, 0, diff.stderr)
+        report = json.loads(diff.stdout)
+        self.assertEqual(["scripts/dispatch.py"],
+                         [row["path"] for row in report["scripts"]])
+        self.assertEqual(["scripts/dispatch.py"], report["changed"])
+
+    def test_apply_install_log_next_not_stale(self):
+        # D：--apply 已自动同步 config 的 skillVersion，install-log next 不再要求手改。
+        applied = self.upgrade("--apply", "--confirm")
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        rows = [
+            json.loads(line) for line in
+            (self.root / "docs/crew/install-log.jsonl").read_text(
+                encoding="utf-8").splitlines()
+        ]
+        upgrades = [row for row in rows if row.get("action") == "upgrade"]
+        self.assertTrue(upgrades, rows)
+        next_text = upgrades[-1]["next"]
+        self.assertNotIn("如需版本戳一致", next_text)
+        self.assertIn("已自动同步", next_text)
+        self.assertIn("--refresh-block", next_text)
+
+    def test_docstring_matches_apply_config_scope(self):
+        # D：docstring 明确 --apply 只同步 config 的 skillVersion，不再声称不改配置文件。
+        text = (self.v2 / "scripts/upgrade.py").read_text(encoding="utf-8")
+        doc = text.split('"""', 2)[1]
+        self.assertIn("skillVersion", doc)
+        self.assertIn("仅此一项", doc)
+        self.assertNotIn("不做路径/配置迁移；不改 orchestration.json", doc)
+
     def test_rollback_unknown_backup_fails(self):
         proc = self.upgrade("--rollback", "no-such-backup")
         self.assertEqual(proc.returncode, 1)

@@ -250,6 +250,34 @@ class InitV2Test(unittest.TestCase):
                 self.assertNotIn("开发 worktree", out)
                 self.assertNotIn("不存在或不可读", out)
 
+    def test_check_skips_gitignored_skill_source_copies(self):
+        # A：项目内 gitignored 的外部技能源（如 skill-src/）不算规则/技能源副本；
+        # 未被忽略的真实副本仍必须失败。
+        base = Path(self._tmp.name) / "fx"
+        fx = ProjectFixture(base)
+        fx.config["skillVersion"] = init_v2.read_skill_version()
+        fx.write_config()
+        copy_rel = "skill-src/repos/local/engineering/agent-crew/references/crew-rules.md"
+        copy = fx.root / copy_rel
+        copy.parent.mkdir(parents=True)
+        copy.write_text("# rules copy\n", encoding="utf-8")
+
+        code, out = self.run_init_at(fx.root, "--check")
+        self.assertEqual(1, code, out)
+        self.assertIn(copy_rel, out)
+
+        (fx.root / ".gitignore").write_text("skill-src/\n", encoding="utf-8")
+        code, out = self.run_init_at(fx.root, "--check")
+        self.assertEqual(0, code, out)
+        self.assertNotIn(copy_rel, out)
+        self.assertNotIn("规则/技能源副本", out)
+
+        # 非 git 仓：git 不可用/rc≠0 时按未忽略处理，维持原判定
+        shutil.rmtree(fx.root / ".git")
+        code, out = self.run_init_at(fx.root, "--check")
+        self.assertEqual(1, code, out)
+        self.assertIn(copy_rel, out)
+
     def test_absolute_skill_root_warns(self):
         self.run_init("--yes")
         cfg = json.loads((self.root / ".planning/orchestration.json").read_text(encoding="utf-8"))

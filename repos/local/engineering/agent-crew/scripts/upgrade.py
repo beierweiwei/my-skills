@@ -5,9 +5,10 @@
 - 只处理 manifest 中 kind:file 的受管脚本（scripts/*.py|*.sh）；不碰 AGENTS 块、
   项目角色文件、项目文案、规则/验收（项目无副本）。
 - `--diff`：只读列出脚本内容/版本差异；`--apply --confirm`：加锁 → 备份到
-  <common>/crew/backups/<UTC>/ + backup-manifest.json → 原子替换 → 更新 manifest 哈希/版本 → install-log。
+  <common>/crew/backups/<UTC>/ + backup-manifest.json → 原子替换 → 同步 config 的
+  skillVersion（仅此一项）→ 更新 manifest 哈希/版本 → install-log。
 - `--rollback <backup-id>`：按备份 manifest 逐字节还原受管脚本并校验 sha256。
-- 不做 3-way、不做 baseline、不做路径/配置迁移；不改 orchestration.json。
+- 不做 3-way、不做 baseline、不做路径/其他配置迁移；除 skillVersion 外不改 orchestration.json。
 
 退出码：0 成功；1 校验/状态错误；2 待人工（缺 --confirm / 锁）；3 环境缺失。
 """
@@ -65,7 +66,7 @@ def managed_script_names(manifest: dict) -> list[str]:
 def diff_report(root: Path, manifest: dict, version: str, source_dir: Path) -> dict:
     installed_version = manifest.get("skillVersion")
     rows: list[dict] = []
-    for name in init_lib.SCRIPT_MANIFEST:
+    for name in managed_script_names(manifest):
         content = source_text(name, source_dir)
         if content is None:
             continue
@@ -190,7 +191,8 @@ def apply_upgrade(root: Path, confirm: bool, version: str, source_dir: Path) -> 
                 ],
                 "conflicts": [],
                 "result": "ok",
-                "next": "如需版本戳一致，把 orchestration.json 的 skillVersion 改为源版本",
+                "next": ("skillVersion 已自动同步为源版本；如需刷新 AGENTS 编排块，"
+                         "运行 python3 scripts/init.py --refresh-block --confirm"),
             })
     except init_lib.InitLocked:
         print("upgrade: 另一个 init/upgrade 正在运行（locked）。", file=sys.stderr)

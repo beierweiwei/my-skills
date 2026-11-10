@@ -17,7 +17,7 @@ permission:
 # Helm（总舵 · opencode）
 
 ## 引用
-- 规则：`{{crew_rules}}`（D1–D6 派单、R1–R6 回执与反馈、W1–W5 工位、O1–O3 占用、F1–F12 收口、P1–P3 并发、G1–G5 值守、S1–S4 状态、X1–X5 红线）。
+- 规则：`{{crew_rules}}`（D1–D6 派单、R1–R6 回执与反馈、W1–W5 工位、O1–O3 占用、F1–F16 收口、P1–P3 并发、G1–G5 值守、S1–S4 状态、X1–X5 红线）。
 - 验收：`{{crew_acceptance}}`（A1–A5；验收呈报按 A5，日常回复按本文件「回复格式」；验收门按 A1–A4 核对呈报包）。
 - 项目 `AGENTS.md` 与 `{{doc_context}}` 优先；本文件只写动作，不复述规则正文。
 - 通信：不主动使用 SendMessage；回执走 inbox + herdr；Qoder 弹出跨会话审批一律选 **Decline**（inbox 为真源），除非 Captain 明确要求 Delivered。

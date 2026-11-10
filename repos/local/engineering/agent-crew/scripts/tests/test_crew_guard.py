@@ -1507,6 +1507,261 @@ class HandoffTest(GuardTestBase):
         self.assertEqual(before, len(self.dispatch_calls))
 
 
+class Fb008CtxHandoffTest(GuardTestBase):
+    """FB-008：ctx 解析（小数/百分比）、29/30/59/60 边界、done 重评估、pane 映射。"""
+
+    OLD_PANE = "wX:pOLD"
+    NEW_PANE = "wX:pNEW"
+
+    def prepare(self, ctx: str = "ctx (650k/1M)", config: dict | None = None) -> None:
+        self.write_fixture(
+            stream=EMPTY_STREAM,
+            portfolio=EMPTY_PORTFOLIO,
+            config=config,
+        )
+        self.agents = [
+            {"name": "helm-1", "pane_id": self.OLD_PANE, "tab_id": "wX:tOLD",
+             "workspace_id": "wX", "agent_status": "working"}
+        ]
+        self.pane_outputs[self.OLD_PANE] = ctx
+
+    def write_handoff(self, text: str) -> None:
+        self.crew.mkdir(parents=True, exist_ok=True)
+        (self.crew / "guard.handoff").write_text(text, encoding="utf-8")
+
+    def done_handoff(self, result: str = "ok", new: str = "helm-1-2") -> None:
+        self.write_handoff(
+            "phase=done\nold=helm-1\noldPane=wX:pOLD\noldTab=wX:tOLD\n"
+            f"new={new}\nnewPane={self.NEW_PANE}\nnewTab=wX:tNEW\n"
+            "time=2026-11-10T16:18:00Z\nreason=ctx 62.3% > 60%\n"
+            f"result={result}\n"
+        )
+
+    def write_registry(self, registry: dict) -> None:
+        self.crew.mkdir(parents=True, exist_ok=True)
+        (self.crew / "dispatch-agents.json").write_text(
+            json.dumps(registry, ensure_ascii=False), encoding="utf-8")
+
+    def test_parse_ctx_formats(self):
+        cases = (
+            ("ctx (412k/1M)", 412.0),
+            ("ctx 75.4k/1M", 75.4),
+            ("ctx 623k/1M", 623.0),
+            ("ctx ( 75.4k / 1M )", 75.4),
+            ("ctx 62.3%", 623.0),
+            ("ctx 623k/1M", 623.0),
+            ("first ctx 10k/1M\nlast ctx 75.8k/1M", 75.8),
+            ("\x1b[32mctx 75.4k/1M\x1b[0m", 75.4),
+        )
+        for text, expected in cases:
+            with self.subTest(text=text):
+                self.assertAlmostEqual(expected, cg.parse_ctx_k(text))
+
+    def test_parse_ctx_invalid_returns_none(self):
+        for text in ("ctx unknown", "", "ctx 75.4k", "ctx 75.4k/",
+                     "ctx 75.4k/0M", "no context", None, 123):
+            with self.subTest(text=text):
+                self.assertIsNone(cg.parse_ctx_k(text))
+
+    def test_threshold_boundaries_29_30_59_60(self):
+        self.prepare(ctx="ctx 290k/1M")
+        guard = self.make_guard()
+
+        none = guard.run_once()
+        self.assertEqual("none", none["handoff"]["action"])
+        self.assertFalse((self.crew / "guard.handoff").exists())
+        self.assertEqual([], self.dispatch_calls)
+        self.assertEqual([], self.notify_calls)
+
+        self.pane_outputs[self.OLD_PANE] = "ctx 300k/1M"
+        warn = guard.run_once()
+        self.assertEqual("warn", warn["handoff"]["action"])
+        self.assertEqual("warn", self.handoff_fields()["phase"])
+        self.assertEqual(1, len(self.notify_calls))
+        self.assertIn("30%", self.handoff_fields()["reason"])
+
+        self.pane_outputs[self.OLD_PANE] = "ctx 590k/1M"
+        still = guard.run_once()
+        self.assertEqual("none", still["handoff"]["action"])
+        self.assertEqual("warn", self.handoff_fields()["phase"])
+        self.assertEqual(1, len(self.notify_calls))
+        self.assertEqual([], self.dispatch_calls)
+
+        self.pane_outputs[self.OLD_PANE] = "ctx 600k/1M"
+        started = guard.run_once()
+        self.assertEqual("started", started["handoff"]["action"])
+        self.assertEqual("started", self.handoff_fields()["phase"])
+        self.assertEqual(
+            1, len([c for c in self.dispatch_calls if c[:2] == ["tab", "create"]]))
+        self.assertEqual(
+            [], [c for c in self.dispatch_calls if c[:2] == ["pane", "split"]])
+
+    def test_done_phase_warns_on_successor_ctx(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.done_handoff()
+        self.agents = [
+            {"name": "helm-1-2", "pane_id": self.NEW_PANE, "tab_id": "wX:tNEW",
+             "workspace_id": "wX", "agent_status": "idle"},
+        ]
+        self.pane_outputs[self.NEW_PANE] = "ctx 320k/1M"
+        guard = self.make_guard()
+
+        result = guard.run_once()
+        self.assertEqual("warn", result["handoff"]["action"])
+        fields = self.handoff_fields()
+        self.assertEqual("warn", fields["phase"])
+        self.assertEqual("helm-1-2", fields["old"])
+        self.assertEqual(self.NEW_PANE, fields["oldPane"])
+        self.assertTrue(any("320k/1M" in body for _, body in self.notify_calls))
+        self.assertEqual([], self.dispatch_calls)
+
+        guard.run_once()
+        self.assertEqual(1, len(self.notify_calls))
+
+    def test_done_phase_can_start_new_handoff(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.done_handoff()
+        self.agents = [
+            {"name": "helm-1-2", "pane_id": self.NEW_PANE, "tab_id": "wX:tNEW",
+             "workspace_id": "wX", "agent_status": "idle"},
+        ]
+        self.pane_outputs[self.NEW_PANE] = "ctx 650k/1M"
+        guard = self.make_guard()
+
+        result = guard.run_once()
+        self.assertEqual("started", result["handoff"]["action"])
+        fields = self.handoff_fields()
+        self.assertEqual("started", fields["phase"])
+        self.assertEqual("helm-1-2", fields["old"])
+        self.assertEqual(self.NEW_PANE, fields["oldPane"])
+        self.assertEqual(
+            [], [c for c in self.dispatch_calls if c[:2] == ["pane", "split"]])
+
+    def test_done_failed_does_not_retry(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.done_handoff(result="failed")
+        self.agents = [
+            {"name": "helm-1", "pane_id": self.OLD_PANE, "tab_id": "wX:tOLD",
+             "workspace_id": "wX", "agent_status": "idle"},
+        ]
+        self.pane_outputs[self.OLD_PANE] = "ctx 650k/1M"
+        guard = self.make_guard()
+
+        for _ in range(3):
+            result = guard.run_once()
+            self.assertEqual("none", result["handoff"]["action"])
+        self.assertEqual([], self.dispatch_calls)
+        self.assertEqual([], self.notify_calls)
+        self.assertTrue(any("不再自动重试" in line for line in self.logs))
+
+    def test_done_phase_below_warn_is_none(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.done_handoff()
+        self.agents = [
+            {"name": "helm-1-2", "pane_id": self.NEW_PANE, "agent_status": "idle"},
+        ]
+        self.pane_outputs[self.NEW_PANE] = "ctx 75.8k/1M"
+        guard = self.make_guard()
+
+        result = guard.run_once()
+        self.assertEqual("none", result["handoff"]["action"])
+        self.assertEqual("done", self.handoff_fields()["phase"])
+        self.assertEqual([], self.notify_calls)
+        self.assertEqual([], self.dispatch_calls)
+
+    def test_registry_maps_drifted_agent_name_to_helm_pane(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.write_registry({"helm-1": {"role": "helm", "pane": self.OLD_PANE}})
+        self.agents = [
+            {"name": "helm-1-renamed", "pane_id": self.OLD_PANE,
+             "tab_id": "wX:tOLD", "agent_status": "idle"},
+        ]
+        self.pane_outputs[self.OLD_PANE] = "ctx 320k/1M"
+        guard = self.make_guard()
+
+        result = guard.run_once()
+        self.assertEqual("warn", result["handoff"]["action"])
+        self.assertEqual([(self.OLD_PANE, 80)], self.pane_reads)
+        self.assertEqual("helm-1-renamed", guard.helm)
+        self.assertEqual("helm-1-renamed", self.handoff_fields()["old"])
+        self.assertTrue(any("漂移" in line for line in self.logs))
+
+    def test_registry_latest_helm_entry_reverse_lookup(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.write_registry({
+            "helm-1": {"role": "helm", "pane": self.OLD_PANE,
+                       "startedAt": "2026-11-10T08:00:00Z"},
+            "helm-2": {"role": "helm", "pane": self.NEW_PANE,
+                       "startedAt": "2026-11-10T09:00:00Z"},
+        })
+        self.agents = [
+            {"name": "helm-2", "pane_id": self.NEW_PANE, "tab_id": "wX:tNEW",
+             "agent_status": "idle"},
+        ]
+        self.pane_outputs[self.NEW_PANE] = "ctx 320k/1M"
+        guard = self.make_guard()
+
+        result = guard.run_once()
+        self.assertEqual("warn", result["handoff"]["action"])
+        self.assertEqual("helm-2", guard.helm)
+        self.assertEqual("helm-2", self.handoff_fields()["old"])
+
+    def test_unresolvable_helm_is_failsafe(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.agents = [
+            {"name": "builder-1", "pane_id": "wX:pB", "agent_status": "idle"},
+        ]
+        guard = self.make_guard()
+
+        for _ in range(2):
+            result = guard.run_once()
+            self.assertEqual("none", result["handoff"]["action"])
+        self.assertFalse((self.crew / "guard.handoff").exists())
+        self.assertEqual([], self.pane_reads)
+        self.assertEqual([], self.dispatch_calls)
+        self.assertTrue(any("ctx 检查跳过" in line for line in self.logs))
+
+    def test_second_handoff_after_done_can_start(self):
+        self.prepare(ctx="ctx 650k/1M")
+        guard = self.make_guard()
+        guard.run_once()
+        self.assertEqual("started", self.handoff_fields()["phase"])
+
+        self.agents = [
+            {"name": "helm-1", "pane_id": self.OLD_PANE, "agent_status": "idle"},
+            {"name": "helm-1-2", "pane_id": self.NEW_PANE, "tab_id": "wX:tNEW",
+             "workspace_id": "wX", "agent_status": "working"},
+        ]
+        guard.run_once()
+        self.agents[1]["agent_status"] = "idle"
+        done = guard.run_once()
+        self.assertEqual("done", done["handoff"]["action"])
+        self.assertEqual("helm-1-2", guard.helm)
+
+        self.dispatch_calls.clear()
+        self.pane_outputs[self.NEW_PANE] = "ctx 650k/1M"
+        again = guard.run_once()
+        self.assertEqual("started", again["handoff"]["action"])
+        self.assertEqual(
+            1, len([c for c in self.dispatch_calls if c[:2] == ["tab", "create"]]))
+        self.assertEqual("helm-1-2", self.handoff_fields()["old"])
+
+    def test_cli_once_json_includes_handoff_action(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        with mock.patch.object(cg, "herdr_agents", return_value=[]), \
+                mock.patch.object(cg, "run_plan_status", return_value=(0, "看板新鲜")), \
+                mock.patch.object(cg, "herdr_prompt"), \
+                mock.patch.object(cg, "herdr_notify"):
+            code, out, err = self.run_main([
+                "--once", "--json", "--root", str(self.root),
+                "--crew-dir", str(self.crew), "--helm", "helm-1",
+            ])
+        self.assertEqual(0, code)
+        self.assertEqual("", err)
+        payload = json.loads(out)
+        self.assertEqual({"action": "none"}, payload["handoff"])
+
+
 RETRO_FEEDBACK_ONE_OPEN = """# 编排体系自学习反馈
 
 ## 流程反馈（复盘信箱）
