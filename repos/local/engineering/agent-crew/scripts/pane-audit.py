@@ -180,7 +180,11 @@ def is_helm_tab(tab: dict, helm_labels: tuple[str, ...] = (HELM_TAB_PREFIX,)) ->
 
 def load_helm_labels(root: str | Path = ".") -> tuple[str, ...]:
     """读取 <root>/.planning/orchestration.json 的 helm.tabLabel；非法时回落「总舵」。"""
-    path = Path(root).expanduser() / ".planning/orchestration.json"
+    try:
+        base = Path(root).expanduser()
+    except RuntimeError:
+        return (HELM_TAB_PREFIX,)  # 无法展开 ~user：与缺失配置同口径回落默认
+    path = base / ".planning/orchestration.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):

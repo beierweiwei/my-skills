@@ -284,6 +284,20 @@ class DoctorConfigTest(unittest.TestCase):
         self.assertEqual(DOCTOR_MOD.linked_worktree_root(wt_root), wt_root)
         self.assertEqual(INIT_MOD.linked_worktree_root(wt_root), wt_root)
 
+    def test_linked_worktree_helper_fail_soft_on_malformed_gitfile(self):
+        cases = {
+            "non-gitdir": "not a gitdir line\n",
+            "empty": "",
+            "missing-target": f"gitdir: {self.fx.base / 'gone' / 'skill'}\n",
+        }
+        for name, content in cases.items():
+            with self.subTest(case=name):
+                root = self.fx.base / f"malformed-{name}"
+                root.mkdir()
+                (root / ".git").write_text(content, encoding="utf-8")
+                self.assertIsNone(DOCTOR_MOD.linked_worktree_root(root))
+                self.assertIsNone(INIT_MOD.linked_worktree_root(root))
+
     def test_install_version_mismatch_fails_then_restores(self):
         self.fx.config["skillVersion"] = "9.9.9"
         self.fx.write_config()

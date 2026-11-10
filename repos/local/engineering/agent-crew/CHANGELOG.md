@@ -18,7 +18,7 @@
 ### 测试
 
 - 新增 `scripts/tests/test_225_patch.py`（F1 口径、F4 提示、NF-001/002/003 grep 防回退与版本断言）；`test_doctor_config.py` / `test_init_v2.py` 补真实 git submodule 与 `--separate-git-dir` 反例、strict rc 与不存在 skillRoot 用例；`test_pane_audit.py` 补 `helm.tabLabel` 用例。
-- 版本 2.2.5：`SKILL.md` frontmatter 与标题、`init.py` fallback、`test_crew_lint.py` 与 `test_220_final.py` 期望同步。
+- 版本 2.2.5：`SKILL.md` frontmatter 与标题、`init.py` fallback、`test_crew_lint.py`、`test_220_final.py` 与 `test_224_retro.py` 版本断言同步。
 
 ## 2.2.4 — 2026-11-10
 

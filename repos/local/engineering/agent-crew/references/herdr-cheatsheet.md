@@ -32,7 +32,7 @@ herdr                 # 进入 TUI；已在 Herdr 内则跳过
 python3 scripts/dispatch.py --root . tab create --cwd "$PWD" --label "<task>-builder" --no-focus
 ```
 
-返回里取 `tab_id` 与 `pane_id`（dispatch 的 stdout 同时给出 tab/pane 两个键）。
+返回 JSON：`{"tab": <tab_id>, "pane": <pane_id>}`。
 
 ## 4. 启动 Agent（只走 dispatch）
 

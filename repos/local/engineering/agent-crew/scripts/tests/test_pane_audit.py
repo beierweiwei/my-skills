@@ -349,6 +349,15 @@ class _MainTest(unittest.TestCase):
                 self.assertEqual(rc, 0, err)
                 self.assertIn("巡检通过", out)  # 默认「总舵」仍被识别，单 pane 无告警
 
+    def test_unresolvable_tilde_root_does_not_crash(self):
+        data = snapshot([tab("t3", "总舵")], [pane("p1", "t3")],
+                        [agent("helm-1", "p1", tab_id="t3")])
+        rc, out, err, _recorded = self._run(data, ["--root", "~nosuchuser4242/x"])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("巡检通过", out)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(pa.load_helm_labels("~nosuchuser4242/x"), ("总舵",))
+
     def test_help_documents_non_helm_and_priority(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
