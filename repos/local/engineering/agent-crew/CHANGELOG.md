@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.2.6 — 2026-11-10
+
+### 修复
+
+- **T15 doctor runtime.lock 空 `occupancy.lock` 误报**：`crew-ticket.py` 用 `open(<crew>/occupancy.lock, "a+")` + `fcntl.flock` 做互斥，锁文件空闲时内容恒为空，删除文件反而引入竞态；`check_runtime_lock()` 之前把所有空锁按「无法识别 pid」计入 stale warn。现在空 `occupancy.lock` 视为空闲 flock 目标跳过，不计 stale；其他空锁（`guard.lock` / `init.lock` / `upgrade.lock` 等）保持原判 warn，不放宽。只有「读成功且内容为空/纯空白」的 `occupancy.lock` 放行；读失败、目录、悬空 symlink 等非普通文件仍按 stale warn，不因「空内容放行」而假绿。无 guard pid 时终态返回语义正确的 pass「无活跃锁（occupancy.lock 为空闲锁文件）」，不再出现 `guard 运行中（pid=None）`；无任何锁仍「无锁文件」，guard 活 pid 仍「guard 运行中（pid=…）」。
+
+### 测试
+
+- `test_doctor_runtime.py` 新增：仅空 `occupancy.lock` → pass 且 detail 不含 `stale`；空 `occupancy.lock` + 空 `init.lock` → warn 且只列 `init.lock`；活 `guard.lock` + 空 `occupancy.lock` → pass「guard 运行中（pid=…）」；`occupancy.lock` 为目录/悬空 symlink（读失败）→ warn 且 detail 含 `occupancy.lock`；既有空 `guard.lock` → warn「无法识别 pid」保持通过。
+- 版本 2.2.6：`SKILL.md` frontmatter 与标题、`init.py` fallback、`test_crew_lint.py`、`test_220_final.py`、`test_224_retro.py`、`test_225_patch.py` 版本断言同步。
+
 ## 2.2.5 — 2026-11-10
 
 ### 修复

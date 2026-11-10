@@ -94,6 +94,60 @@ class DoctorRuntimeTest(unittest.TestCase):
         self.assertEqual("warn", item["status"])
         self.assertIn("无法识别 pid", item["detail"])
 
+    def test_runtime_lock_empty_occupancy_is_idle_not_stale(self):
+        lock_dir = self.fx.root / ".git/crew"
+        lock_dir.mkdir(parents=True)
+        (lock_dir / "occupancy.lock").write_text("", encoding="utf-8")
+        rc, report = self.fx.doctor_json("--only", "runtime.lock")
+        self.assertEqual(0, rc, report)
+        item = self.fx.item(report, "runtime.lock")
+        self.assertEqual("pass", item["status"], item)
+        self.assertNotIn("stale", item["detail"])
+        self.assertIn("occupancy.lock 为空闲锁文件", item["detail"])
+
+    def test_runtime_lock_empty_occupancy_does_not_mask_other_stale(self):
+        lock_dir = self.fx.root / ".git/crew"
+        lock_dir.mkdir(parents=True)
+        (lock_dir / "occupancy.lock").write_text("", encoding="utf-8")
+        (lock_dir / "init.lock").write_text("", encoding="utf-8")
+        rc, report = self.fx.doctor_json("--only", "runtime.lock")
+        self.assertEqual(0, rc, report)
+        item = self.fx.item(report, "runtime.lock")
+        self.assertEqual("warn", item["status"], item)
+        self.assertIn("init.lock", item["detail"])
+        self.assertNotIn("occupancy.lock", item["detail"])
+
+    def test_runtime_lock_guard_alive_with_empty_occupancy_reports_guard(self):
+        lock_dir = self.fx.root / ".git/crew"
+        lock_dir.mkdir(parents=True)
+        (lock_dir / "guard.lock").write_text(f"{os.getpid()}\n", encoding="utf-8")
+        (lock_dir / "occupancy.lock").write_text("", encoding="utf-8")
+        rc, report = self.fx.doctor_json("--only", "runtime.lock")
+        self.assertEqual(0, rc, report)
+        item = self.fx.item(report, "runtime.lock")
+        self.assertEqual("pass", item["status"], item)
+        self.assertIn("guard 运行中（pid=", item["detail"])
+
+    def test_runtime_lock_occupancy_directory_is_stale(self):
+        lock_dir = self.fx.root / ".git/crew"
+        lock_dir.mkdir(parents=True)
+        (lock_dir / "occupancy.lock").mkdir()
+        rc, report = self.fx.doctor_json("--only", "runtime.lock")
+        self.assertEqual(0, rc, report)
+        item = self.fx.item(report, "runtime.lock")
+        self.assertEqual("warn", item["status"], item)
+        self.assertIn("occupancy.lock", item["detail"])
+
+    def test_runtime_lock_occupancy_dangling_symlink_is_stale(self):
+        lock_dir = self.fx.root / ".git/crew"
+        lock_dir.mkdir(parents=True)
+        os.symlink("/nonexistent-target", lock_dir / "occupancy.lock")
+        rc, report = self.fx.doctor_json("--only", "runtime.lock")
+        self.assertEqual(0, rc, report)
+        item = self.fx.item(report, "runtime.lock")
+        self.assertEqual("warn", item["status"], item)
+        self.assertIn("occupancy.lock", item["detail"])
+
     def test_runtime_worktree_clean_pass_dirty_fail(self):
         self.fx.commit()
         rc, report = self.fx.doctor_json("--only", "runtime.worktree")

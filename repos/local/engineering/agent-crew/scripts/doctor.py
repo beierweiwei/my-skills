@@ -1464,9 +1464,16 @@ class Doctor:
         active: list[str] = []
         stale: list[str] = []
         guard_pid: int | None = None
+        idle_occupancy = False
         for lock in locks:
             pid = None
-            text = read_text(lock) or ""
+            text = read_text(lock)
+            if lock.name == "occupancy.lock" and text is not None and not text.strip():
+                # crew-ticket.py 用 open(..., "a+") + flock 互斥，空闲时内容恒为空；
+                # 只有「读成功且内容为空」才是空闲 flock 目标，读失败/非普通文件仍按 stale 处理
+                idle_occupancy = True
+                continue
+            text = text or ""
             try:
                 data = json.loads(text)
             except (ValueError, TypeError):
@@ -1503,7 +1510,11 @@ class Doctor:
         if stale:
             return Result("runtime.lock", "warn", f"stale 锁：{stale}",
                           next="确认进程已退出后人工删除锁文件")
-        return Result("runtime.lock", "pass", f"guard 运行中（pid={guard_pid}）")
+        if guard_pid is not None:
+            return Result("runtime.lock", "pass", f"guard 运行中（pid={guard_pid}）")
+        if idle_occupancy:
+            return Result("runtime.lock", "pass", "无活跃锁（occupancy.lock 为空闲锁文件）")
+        return Result("runtime.lock", "pass", "无活跃锁")
 
     def check_runtime_worktree(self) -> Result:
         rc, stdout, _ = self._run_cli(["git", "-C", str(self.root), "status", "--porcelain"])
