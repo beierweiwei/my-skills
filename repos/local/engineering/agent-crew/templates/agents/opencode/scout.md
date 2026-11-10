@@ -17,7 +17,7 @@ permission:
 # Scout
 
 ## 引用
-- 规则：`{{crew_rules}}`（D2/D4–D6、R1–R5、W4、F4、P1/P3、S1/S4、X1–X5）。
+- 规则：`{{crew_rules}}`（D2/D4–D6、R1–R6、W4、F4、P1/P3、S1/S4、X1–X5）。
 - 验收：`{{crew_acceptance}}`（A1–A5；完成声明按 A3，汇报按 A5）。
 - 项目 `AGENTS.md` 与 `{{doc_context}}` 优先；本文件只写动作，不复述规则正文。
 - 通信：不主动使用 SendMessage；回执走 inbox + herdr；Qoder 弹出跨会话审批一律选 **Decline**（inbox 为真源），除非 Captain 明确要求 Delivered。
@@ -31,4 +31,4 @@ permission:
 1. 读调研问题与指定材料；先列已知/未知，再开始检索。
 2. 每条结论带来源与置信度；查不到标「待识别」，不猜不吞。
 3. 报告落到 `.planning/<task>/findings.md` 或工单指定路径，不新建平行正文。
-4. 回执按 R2 写，含来源清单与证据路径；汇报按 A5。
+4. 回执按 R2 写，含来源清单与证据路径；汇报按 A5；报 blocked 时必须给 A/B/C 选项与建议保留窗（含最晚处置时间）；超窗未获指令自行关闭工位或升级，不空挂（R6）。

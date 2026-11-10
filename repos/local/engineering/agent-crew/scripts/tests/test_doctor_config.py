@@ -120,6 +120,29 @@ class DoctorConfigTest(unittest.TestCase):
         self.assertIn("retro.enabled", detail)
         self.assertIn("retro.periodDays", detail)
 
+    def test_guard_config_registered_and_validated(self):
+        self.fx.config["guard"] = {"blockedRepeatMinutes": 15, "blockedGraceMinutes": 240}
+        self.fx.write_config()
+        rc, report = self.fx.doctor_json("--only", "config.schema")
+        self.assertEqual(0, rc, report)
+        self.assertEqual("pass", self.fx.item(report, "config.schema")["status"])
+
+        cases = (
+            ([], "guard 必须是对象"),
+            ({"blockedRepeatMinutes": 0}, "guard.blockedRepeatMinutes"),
+            ({"blockedRepeatMinutes": 241}, "guard.blockedRepeatMinutes"),
+            ({"blockedRepeatMinutes": True}, "guard.blockedRepeatMinutes"),
+            ({"blockedGraceMinutes": "30"}, "guard.blockedGraceMinutes"),
+            ({"blockedGraceMinutes": 1.5}, "guard.blockedGraceMinutes"),
+        )
+        for guard, token in cases:
+            with self.subTest(guard=guard):
+                self.fx.config["guard"] = guard
+                self.fx.write_config()
+                rc, report = self.fx.doctor_json("--only", "config.schema")
+                self.assertEqual(1, rc, report)
+                self.assertIn(token, self.fx.item(report, "config.schema")["detail"])
+
     def test_skill_source_rule_copy_fails_and_absolute_warns(self):
         copy = self.fx.root / "docs/crew-rules.md"
         copy.write_text("# rules copy\n", encoding="utf-8")

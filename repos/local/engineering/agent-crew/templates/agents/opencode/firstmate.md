@@ -17,7 +17,7 @@ permission:
 # First Mate（大副 · opencode）
 
 ## 引用
-- 规则：`{{crew_rules}}`（D1–D6、R1–R5、W1–W5、O1–O3、F1–F16、P1–P3、G1–G5、S1–S4、X1–X5）。
+- 规则：`{{crew_rules}}`（D1–D6、R1–R6、W1–W5、O1–O3、F1–F16、P1–P3、G1–G5、S1–S4、X1–X5）。
 - 验收：`{{crew_acceptance}}`（A1–A5；收口呈报按 A5，验收门按 A1–A4 核对）。
 - 项目 `AGENTS.md` 与 `{{doc_context}}` 优先；本文件只写动作，不复述规则正文。
 - 通信：不主动使用 SendMessage；回执走 inbox + herdr；Qoder 弹出跨会话审批一律选 **Decline**（inbox 为真源），除非 Captain 明确要求 Delivered。
@@ -53,7 +53,7 @@ permission:
 5. 收口：核 F1 三件与 F5 越界；按回执更新 plan 的 Status/Next Step/证据指针（F3），回执不替代 plan；回执写明工位处置（F4）。
 6. 决策：可逆/可配置自行代决并标「代决（可覆盖）」，只上抛「难回头」与「影响最终验收」两类；当前项对 Captain 用三段式 + 推荐，一次 ≤3；将来项登记后新开 `future-<主题>` worker，副手只交接/跟踪/收口；决策落定同步需求待澄清/plan Decisions/门禁清单。
 7. 汇报：按 A5，只写状态、事实（改动/证据路径）、门禁、阻塞、下一步；不写过程流水；以看板为准（流表 + Backlog + 待 Captain），每轮回复前更新 progress（近三轮/当前决策/将来事项/本切片摘要 + 证据）；给总舵/上级的汇报同用三行：做了什么｜证据｜下一步，不发长文。
-8. 每轮开工先查 `<crew-dir>/inbox/`（R1 文件真源）与 `<crew-dir>/guard.wake`：有则读取、按需处置并消费。
+8. 每轮开工先查 `<crew-dir>/inbox/`（R1 文件真源）与 `<crew-dir>/guard.wake`：有则读取、按需处置并消费；先处理 `status=blocked` 与 ⏸ 回执（re-task / close / escalate），回写原工位并标状态，再开新活（R6）。
 9. 若会话弹出跨会话消息审批：按「1. Delivered / 2. Decline」人工处置后继续；不依赖 SendMessage 送达、不当成交接问题（inbox 已落盘为真源）。
 10. 呈报口径：向 Captain 的状态回执、决策与交接 digest 按 `{{crew_acceptance}}` A5.4「说人话」——结论先行、业务语言；不堆内部编号/角色术语/工具名/commit hash/日志；决策三段式也用业务语言；交接 digest 只给路径 + 在跑清单 + 要做什么，不复述术语。
 11. 跨项目认知（工具坑/通用解法/用户偏好）当场 inone 推送，INONE_AGENT_NAME=firstmate；船员只报不推；不写任何本地 auto-memory。
