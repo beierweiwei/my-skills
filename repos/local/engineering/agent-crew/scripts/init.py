@@ -51,7 +51,7 @@ TEMPLATES = SKILL_DIR / "templates"
 MARK_START = "<!-- agent-crew:orchestration:start -->"
 MARK_END = "<!-- agent-crew:orchestration:end -->"
 MARK_PREFIX = "<!-- agent-crew:orchestration:"
-SKILL_VERSION_FALLBACK = "2.2.0"
+SKILL_VERSION_FALLBACK = "2.2.1"
 
 CONFIG_REL = Path(".planning/orchestration.json")
 MANIFEST_REL = Path("docs/crew/manifest.json")
@@ -252,6 +252,26 @@ def read_skill_version(skill_dir: Path | None = None) -> str:
     if not match:
         return SKILL_VERSION_FALLBACK
     return match.group(1).strip().strip("'\"") or SKILL_VERSION_FALLBACK
+
+
+def is_inside(path: Path, base: Path) -> bool:
+    try:
+        path.resolve().relative_to(base.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def linked_worktree_root(path: Path) -> Path | None:
+    """path 位于 linked worktree（祖先含 .git 文件而非目录）时返回该 worktree 根。"""
+    resolved = path.resolve()
+    for parent in (resolved, *resolved.parents):
+        git = parent / ".git"
+        if git.is_file():
+            return parent
+        if git.is_dir():
+            return None
+    return None
 
 
 def atomic_write(path: Path, data: bytes, mode: int | None = None) -> None:
@@ -1058,6 +1078,23 @@ def run_check(root: Path, templates: Path, skill_version: str) -> int:
     config_version = config_on_disk.get("skillVersion")
     if config_version != skill_version:
         stale.append(f"{CONFIG_REL.as_posix()}#skillVersion({config_version}→{skill_version})")
+    hints: list[str] = []
+    skill_root_raw = config_on_disk.get("skillRoot")
+    if isinstance(skill_root_raw, str) and skill_root_raw.strip():
+        try:
+            skill_root_path = Path(skill_root_raw).expanduser()
+        except RuntimeError:
+            skill_root_path = None  # 无法展开 ~user：跳过该提示，其余检查照常
+        if skill_root_path is not None:
+            if not skill_root_path.is_absolute():
+                skill_root_path = root / skill_root_path
+            worktree = linked_worktree_root(skill_root_path)
+            if worktree is not None and not is_inside(skill_root_path, root):
+                hints.append(
+                    f"skillRoot 指向开发 worktree：{worktree}"
+                    "（源随开发分支漂移，安装版本易失配）；"
+                    "下一步：将 skillRoot 改指稳定分发副本（如 skills/engineering/agent-crew "
+                    "指向 repos/local 实体）")
     for stub in manifest.get("roleStubs", []) if isinstance(manifest.get("roleStubs"), list) else []:
         if not isinstance(stub, dict) or not stub.get("path"):
             continue
@@ -1103,6 +1140,8 @@ def run_check(root: Path, templates: Path, skill_version: str) -> int:
         print(f"[过期] {rel}")
     for rel in sorted(set(modified)):
         print(f"[项目修改] {rel}（不判漂移）")
+    for hint in hints:
+        print(f"[风险提示] {hint}")
     print(f"检查结果：{ok} 项一致，{len(set(problems))} 项失败，"
           f"{len(set(stale))} 项过期，{len(set(modified))} 项项目修改。")
     # 优先级：真实校验问题 > AGENTS pending > 仅漂移 > 一致。

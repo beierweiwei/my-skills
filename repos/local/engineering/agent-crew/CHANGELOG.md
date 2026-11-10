@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.2.1 — 2026-11-10
+
+### 修复
+
+- **BUG-022 开发 worktree skillRoot 风险提示**：消费项目 `skillRoot` 解析后位于项目根之外、且落在 linked worktree（祖先含 `.git` 文件而非目录，即开发 worktree）时，`doctor` 的 `skill.source` 与 `init.py --check` 给出 warn/风险提示：message 含「开发 worktree / 漂移」，next 指向改指稳定分发副本；不升级为失败（rc 不变）。稳定分发副本（主仓工作树，`.git` 为目录）与项目内 skillRoot（`.qoder/skills/`、`.opencode/skills/`）不误报；不新增 doctor 检查项名（维持 42 项）。
+
 ## 2.2.0 — 2026-11-10
 
 ### 新增

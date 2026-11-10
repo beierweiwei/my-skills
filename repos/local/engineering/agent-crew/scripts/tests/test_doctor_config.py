@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from doctor_fixtures import ProjectFixture
+from doctor_fixtures import ProjectFixture, make_linked_worktree
 
 
 class DoctorConfigTest(unittest.TestCase):
@@ -127,6 +127,38 @@ class DoctorConfigTest(unittest.TestCase):
         item = self.fx.item(report, "skill.source")
         self.assertEqual("pass", item["status"], item)
         self.assertNotIn("副本", item["detail"])
+
+    def test_skill_source_dev_worktree_warns_without_false_positives(self):
+        repo_skill, wt_skill = make_linked_worktree(self.fx.base)
+        # 开发 worktree（仓外 + 祖先 .git 为文件）：warn + 漂移语义 + 可执行 next
+        self.fx.config["skillRoot"] = "../" + wt_skill.relative_to(self.fx.base).as_posix()
+        self.fx.write_config()
+        rc, report = self.fx.doctor_json("--only", "skill.source")
+        self.assertEqual(0, rc, report)
+        item = self.fx.item(report, "skill.source")
+        self.assertEqual("warn", item["status"], item)
+        self.assertIn("开发 worktree", item["detail"])
+        self.assertIn("漂移", item["detail"])
+        self.assertTrue(item["next"])
+        self.assertIn("稳定分发副本", item["next"])
+
+        # 稳定分发副本形态（主仓工作树，.git 为目录）：不误报
+        self.fx.config["skillRoot"] = "../" + repo_skill.relative_to(self.fx.base).as_posix()
+        self.fx.write_config()
+        rc, report = self.fx.doctor_json("--only", "skill.source")
+        self.assertEqual(0, rc, report)
+        item = self.fx.item(report, "skill.source")
+        self.assertEqual("pass", item["status"], item)
+        self.assertNotIn("开发 worktree", item["detail"])
+
+        # 项目内 skillRoot：不误报
+        installed = self.fx.root / ".qoder/skills/agent-crew"
+        shutil.copytree(self.fx.skill, installed)
+        self.fx.config["skillRoot"] = ".qoder/skills/agent-crew"
+        self.fx.write_config()
+        rc, report = self.fx.doctor_json("--only", "skill.source")
+        self.assertEqual(0, rc, report)
+        self.assertEqual("pass", self.fx.item(report, "skill.source")["status"])
 
     def test_install_version_mismatch_fails_then_restores(self):
         self.fx.config["skillVersion"] = "9.9.9"

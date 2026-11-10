@@ -127,6 +127,18 @@ def is_inside(path: Path, base: Path) -> bool:
         return False
 
 
+def linked_worktree_root(path: Path) -> Path | None:
+    """path 位于 linked worktree（祖先含 .git 文件而非目录）时返回该 worktree 根。"""
+    resolved = path.resolve()
+    for parent in (resolved, *resolved.parents):
+        git = parent / ".git"
+        if git.is_file():
+            return parent
+        if git.is_dir():
+            return None
+    return None
+
+
 def normalize_line(line: str) -> str:
     text = line.strip()
     text = re.sub(r"^(?:[-*+]\s+|\d+[.)]\s+|>\s+)+", "", text)
@@ -749,6 +761,12 @@ class Doctor:
             return Result("skill.source", "fail", f"skillRoot 不存在或不可读：{skill_root}")
         problems: list[str] = []
         warns: list[str] = []
+        worktree: Path | None = None
+        if not is_inside(skill_root, self.root):
+            worktree = linked_worktree_root(skill_root)
+            if worktree is not None:
+                warns.append(f"skillRoot 指向开发 worktree：{worktree}"
+                             "（源随开发分支漂移，安装版本易失配）")
         if Path(raw).is_absolute():
             warns.append("skillRoot 是绝对路径（不可移植）")
         elif is_inside(skill_root, self.root):
@@ -775,8 +793,12 @@ class Doctor:
         if problems:
             return Result("skill.source", "fail", "；".join(problems))
         if warns:
-            return Result("skill.source", "warn", "；".join(warns),
-                          next="可移植时改用项目相对路径 .qoder/skills/agent-crew")
+            if worktree is not None:
+                next_step = ("将 skillRoot 改指稳定分发副本（如 skills/engineering/agent-crew "
+                             "指向 repos/local 实体），避免依赖开发 worktree 造成版本漂移")
+            else:
+                next_step = "可移植时改用项目相对路径 .qoder/skills/agent-crew"
+            return Result("skill.source", "warn", "；".join(warns), next=next_step)
         return Result("skill.source", "pass", f"skillRoot 合法：{skill_root}")
 
     def check_docs_links(self) -> Result:
