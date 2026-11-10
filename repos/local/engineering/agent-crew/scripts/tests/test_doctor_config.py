@@ -7,19 +7,16 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from doctor_fixtures import (
-    ProjectFixture,
-    make_linked_worktree,
-    make_separate_git_dir_clone,
-    make_submodule_checkout,
-)
+from doctor_fixtures import ProjectFixture, make_linked_worktree
 
 _SCRIPTS = Path(__file__).resolve().parent.parent
+_SKILL_REL = Path("repos/local/engineering/agent-crew")
 
 
 def _load_module(name: str, filename: str):
@@ -32,6 +29,61 @@ def _load_module(name: str, filename: str):
 
 DOCTOR_MOD = _load_module("doctor_config_under_test", "doctor.py")
 INIT_MOD = _load_module("init_config_under_test", "init.py")
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+         "-c", "protocol.file.allow=always", *args],
+        check=True, capture_output=True,
+    )
+
+
+def _seed_repo(repo: Path) -> None:
+    repo.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "README.md").write_text("# src repo\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "seed")
+
+
+def _write_skill_skeleton(root: Path) -> Path:
+    skill = root / _SKILL_REL
+    (skill / "references").mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: agent-crew\nversion: 2.1.0\n---\n# skill fixture\n",
+        encoding="utf-8")
+    return skill
+
+
+def make_submodule_checkout(base: Path) -> tuple[Path, Path]:
+    """建「主仓 + 真实 git submodule 检出」，返回 (主仓技能源目录, submodule 技能源目录)。
+
+    submodule 根的 .git 为文件、gitdir 指向 <super>/.git/modules/<name>，属版本固定副本。
+    """
+    repo = base / "src-repo"
+    _seed_repo(repo)
+    super_repo = base / "super"
+    super_repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(super_repo)], check=True)
+    _git(super_repo, "submodule", "add", "-q", str(repo), "skills-src")
+    return _write_skill_skeleton(repo), _write_skill_skeleton(super_repo / "skills-src")
+
+
+def make_separate_git_dir_clone(base: Path) -> tuple[Path, Path]:
+    """建「主仓 + git clone --separate-git-dir 检出」，返回 (主仓, 检出) 技能源目录。
+
+    检出根的 .git 为文件、gitdir 指向外部 git 目录，属版本固定副本。
+    """
+    repo = base / "src-repo"
+    _seed_repo(repo)
+    clone = base / "sep-clone"
+    subprocess.run(
+        ["git", "-c", "protocol.file.allow=always", "clone", "-q",
+         "--separate-git-dir", str(base / "sep-gitdir"), str(repo), str(clone)],
+        check=True, capture_output=True,
+    )
+    return _write_skill_skeleton(repo), _write_skill_skeleton(clone)
 
 
 class DoctorConfigTest(unittest.TestCase):

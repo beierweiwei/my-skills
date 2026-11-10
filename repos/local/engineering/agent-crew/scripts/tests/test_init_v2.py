@@ -16,12 +16,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from doctor_fixtures import (
-    ProjectFixture,
-    make_linked_worktree,
-    make_separate_git_dir_clone,
-    make_submodule_checkout,
-)
+from doctor_fixtures import ProjectFixture, make_linked_worktree
+from test_doctor_config import make_separate_git_dir_clone, make_submodule_checkout
 
 _SCRIPTS = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location("init_v2_mod", _SCRIPTS / "init.py")
