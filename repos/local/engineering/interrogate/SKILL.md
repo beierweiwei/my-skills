@@ -5,9 +5,9 @@ disable-model-invocation: true
 ---
 
 > Provenance: forked from `backnotprop/pstack@0.15.36` (MIT).
-> Changes: made self-contained — scope framing, adversary fan-out, and verification are inlined here instead of delegating to separately installed skills;
-> adds an explicit degradation path (single adversary when a harness cannot run parallel subagents or cross-family models) framed as an upgrade path, not a precondition;
-> harness wording generalized to a subagent/worktree model. Re-check upstream on later revisions.
+> Changes: made self-contained — scope framing, adversary fan-out, verification, and output are inlined here instead of delegating to separately installed skills;
+> economy-tier default — one adversary on the parent model (`inherit-parent`), no longer 3–4; escalate to two only when the diff touches a core module, an external/public API, or a data-security red line, and record the escalation in the report and the owning stream plan's `## Decisions Made`;
+> a single adversary is the default, not a degraded fallback; parallel and cross-family adversaries are an optional upgrade, never a precondition; harness wording generalized to a subagent/worktree model. Re-check upstream on later revisions.
 
 # Interrogate
 
@@ -19,7 +19,17 @@ The scope is what the user names. Otherwise it is the branch diff from its merge
 
 ## Fan out
 
-Default to 3–4 adversaries, one subagent each, spawned in a single message in the background so they run in parallel. Give each a distinct attack angle — for example correctness, edge cases and failure modes, data and state, security and performance — so they do not all fail the same way. Each adversary gets the scope, the intent, and this brief:
+Default to **one adversary** — the economy tier. Run it as one subagent on the parent model (omit `model` so the seat inherits the parent), or run the brief yourself when no subagent is available. It covers the attack angles in sequence: correctness; edge cases and failure modes; data and state; security and performance.
+
+Escalate to **two adversaries** only when any of these holds:
+
+- the diff touches a core module,
+- the diff touches an external or public API,
+- the diff touches a data-security red line (secrets handling, raw customer data, an authorization boundary).
+
+Record the escalation and its reason in the interrogate report and in the owning stream plan's `## Decisions Made`; when the review does not run under a stream plan, say in the report where the decision was recorded. Parallel and cross-family adversaries are an upgrade, never a precondition.
+
+With two adversaries, give each a distinct attack angle — for example correctness, edge cases and failure modes, data and state, security and performance — so they do not all fail the same way. Each adversary gets the scope, the intent, and this brief:
 
 > Break this change. Prove each finding with a run against the real code, such as a failing test, a repro script, or command output that shows the wrong behavior. For a design or plan, run a prototype or probe the current tree. Keep repros in your own worktree. Report each finding with a title, the exact command, the output it printed, and the output the intent requires. Leave out anything you did not run. That covers style, naming, structure, and risks that need a future change to matter. No findings is a valid result.
 
@@ -35,11 +45,11 @@ Rerun every finding's command yourself, in the same isolated environment. Keep a
 - **Findings**: for each verified finding, the command, its output, how it breaks the intent, and the adversary or adversaries that found it. Say "no verified findings" when none survive.
 - **Dropped**: for each adversary, the count of dropped findings and why.
 
-## Degradation: fewer adversaries, same proof bar
+## One adversary is the default; upgrading is optional
 
-Parallel, cross-family adversaries are an enhancement, not a precondition.
+The economy default is a single adversary. Add a second only under the escalation conditions above, and only when the harness can seat it; upgrading is never a precondition for a valid review.
 
-- **Qoder**: if the harness cannot spawn parallel subagents, or cannot seat an adversary from a different model family, degrade to a single adversary — run the brief yourself or in one subagent, and use sequential independent passes (one fresh pass per angle) when you want more than one attempt. Note the degradation and which angles ran in the report. The upgrade path is adding parallel, cross-family adversaries once the harness allows it.
-- **Claude Code**: when a cross-family model is unavailable (for example a missing grok seat), run the adversary on the default same-family model and say so.
+- **Qoder**: if the harness cannot spawn parallel subagents, or cannot seat an adversary from a different model family, run the default single adversary — in one subagent or yourself — and use sequential independent passes (one fresh pass per angle) when you want more than one attempt. Note which angles ran in the report. The upgrade path is a second parallel, cross-family seat once the harness allows it.
+- **Claude Code**: when a cross-family model is unavailable, run the second adversary on the default same-family model and say so.
 
-A degraded run never relaxes the proof bar: unproven suspicions are dropped, not reported as findings.
+Neither the economy run nor a degraded run relaxes the proof bar: unproven suspicions are dropped, not reported as findings. "No verified findings" is a valid result.
