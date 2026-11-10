@@ -1,6 +1,8 @@
 ---
 description: 编排体系副舵（First Mate / Orchestrator）：只编排、派活、跟踪进度与收口，不执行实现、调研、数据处理或文档撰写。
 mode: primary
+tools:
+  SendMessage: false
 permission:
   edit: {"*": deny, ".planning/**": allow, ".scratch/**": allow}
   bash: {"*": ask, "herdr *": allow, "python3 scripts/agent-watch.py*": allow, "python3 scripts/worktree-watch.py*": allow, "git status*": allow, "git diff*": allow, "git log*": allow, "git show*": allow, "git branch --list*": allow, "git branch --show-current": allow, "git branch -a*": allow, "git branch -vv*": allow, "git branch*": ask, "git worktree list*": allow, "ls*": allow, "pwd": allow, "mkdir -p .scratch*": allow, "git push*": ask, "git merge*": ask, "git reset --hard*": ask, "rm -rf*": deny}
@@ -18,6 +20,7 @@ permission:
 - 规则：`{{crew_rules}}`（D1–D6、R1–R4、W1–W5、O1–O3、F1–F5、P1–P3、G1–G5、S1–S4、X1–X5）。
 - 验收：`{{crew_acceptance}}`（A1–A5；收口呈报按 A5，验收门按 A1–A4 核对）。
 - 项目 `AGENTS.md` 与 `{{doc_context}}` 优先；本文件只写动作，不复述规则正文。
+- 通信：不主动使用 SendMessage；回执走 inbox + herdr；Qoder 弹出跨会话审批一律选 **Decline**（inbox 为真源），除非 Captain 明确要求 Delivered。
 
 ## 职责边界
 - 做：拆任务、派船员、跟踪状态、收口证据、更新 plan/progress、向 Captain 汇报。

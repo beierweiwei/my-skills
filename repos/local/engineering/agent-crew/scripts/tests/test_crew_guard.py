@@ -423,20 +423,22 @@ class WakeConditionTest(GuardTestBase):
                 self.assertEqual(result["blocked"], 0)
                 self.assertEqual(self.prompt_calls, [])
 
-    def test_tmp_prefix_outside_tmp_still_wakes(self):
+    def test_external_cwd_blocked_is_ignored(self):
         self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
         self.agents = [{"name": "worker-1", "agent_status": "blocked",
                         "cwd": "/tmpfoo/project"}]
-        guard = self.make_guard()
+        guard = self.make_guard(project_roots={self.root})
         result = guard.run_once()
-        self.assertTrue(result["woke"])
-        self.assertIn("worker-1", self.prompt_calls[0][1])
+        self.assertFalse(result["woke"])
+        self.assertEqual(result["blocked"], 0)
+        self.assertEqual(self.prompt_calls, [])
 
     def test_real_blocked_worker_still_wakes(self):
         self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        project = Path("/home/worker/project")
         self.agents = [{"name": "builder-1", "agent_status": "blocked",
-                        "cwd": "/home/worker/project"}]
-        guard = self.make_guard()
+                        "cwd": str(project)}]
+        guard = self.make_guard(project_roots={project})
         result = guard.run_once()
         self.assertTrue(result["woke"])
         self.assertEqual(len(self.prompt_calls), 1)
@@ -445,8 +447,8 @@ class WakeConditionTest(GuardTestBase):
     def test_probe_working_still_counts_as_running(self):
         self.write_fixture()
         self.agents = [{"name": "s9-probe", "agent_status": "working",
-                        "cwd": "/tmp/s9-probe/session"}]
-        guard = self.make_guard()
+                        "cwd": str(self.root)}]
+        guard = self.make_guard(project_roots={self.root})
         for _ in range(3):
             result = guard.run_once()
             self.assertFalse(result["woke"])
@@ -682,6 +684,62 @@ class PhaseStatusParseTest(GuardTestBase):
         second = guard.run_once()
         self.assertTrue(second["woke"])
         self.assertIn("待办A", self.prompt_calls[0][1])
+
+
+class CwdIsolationTest(GuardTestBase):
+    def test_parse_worktree_paths(self):
+        roots = cg.parse_worktree_paths(
+            "worktree /tmp/main\nHEAD abc\n\nworktree /tmp/linked\nHEAD def\n"
+        )
+        self.assertEqual(
+            {Path("/tmp/main").resolve(), Path("/tmp/linked").resolve()}, roots
+        )
+
+    def test_git_worktree_roots_uses_porcelain_output(self):
+        fake = mock.Mock(returncode=0, stdout=(
+            "worktree /home/project/main\nHEAD a\n\n"
+            "worktree /home/project/linked\nHEAD b\n"
+        ))
+        with mock.patch.object(cg.subprocess, "run", return_value=fake) as run:
+            roots = cg.git_worktree_roots(Path("/home/project/main"))
+        self.assertEqual(
+            {Path("/home/project/main").resolve(), Path("/home/project/linked").resolve()},
+            roots,
+        )
+        self.assertEqual(
+            ["git", "-C", "/home/project/main", "worktree", "list", "--porcelain"],
+            run.call_args.args[0],
+        )
+
+    def test_external_cwd_working_does_not_block_wake(self):
+        self.write_fixture()
+        self.agents = [{"name": "worker-1", "agent_status": "working",
+                        "cwd": "/home/other/project"}]
+        guard = self.make_guard(project_roots={self.root})
+        first = guard.run_once()
+        self.assertEqual(first["running"], 0)
+        second = guard.run_once()
+        self.assertTrue(second["woke"])
+        self.assertIn("待办A", self.prompt_calls[0][1])
+
+    def test_linked_worktree_cwd_blocked_wakes(self):
+        main = Path("/home/project/main")
+        linked = Path("/home/project/linked")
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.agents = [{"name": "builder-1", "agent_status": "blocked",
+                        "cwd": str(linked)}]
+        guard = self.make_guard(project_roots={main, linked})
+        result = guard.run_once()
+        self.assertTrue(result["woke"])
+        self.assertEqual(result["blocked"], 1)
+
+    def test_missing_cwd_falls_back_to_include(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.agents = [{"name": "builder-1", "agent_status": "blocked"}]
+        guard = self.make_guard(project_roots={self.root})
+        result = guard.run_once()
+        self.assertTrue(result["woke"])
+        self.assertIn("builder-1", self.prompt_calls[0][1])
 
 
 class HandoffTest(GuardTestBase):

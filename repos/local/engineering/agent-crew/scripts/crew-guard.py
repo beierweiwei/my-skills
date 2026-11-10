@@ -12,6 +12,9 @@
 - portfolio Backlog 中 T 行且阻塞列无 待 C / blocked / 已完成（complete/done）；
 - 已完成 Phase 的残留 `[ ]` 只记日志，不叫醒。
 在跑口径：Herdr agent_status == working，排除总舵自身与 Captain*；blocked 单独叫醒。
+cwd 隔离：只统计 cwd 在本仓或 `git worktree list --porcelain` 列出的 linked worktree
+内的 agent；外部项目（如 CASE）不参与 running/blocked/快速叫醒。cwd 缺失或不可解析时
+沿用旧口径包含（无法确认归属时不改变既有行为）。
 快速叫醒：上一轮有 working、本轮全部转 idle 且有待办时立即叫醒（仍受 10 分钟冷却）。
 自动交接：每轮读总舵 pane 的 `ctx Nk/1M`（`herdr pane read <pane> --lines 80`），
 按 config `helm.ctxWarn`（默认 0.30）/`helm.ctxHandoff`（默认 0.60）写
@@ -102,6 +105,30 @@ def parse_ctx_k(text: str) -> int | None:
         return None
     matches = CTX_RE.findall(ANSI_RE.sub("", text))
     return int(matches[-1]) if matches else None
+
+
+def parse_worktree_paths(output: str) -> set[Path]:
+    roots: set[Path] = set()
+    for line in output.splitlines():
+        if line.startswith("worktree "):
+            value = line[len("worktree "):].strip()
+            if value:
+                roots.add(Path(value).expanduser().resolve())
+    return roots
+
+
+def git_worktree_roots(root: Path) -> set[Path]:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "worktree", "list", "--porcelain"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return parse_worktree_paths(proc.stdout) if proc.returncode == 0 else set()
 
 
 def load_config(root: Path) -> dict:
@@ -444,6 +471,8 @@ class Guard:
     last_wake_at: float | None = field(default=None, init=False)
     last_write_at: float | None = field(default=None, init=False)
     handoff_attempted: bool = field(default=False, init=False)
+    project_roots: set[Path] | None = None
+    roots_cache: set[Path] | None = field(default=None, init=False)
 
     def log(self, message: str) -> None:
         if self.log_fn is not None:
@@ -717,6 +746,24 @@ class Guard:
             return {"action": "warn", "reason": reason}
         return {"action": "none"}
 
+    def _roots(self) -> set[Path]:
+        if self.project_roots is not None:
+            return {Path(root).expanduser().resolve() for root in self.project_roots}
+        if self.roots_cache is None:
+            self.roots_cache = {self.root.resolve()} | git_worktree_roots(self.root)
+        return self.roots_cache
+
+    def _in_project(self, agent: dict) -> bool:
+        """只统计本仓 / linked worktree 的 agent；cwd 缺失或不可解析时沿用旧口径包含。"""
+        cwd = agent.get("cwd")
+        if not isinstance(cwd, str) or not cwd.strip():
+            return True
+        try:
+            path = Path(cwd).expanduser().resolve()
+        except (OSError, RuntimeError):
+            return True
+        return any(path == root or root in path.parents for root in self._roots())
+
     def _excluded(self, agent: dict) -> bool:
         name = str(agent.get("name") or "")
         return name == self.helm or name.startswith("Captain")
@@ -789,7 +836,10 @@ class Guard:
             self.log(f"herdr agent list 失败：{type(exc).__name__}: {exc}")
             return {"error": str(exc), "woke": False}
 
-        workers = [agent for agent in agents if not self._excluded(agent)]
+        workers = [
+            agent for agent in agents
+            if not self._excluded(agent) and self._in_project(agent)
+        ]
         running = [
             agent for agent in workers if str(agent.get("agent_status")) == "working"
         ]
@@ -892,7 +942,9 @@ def build_parser() -> argparse.ArgumentParser:
 叫醒口径：有待办 + 无在跑 worker 连续 2 轮；若上一轮有 working、本轮全部转 idle
 则立即叫醒（仍受 10 分钟冷却）；blocked 单独叫醒；
 排除总舵自身与 Captain*（按 agent 名）；blocked 判定排除测试探针（agent 名
-s9-/probe-/test- 前缀，或 cwd 在 /tmp 下），真实 blocked 仍叫醒。优先 herdr agent prompt <helm>；总舵 pane
+s9-/probe-/test- 前缀，或 cwd 在 /tmp 下），真实 blocked 仍叫醒。cwd 隔离：只统计
+cwd 在本仓或 linked worktree（git worktree list --porcelain）内的 agent，外部项目
+忽略；cwd 缺失/不可解析时沿用旧口径包含。优先 herdr agent prompt <helm>；总舵 pane
 聚焦时写 <crew-dir>/guard.wake + 通知。叫醒时执行 plan-status.py --check-fresh；
 每 5 分钟顺带执行 plan-status.py --write。正常零 stdout，事件写 <crew-dir>/guard.log。
 

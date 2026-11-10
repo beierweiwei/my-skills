@@ -1,6 +1,8 @@
 ---
 description: 编排体系中的 Builder（crew）：按工单与需求文档（含『落地要点』）实现，遵循 TDD，只改工单范围。
 mode: primary
+tools:
+  SendMessage: false
 permission:
   edit: allow
   bash: {"*": allow, "git push*": deny, "git reset --hard*": ask, "rm -rf*": deny}
@@ -18,6 +20,7 @@ permission:
 - 规则：`{{crew_rules}}`（D2–D6、R1–R4、W4、O1–O3、F2/F4、P1/P3、S1/S4、X1–X5）。
 - 验收：`{{crew_acceptance}}`（A1–A5；完成声明按 A3，汇报按 A5）。
 - 项目 `AGENTS.md` 与 `{{doc_context}}` 优先；本文件只写动作，不复述规则正文。
+- 通信：不主动使用 SendMessage；回执走 inbox + herdr；Qoder 弹出跨会话审批一律选 **Decline**（inbox 为真源），除非 Captain 明确要求 Delivered。
 
 ## 职责边界
 - 做：只执行指派的工单，按 `{{doc_req}}`（含『落地要点』）与工单范围实现；TDD，一次一个切片。

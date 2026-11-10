@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.1.9 — 2026-11-10
+
+### 新增
+
+- **禁用 SendMessage（权限层）**：Qoder 7 个角色基类 frontmatter 全部加入 `disallowedTools: [SendMessage]`（reviewer 为 `[Write, Edit, SendMessage]`），dispatch 组合后通过 `--disallowed-tools` 传给 qodercli，避免跨会话消息审批卡住主舵；opencode 7 个基类加 `tools: {SendMessage: false}` 等效禁用（opencode 无 SendMessage 工具，保留前向兼容的显式 deny）。项目角色仍不得覆盖 `disallowedTools`/`tools`/`permission`（只取基类）。
+- **回执行为策略**：Qoder/opencode 14 个角色模板补一条——不主动使用 SendMessage；回执走 inbox + herdr；Qoder 弹出跨会话审批一律选 **Decline**（inbox 为真源），除非 Captain 明确要求 Delivered。
+- **BUG-017 guard 按项目 cwd 隔离**：只统计 cwd 在本仓或 `git worktree list --porcelain` 列出的 linked worktree 内的 agent；外部项目（如 CASE）不参与 running/blocked/快速叫醒。cwd 缺失或不可解析时沿用旧口径包含（无法确认归属不改变既有行为，已在 CHANGELOG/帮助中说明）。
+
 ## 2.1.8 — 2026-11-10
 
 ### 新增

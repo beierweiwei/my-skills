@@ -383,11 +383,16 @@ class DispatchTest(unittest.TestCase):
         path = self.role_path("qoder", "builder")
         text = path.read_text(encoding="utf-8")
         head, rest = text.split("---\n", 2)[1:]
-        path.write_text("---\n" + head + "permission:\n  edit: allow\n---\n" + rest,
-                        encoding="utf-8")
-        rc, report = self.compose("builder", "qoder")
-        self.assertEqual(1, rc)
-        self.assertTrue(any("permission" in err for err in report["errors"]), report)
+        for extra in ("permission:\n  edit: allow\n",
+                      "disallowedTools: []\n",
+                      "tools:\n  SendMessage: true\n"):
+            with self.subTest(extra=extra.split(":")[0]):
+                path.write_text("---\n" + head + extra + "---\n" + rest,
+                                encoding="utf-8")
+                rc, report = self.compose("builder", "qoder")
+                self.assertEqual(1, rc)
+                self.assertTrue(any(extra.split(":")[0] in err for err in report["errors"]),
+                                report)
         started = self.start("builder", "qoder")
         self.assertEqual(1, started.returncode)
         self.assertEqual([], self.herdr_calls())
@@ -533,7 +538,30 @@ class DispatchTest(unittest.TestCase):
         self.assertEqual(0, proc.returncode, proc.stderr)
         argv = [c for c in self.herdr_calls() if c[:2] == ["agent", "start"]][0]
         tools = [argv[i + 1] for i, item in enumerate(argv) if item == "--disallowed-tools"]
-        self.assertEqual(["Write", "Edit"], tools)
+        self.assertEqual(["Write", "Edit", "SendMessage"], tools)
+
+    def test_all_qoder_bases_disallow_sendmessage(self):
+        for path in sorted(QODER_TEMPLATES.glob("*.md")):
+            with self.subTest(path=path.name):
+                fm, _ = dispatch_mod.split_frontmatter(path.read_text(encoding="utf-8"))
+                self.assertIsNotNone(fm)
+                self.assertIn("SendMessage", dispatch_mod.parse_list(fm, "disallowedTools"))
+
+    def test_all_bases_document_sendmessage_policy(self):
+        for base in (QODER_TEMPLATES, OPENCODE_TEMPLATES):
+            for path in sorted(base.glob("*.md")):
+                with self.subTest(path=f"{base.name}/{path.name}"):
+                    text = path.read_text(encoding="utf-8")
+                    self.assertIn("不主动使用 SendMessage", text)
+                    self.assertIn("Decline", text)
+                    self.assertIn("inbox", text)
+
+    def test_all_opencode_bases_disable_sendmessage(self):
+        for path in sorted(OPENCODE_TEMPLATES.glob("*.md")):
+            with self.subTest(path=path.name):
+                text = path.read_text(encoding="utf-8")
+                frontmatter = text.split("---\n", 2)[1]
+                self.assertIn("SendMessage: false", frontmatter)
 
     # ---------- ⑧ opencode 命令构造 + 交付 ----------
 
@@ -560,6 +588,7 @@ class DispatchTest(unittest.TestCase):
         self.assertTrue(text.startswith("---\n"))
         frontmatter = text.split("---\n", 2)[1]
         self.assertIn("permission:", frontmatter)
+        self.assertIn("SendMessage: false", frontmatter)
         self.assertIn("BASE_ONLY_MARKER", text)
         self.assertIn("PROJECT_ONLY_MARKER", text)
         self.assertLess(text.index("BASE_ONLY_MARKER"), text.index("PROJECT_ONLY_MARKER"))

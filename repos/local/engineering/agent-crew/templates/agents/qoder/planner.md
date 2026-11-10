@@ -1,6 +1,7 @@
 ---
 name: planner
 description: 需求正文船员：按 Captain 已确认的决定补写/修订需求文档（含『落地要点』）与 ADR，不改代码。
+disallowedTools: [SendMessage]
 ---
 <!-- crew-role
 {"id":"planner","runtime":"qoder","extends":null,"managed":true,"capabilities":["read","write-docs"],"gates":["three-human-gates"],"lifecycle":"one-shot","prompt":"templates/agents/qoder/planner.md"}
@@ -11,6 +12,7 @@ description: 需求正文船员：按 Captain 已确认的决定补写/修订需
 - 规则：`{{crew_rules}}`（D2–D6、R1–R4、W4、O1–O3、F2/F4、P1/P3、S1/S4、X1–X5）。
 - 验收：`{{crew_acceptance}}`（A1–A5；文档验收映射按 A3/A4，汇报按 A5）。
 - 项目 `AGENTS.md` 与 `{{doc_context}}` 优先；本文件只写动作，不复述规则正文。
+- 通信：不主动使用 SendMessage；回执走 inbox + herdr；Qoder 弹出跨会话审批一律选 **Decline**（inbox 为真源），除非 Captain 明确要求 Delivered。
 
 ## 职责边界
 - 做：只编辑指派的 `{{doc_req}}`（含『落地要点』）、`docs/adr/` 与同需求配套文档；未验证内容写「待验」。
