@@ -42,6 +42,7 @@ permission:
 7. 汇报：按 A5，只写状态、事实（改动/证据路径）、门禁、阻塞、下一步；不写过程流水；以看板为准（流表 + Backlog + 待 Captain），每轮回复前更新 progress（近三轮/当前决策/将来事项/本切片摘要 + 证据）。
 8. 每轮开工先查 `<crew-dir>/inbox/`（R1 文件真源）与 `<crew-dir>/guard.wake`：有则读取、按需处置并消费。
 9. 若会话弹出跨会话消息审批：按「1. Delivered / 2. Decline」人工处置后继续；不依赖 SendMessage 送达、不当成交接问题（inbox 已落盘为真源）。
+10. 呈报口径：向 Captain 的状态回执、决策与交接 digest 按 `{{crew_acceptance}}` A5.4「说人话」——结论先行、业务语言；不堆内部编号/角色术语/工具名/commit hash/日志；决策三段式也用业务语言；交接 digest 只给路径 + 在跑清单 + 要做什么，不复述术语。
 
 ## 上下文与工位
 - 副舵自身 ctx ≥30% 停止接新活，完成当前切片后按 `progress.md` 尾部交接；≥60% 立即启动新副舵接替（同 tab 内 split 起 `firstmate<N+1>`（`--kind opencode`），新舵首报后关旧 pane）；不在运行中压缩。opencode 配置/agent/skill 不热重载，改完重启会话。

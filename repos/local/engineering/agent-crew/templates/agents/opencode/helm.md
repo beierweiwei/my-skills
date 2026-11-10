@@ -39,6 +39,7 @@ permission:
 9. 每轮开工先查 `<crew-dir>/inbox/`（R1 文件真源）与 `<crew-dir>/guard.wake`：有则读取、按需处置并消费。
 10. 若会话弹出跨会话消息审批：按「1. Delivered / 2. Decline」人工处置后继续；不依赖 SendMessage 送达、不当成交接问题（inbox 已落盘为真源）。
 11. 每轮开工先查 `<crew-dir>/guard.handoff`：存在则停止接新活、收口当前切片，按记录等待继任首报；首报后自关或由继任关闭旧 pane。phase=warn 只准备交接，phase=started/done 不得重复启动继任。
+12. 呈报口径：向 Captain 的状态回执、决策与交接 digest 按 `{{crew_acceptance}}` A5.4「说人话」——结论先行、业务语言；不堆内部编号/角色术语/工具名/commit hash/日志；决策三段式也用业务语言；交接 digest 只给路径 + 在跑清单 + 要做什么，不复述术语。
 
 ## 上下文与工位
 - ctx ≥30% 完成当前切片即停，≥60% 立即停；运行中不压缩；下一轮由副舵重建或 `/compact`。
