@@ -148,6 +148,7 @@ class GuardTestBase(unittest.TestCase):
         self.status_result = (0, "看板新鲜")
         self.pane_outputs: dict[str, str] = {}
         self.pane_reads: list[tuple[str, int]] = []
+        self.panes: list[dict] = []
         self.dispatch_calls: list[list[str]] = []
         self.dispatch_override = None
 
@@ -161,8 +162,8 @@ class GuardTestBase(unittest.TestCase):
             result = self.dispatch_override(args)
             if result is not None:
                 return result
-        if args[:2] == ["pane", "split"]:
-            return 0, json.dumps({"pane": "wX:pNEW"}), ""
+        if args[:2] == ["tab", "create"]:
+            return 0, json.dumps({"tab": "wX:tNEW", "pane": "wX:pNEW"}), ""
         if args[:1] == ["start"]:
             return 0, json.dumps({"agent": args[args.index("--name") + 1]}), ""
         return 0, "", ""
@@ -193,6 +194,7 @@ class GuardTestBase(unittest.TestCase):
             interval=120,
             clock=lambda: self.now[0],
             list_agents=lambda: self.agents,
+            list_panes=lambda: self.panes,
             prompt=lambda name, message: (
                 self.prompt_calls.append((name, message)) or self.prompt_ok
             ),
@@ -611,6 +613,9 @@ class LockAndOutputTest(GuardTestBase):
             "blocked",
             "Captain*",
             "cron",
+            "tab create",
+            "oldTab",
+            "newTab",
         ):
             self.assertIn(token, text)
 
@@ -752,7 +757,8 @@ class HandoffTest(GuardTestBase):
             config=config,
         )
         self.agents = [
-            {"name": "helm-1", "pane_id": self.OLD_PANE, "agent_status": "working"}
+            {"name": "helm-1", "pane_id": self.OLD_PANE, "tab_id": "wX:tOLD",
+             "workspace_id": "wX", "agent_status": "working"}
         ]
         self.pane_outputs[self.OLD_PANE] = f"status line ctx ({ctx_k}k/1M) tail"
 
@@ -782,6 +788,7 @@ class HandoffTest(GuardTestBase):
         self.assertEqual("warn", fields["phase"])
         self.assertEqual("helm-1", fields["old"])
         self.assertEqual(self.OLD_PANE, fields["oldPane"])
+        self.assertEqual("wX:tOLD", fields["oldTab"])
         self.assertIn("30%", fields["reason"])
         self.assertEqual([], self.dispatch_calls)
         self.assertTrue(any("准备交接" in body for _, body in self.notify_calls))
@@ -798,18 +805,23 @@ class HandoffTest(GuardTestBase):
         result = guard.run_once()
         self.assertFalse(result["woke"])
         self.assertEqual(
-            [["pane", "split", "--pane", self.OLD_PANE, "--direction", "right"],
+            [["tab", "create", "--workspace", "wX", "--cwd", str(self.root),
+              "--label", "总舵", "--no-focus"],
              ["start", "--role", "helm", "--pane", "wX:pNEW",
               "--name", "helm-1-2", "--json"],
              ["prompt", "--agent", "helm-1-2", "--message"]],
             [call[:4] if call[:1] == ["prompt"] else call
              for call in self.dispatch_calls],
         )
+        self.assertEqual(
+            [], [c for c in self.dispatch_calls if c[:2] == ["pane", "split"]])
         fields = self.handoff_fields()
         self.assertEqual("started", fields["phase"])
         self.assertEqual("helm-1", fields["old"])
         self.assertEqual("helm-1-2", fields["new"])
         self.assertEqual("wX:pNEW", fields["newPane"])
+        self.assertEqual("wX:tOLD", fields["oldTab"])
+        self.assertEqual("wX:tNEW", fields["newTab"])
         self.assertEqual([], [c for c in self.dispatch_calls if c[:2] == ["pane", "close"]])
         self.assertTrue(any("交接" in body for _, body in self.notify_calls))
 
@@ -817,6 +829,52 @@ class HandoffTest(GuardTestBase):
         guard.run_once()
         self.assertEqual(before, len(self.dispatch_calls))
         self.assertEqual("started", self.handoff_fields()["phase"])
+
+    def test_tab_create_workspace_falls_back_to_pane_prefix(self):
+        self.prepare_handoff(ctx_k=650)
+        self.agents[0].pop("workspace_id")
+        self.make_guard().run_once()
+        tab_calls = [c for c in self.dispatch_calls if c[:2] == ["tab", "create"]]
+        self.assertEqual(1, len(tab_calls))
+        self.assertEqual("wX", tab_calls[0][tab_calls[0].index("--workspace") + 1])
+
+    def test_no_workspace_fails_closed_before_tab_create(self):
+        self.prepare_handoff(ctx_k=650)
+        self.agents[0]["pane_id"] = "pOLD"  # 无 workspace 冒号前缀
+        self.agents[0].pop("workspace_id")
+        self.pane_outputs["pOLD"] = "status line ctx (650k/1M) tail"
+        self.make_guard().run_once()
+        fields = self.handoff_fields()
+        self.assertEqual("done", fields["phase"])
+        self.assertEqual("failed", fields["result"])
+        self.assertIn("workspace", fields["error"])
+        self.assertEqual([], self.dispatch_calls)
+
+    def test_tab_create_without_tab_id_fails_closed(self):
+        self.prepare_handoff(ctx_k=650)
+
+        def override(args):
+            if args[:2] == ["tab", "create"]:
+                return 0, json.dumps({"pane": "wX:pNEW"}), ""
+            return None
+
+        self.dispatch_override = override
+        self.make_guard().run_once()
+        fields = self.handoff_fields()
+        self.assertEqual("done", fields["phase"])
+        self.assertEqual("failed", fields["result"])
+        self.assertIn("未返回 tab", fields["error"])
+        self.assertFalse([c for c in self.dispatch_calls if c[:1] == ["start"]])
+
+    def test_custom_helm_tab_label_passed_to_tab_create(self):
+        self.prepare_handoff(
+            ctx_k=650,
+            config={"portfolioDir": ".planning/portfolio", "helm": {"tabLabel": "总舵·主"}},
+        )
+        self.make_guard().run_once()
+        tab_calls = [c for c in self.dispatch_calls if c[:2] == ["tab", "create"]]
+        self.assertEqual(1, len(tab_calls))
+        self.assertEqual("总舵·主", tab_calls[0][tab_calls[0].index("--label") + 1])
 
     def test_name_conflict_increments_successor_suffix(self):
         self.prepare_handoff(ctx_k=650)
@@ -872,22 +930,141 @@ class HandoffTest(GuardTestBase):
             {"name": "helm-1-2", "pane_id": "wX:pNEW", "agent_status": "working"},
         ]
         guard.run_once()
-        self.assertEqual([], [c for c in self.dispatch_calls if c[:2] == ["pane", "close"]])
+        self.assertEqual([], [c for c in self.dispatch_calls
+                              if c[:2] in (["pane", "close"], ["tab", "close"])])
 
         self.agents = [
             {"name": "helm-1", "pane_id": self.OLD_PANE, "agent_status": "idle"},
             {"name": "helm-1-2", "pane_id": "wX:pNEW", "agent_status": "idle"},
         ]
         guard.run_once()
-        closes = [c for c in self.dispatch_calls if c[:2] == ["pane", "close"]]
+        closes = [c for c in self.dispatch_calls
+                  if c[:2] in (["pane", "close"], ["tab", "close"])]
+        self.assertEqual(
+            [["pane", "close", "--pane", self.OLD_PANE],
+             ["tab", "close", "--tab", "wX:tOLD"]],
+            closes,
+        )
+        fields = self.handoff_fields()
+        self.assertEqual("done", fields["phase"])
+        self.assertEqual("ok", fields["result"])
+        self.assertEqual("wX:tOLD", fields["oldTab"])
+        self.assertEqual("wX:tNEW", fields["newTab"])
+
+        before = len(self.dispatch_calls)
+        guard.run_once()
+        self.assertEqual(before, len(self.dispatch_calls))
+
+    def test_old_handoff_without_old_tab_closes_only_pane(self):
+        self.prepare_handoff(ctx_k=650)
+        guard = self.make_guard()
+        guard.run_once()
+        self.agents = [
+            {"name": "helm-1", "pane_id": self.OLD_PANE, "agent_status": "idle"},
+            {"name": "helm-1-2", "pane_id": "wX:pNEW", "agent_status": "working"},
+        ]
+        guard.run_once()
+
+        path = self.crew / "guard.handoff"
+        lines = [line for line in path.read_text(encoding="utf-8").splitlines()
+                 if not line.startswith(("oldTab=", "newTab="))]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        self.agents = [
+            {"name": "helm-1", "pane_id": self.OLD_PANE, "agent_status": "idle"},
+            {"name": "helm-1-2", "pane_id": "wX:pNEW", "agent_status": "idle"},
+        ]
+        guard.run_once()
+        closes = [c for c in self.dispatch_calls
+                  if c[:2] in (["pane", "close"], ["tab", "close"])]
         self.assertEqual([["pane", "close", "--pane", self.OLD_PANE]], closes)
         fields = self.handoff_fields()
         self.assertEqual("done", fields["phase"])
         self.assertEqual("ok", fields["result"])
 
+    def test_tab_close_failure_notes_and_finishes_without_retry(self):
+        self.prepare_handoff(ctx_k=650)
+        guard = self.make_guard()
+        guard.run_once()
+        self.agents = [
+            {"name": "helm-1", "pane_id": self.OLD_PANE, "agent_status": "idle"},
+            {"name": "helm-1-2", "pane_id": "wX:pNEW", "agent_status": "working"},
+        ]
+        guard.run_once()
+        self.agents = [
+            {"name": "helm-1", "pane_id": self.OLD_PANE, "agent_status": "idle"},
+            {"name": "helm-1-2", "pane_id": "wX:pNEW", "agent_status": "idle"},
+        ]
+
+        def override(args):
+            if args[:2] == ["tab", "close"]:
+                return 1, "", "tab close boom"
+            return None
+
+        self.dispatch_override = override
+        guard.dispatch = self.fake_dispatch  # type: ignore[method-assign]
+        guard.run_once()
+        fields = self.handoff_fields()
+        self.assertEqual("done", fields["phase"])
+        self.assertEqual("ok", fields["result"])
+        self.assertTrue(any("旧 tab" in line and "关闭失败" in line for line in self.logs))
+        self.assertTrue(any("关闭失败" in body for _, body in self.notify_calls))
+
         before = len(self.dispatch_calls)
         guard.run_once()
         self.assertEqual(before, len(self.dispatch_calls))
+
+    def test_residual_panes_in_old_tab_skip_tab_close(self):
+        self.prepare_handoff(ctx_k=650)
+        self.panes = [{"pane_id": "wX:pEXTRA", "tab_id": "wX:tOLD"}]
+        guard = self.make_guard()
+        guard.run_once()
+        self.agents = [
+            {"name": "helm-1", "pane_id": self.OLD_PANE, "agent_status": "idle"},
+            {"name": "helm-1-2", "pane_id": "wX:pNEW", "agent_status": "working"},
+        ]
+        guard.run_once()
+        self.agents = [
+            {"name": "helm-1", "pane_id": self.OLD_PANE, "agent_status": "idle"},
+            {"name": "helm-1-2", "pane_id": "wX:pNEW", "agent_status": "idle"},
+        ]
+        guard.run_once()
+        closes = [c for c in self.dispatch_calls
+                  if c[:2] in (["pane", "close"], ["tab", "close"])]
+        self.assertEqual([["pane", "close", "--pane", self.OLD_PANE]], closes)
+        fields = self.handoff_fields()
+        self.assertEqual("done", fields["phase"])
+        self.assertEqual("ok", fields["result"])
+        self.assertTrue(any("仍有 1 个 pane" in line for line in self.logs))
+        self.assertTrue(any("仍有 1 个 pane" in body for _, body in self.notify_calls))
+
+    def test_pane_list_failure_skips_old_tab_close(self):
+        self.prepare_handoff(ctx_k=650)
+
+        def broken():
+            raise RuntimeError("pane list boom")
+
+        self.panes = [{"pane_id": "wX:pEXTRA", "tab_id": "wX:tOLD"}]
+        guard = self.make_guard(list_panes=broken)
+        guard.run_once()
+        self.agents = [
+            {"name": "helm-1", "pane_id": self.OLD_PANE, "agent_status": "idle"},
+            {"name": "helm-1-2", "pane_id": "wX:pNEW", "agent_status": "working"},
+        ]
+        guard.run_once()
+        self.agents = [
+            {"name": "helm-1", "pane_id": self.OLD_PANE, "agent_status": "idle"},
+            {"name": "helm-1-2", "pane_id": "wX:pNEW", "agent_status": "idle"},
+        ]
+        guard.run_once()
+        closes = [c for c in self.dispatch_calls
+                  if c[:2] in (["pane", "close"], ["tab", "close"])]
+        self.assertEqual([["pane", "close", "--pane", self.OLD_PANE]], closes)
+        fields = self.handoff_fields()
+        self.assertEqual("done", fields["phase"])
+        self.assertEqual("ok", fields["result"])
+        self.assertTrue(any("剩余 pane 检查失败" in line for line in self.logs))
+        self.assertTrue(any("无法确认剩余 pane" in body for _, body in self.notify_calls))
 
     def test_custom_thresholds_are_read_from_config(self):
         self.prepare_handoff(
@@ -916,15 +1093,15 @@ class HandoffTest(GuardTestBase):
         self.assertTrue(any("ctx 解析失败" in line for line in self.logs))
         self.assertIn("待办A", self.prompt_calls[0][1])
 
-    def test_split_start_prompt_failure_notifies_once_and_does_not_loop(self):
-        for step in ("split", "start", "prompt"):
+    def test_tab_create_start_prompt_failure_notifies_once_and_does_not_loop(self):
+        for step in ("tab", "start", "prompt"):
             with self.subTest(step=step):
                 self.reset_handoff_artifacts()
                 self.prepare_handoff(ctx_k=650)
 
                 def override(args, step=step):
-                    if step == "split" and args[:2] == ["pane", "split"]:
-                        return 1, "", "split boom"
+                    if step == "tab" and args[:2] == ["tab", "create"]:
+                        return 1, "", "tab boom"
                     if step == "start" and args[:1] == ["start"]:
                         return 1, "", "start boom"
                     if step == "prompt" and args[:1] == ["prompt"]:
@@ -940,7 +1117,11 @@ class HandoffTest(GuardTestBase):
                 self.assertIn(step, fields["error"])
                 self.assertTrue(any("失败" in body for _, body in self.notify_calls))
                 self.assertEqual([], [c for c in self.dispatch_calls
-                                      if c[:2] == ["pane", "close"]])
+                                      if c[:2] in (["pane", "split"], ["pane", "close"],
+                                                   ["tab", "close"])])
+                if step == "tab":
+                    self.assertFalse([c for c in self.dispatch_calls
+                                      if c[:1] == ["start"]])
 
                 before = len(self.dispatch_calls)
                 guard.run_once()

@@ -2,8 +2,8 @@
 """pane-audit.py crew-v2 1.6 用例：巡检告警 / dry-run / --apply 安全关闭。
 
 覆盖：
-① 单 tab >3 pane、pane 无 registry、registry 无 pane、空 tab 各自告警；
-② 白名单（Captain·* / 流程优化·* / 总舵 tab / helm agent / --helm-pane / --whitelist-prefix）跳过；
+① 单 tab >6 pane、总舵 tab >1 pane、总舵空 tab / 孤儿 pane、pane 无 registry、registry 无 pane、空 tab 各自告警；
+② 白名单（Captain·* / 流程优化·* / 总舵 tab 仅兜底报告 / helm agent / --helm-pane / --whitelist-prefix）口径；
 ③ dry-run 不关闭任何 pane/tab；--apply 只关白名单外的空 tab，working 与孤儿 pane 不动；
 ④ 输出含可执行下一步；CLI 自解释；fixture JSON 注入，不调用真实 herdr。
 """
@@ -61,21 +61,56 @@ def kinds(findings: list[pa.Finding]) -> list[tuple[str, str]]:
 class AuditRulesTest(unittest.TestCase):
     """契约①②：四类告警与白名单口径（纯函数）。"""
 
-    def test_tab_over_three_panes_warned(self):
+    def test_tab_over_six_panes_warned(self):
         data = snapshot(
             [tab("t1", "需求·任务")],
-            [pane(f"p{i}", "t1") for i in range(4)],
-            [agent(f"a{i}", f"p{i}") for i in range(4)],
+            [pane(f"p{i}", "t1") for i in range(7)],
+            [agent(f"a{i}", f"p{i}") for i in range(7)],
         )
         self.assertEqual(kinds(pa.audit(data)), [("tab-overflow", "t1")])
 
-    def test_three_panes_is_within_limit(self):
+    def test_six_panes_is_within_limit(self):
         data = snapshot(
             [tab("t1", "需求·任务")],
-            [pane(f"p{i}", "t1") for i in range(3)],
-            [agent(f"a{i}", f"p{i}") for i in range(3)],
+            [pane(f"p{i}", "t1") for i in range(6)],
+            [agent(f"a{i}", f"p{i}") for i in range(6)],
         )
         self.assertEqual(pa.audit(data), [])
+
+    def test_helm_tab_multi_pane_warned_report_only(self):
+        data = snapshot(
+            [tab("t3", "总舵")],
+            [pane("p1", "t3"), pane("p2", "t3")],
+            [agent("helm-1", "p1"), agent("helm-2", "p2")],
+        )
+        findings = pa.audit(data)
+        self.assertEqual(kinds(findings), [("helm-tab-multi-pane", "t3")])
+        self.assertIsNone(findings[0].action)  # 只报告，不自动关
+        self.assertIn("2 个 pane", findings[0].detail)
+
+    def test_helm_tab_single_pane_not_flagged(self):
+        data = snapshot(
+            [tab("t3", "总舵")],
+            [pane("p1", "t3")],
+            [agent("helm-1", "p1")],
+        )
+        self.assertEqual(pa.audit(data), [])
+
+    def test_helm_tab_empty_reported_without_action(self):
+        data = snapshot([tab("t3", "crew总舵")], [], [])
+        findings = pa.audit(data)
+        self.assertEqual(kinds(findings), [("empty-tab", "t3")])
+        self.assertIsNone(findings[0].action)  # 总舵 tab 仅报告，不自动关
+
+    def test_helm_tab_orphan_pane_reported(self):
+        data = snapshot(
+            [tab("t3", "总舵")],
+            [pane("p2", "t3")],
+            [],
+        )
+        findings = pa.audit(data)
+        self.assertEqual(kinds(findings), [("orphan-pane", "p2")])
+        self.assertIsNone(findings[0].action)
 
     def test_orphan_pane_warned(self):
         data = snapshot(
@@ -110,11 +145,11 @@ class AuditRulesTest(unittest.TestCase):
     def test_whitelisted_labels_never_flagged(self):
         data = snapshot(
             [tab("t1", "Captain·甲"), tab("t2", "流程优化·乙"), tab("t3", "总舵"), tab("t4", "普通")],
-            [pane(f"p{i}", "t1") for i in range(4)]
-            + [pane(f"q{i}", "t2") for i in range(4)]
-            + [pane(f"r{i}", "t3") for i in range(4)]
+            [pane(f"p{i}", "t1") for i in range(7)]
+            + [pane(f"q{i}", "t2") for i in range(7)]
+            + [pane("r1", "t3")]
             + [pane("z1", "t4")],
-            [],
+            [agent("helm-1", "r1", tab_id="t3")],
         )
         self.assertEqual(kinds(pa.audit(data)), [("orphan-pane", "z1")])
 
@@ -198,14 +233,14 @@ class _MainTest(unittest.TestCase):
     def _apply_fixture(self) -> dict:
         return snapshot(
             [
-                tab("t1", "需求·任务"),   # 4 pane → 超限（仅报告）
+                tab("t1", "需求·任务"),   # 7 pane → 超限（仅报告）
                 tab("t2", "杂活"),        # 空 tab → 安全关闭
                 tab("t3", "Captain·甲"),  # 白名单空 tab → 不关
                 tab("t4", "普通"),        # 孤儿 pane → 仅报告
             ],
-            [pane(f"p{i}", "t1", status="working") for i in range(1, 5)]
+            [pane(f"p{i}", "t1", status="working") for i in range(1, 8)]
             + [pane("p9", "t4")],
-            [agent(f"a{i}", f"p{i}") for i in range(1, 5)],
+            [agent(f"a{i}", f"p{i}") for i in range(1, 8)],
         )
 
     def test_dry_run_reports_but_closes_nothing(self):
@@ -267,7 +302,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(cm.exception.code, 0)
         text = out.getvalue()
         for token in ("--snapshot", "--apply", "--whitelist-prefix", "--helm-pane",
-                      "白名单", "working", "dry-run"):
+                      "白名单", "working", "dry-run", "≤6", "总舵"):
             self.assertIn(token, text)
 
 

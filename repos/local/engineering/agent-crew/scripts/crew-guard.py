@@ -18,8 +18,8 @@ cwd 隔离：只统计 cwd 在本仓或 `git worktree list --porcelain` 列出�
 快速叫醒：上一轮有 working、本轮全部转 idle 且有待办时立即叫醒（仍受 10 分钟冷却）。
 自动交接：每轮读总舵 pane 的 `ctx Nk/1M`（`herdr pane read <pane> --lines 80`），
 按 config `helm.ctxWarn`（默认 0.30）/`helm.ctxHandoff`（默认 0.60）写
-<crew-dir>/guard.handoff 并通知；≥交接阈值一次性新建 pane/继任/首报/关旧 pane，
-失败只通知不循环，不杀旧舵。
+<crew-dir>/guard.handoff 并通知；≥交接阈值一次性新建 tab/继任/首报后关旧 pane
+与旧 tab，失败只通知不循环，不杀旧舵。
 
 用法：
   python3 scripts/crew-guard.py                 # 每 120s 一轮
@@ -63,6 +63,7 @@ CTX_RE = re.compile(r"ctx\s*\(?\s*(\d+)k\s*/\s*1M\s*\)?", re.IGNORECASE)
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 DEFAULT_CTX_WARN = 0.30
 DEFAULT_CTX_HANDOFF = 0.60
+DEFAULT_TAB_LABEL = "总舵"
 
 
 @dataclass(frozen=True)
@@ -135,7 +136,11 @@ def load_config(root: Path) -> dict:
     config = {
         "portfolioDir": ".planning/portfolio",
         "backlog": {"agentPrefix": "T"},
-        "helm": {"ctxWarn": DEFAULT_CTX_WARN, "ctxHandoff": DEFAULT_CTX_HANDOFF},
+        "helm": {
+            "ctxWarn": DEFAULT_CTX_WARN,
+            "ctxHandoff": DEFAULT_CTX_HANDOFF,
+            "tabLabel": DEFAULT_TAB_LABEL,
+        },
     }
     path = root / ".planning" / "orchestration.json"
     try:
@@ -159,6 +164,9 @@ def load_config(root: Path) -> dict:
             value = helm.get(key)
             if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value <= 1:
                 config["helm"][key] = float(value)
+        label = helm.get("tabLabel")
+        if isinstance(label, str) and label.strip():
+            config["helm"]["tabLabel"] = label.strip()
     return config
 
 
@@ -321,6 +329,22 @@ def herdr_agents() -> list[dict]:
     return payload.get("result", {}).get("agents", [])
 
 
+def herdr_panes() -> list[dict]:
+    env = {**os.environ, "HERDR_ENV": "1"}
+    proc = subprocess.run(
+        ["herdr", "pane", "list"],
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+        timeout=15,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or "herdr pane list failed")
+    payload = json.loads(proc.stdout)
+    return payload.get("result", {}).get("panes", [])
+
+
 def herdr_prompt(name: str, message: str) -> bool:
     try:
         proc = subprocess.run(
@@ -460,6 +484,7 @@ class Guard:
     interval: int = 120
     clock: Callable[[], float] = time.time
     list_agents: Callable[[], list[dict]] = herdr_agents
+    list_panes: Callable[[], list[dict]] = herdr_panes
     prompt: Callable[[str, str], bool] = herdr_prompt
     notify: Callable[[str, str], bool] = herdr_notify
     pane_read: Callable[[str, int], str] = herdr_pane_read
@@ -492,8 +517,8 @@ class Guard:
     def _write_handoff(self, **updates: object) -> None:
         fields = self._read_handoff()
         fields.update({key: str(value).replace("\n", " ") for key, value in updates.items()})
-        order = ("phase", "old", "oldPane", "new", "newPane", "time", "reason",
-                 "result", "error", "successorWasWorking")
+        order = ("phase", "old", "oldPane", "oldTab", "new", "newPane", "newTab",
+                 "time", "reason", "result", "error", "successorWasWorking")
         lines = [f"{key}={fields[key]}" for key in order if key in fields]
         lines.extend(f"{key}={value}" for key, value in fields.items() if key not in order)
         atomic_write_text(self.crew_dir / "guard.handoff", "\n".join(lines) + "\n")
@@ -581,7 +606,7 @@ class Guard:
         return candidate
 
     @staticmethod
-    def _extract_pane(output: str) -> str:
+    def _extract_id(output: str, keys: tuple[str, ...]) -> str:
         try:
             data = json.loads(output)
         except ValueError:
@@ -589,7 +614,7 @@ class Guard:
 
         def walk(value: object) -> str:
             if isinstance(value, dict):
-                for key in ("pane_id", "pane"):
+                for key in keys:
                     item = value.get(key)
                     if isinstance(item, str) and ":" in item:
                         return item
@@ -606,30 +631,56 @@ class Guard:
 
         return walk(data)
 
+    @staticmethod
+    def _extract_pane(output: str) -> str:
+        return Guard._extract_id(output, ("pane_id", "pane"))
+
+    @staticmethod
+    def _extract_tab(output: str) -> str:
+        return Guard._extract_id(output, ("tab_id", "tab"))
+
     def _start_handoff(self, agents: list[dict], ctx_k: int, old_pane: str) -> dict:
         if self.handoff_attempted:
             return {"action": "wait", "reason": "交接已尝试，等待继任首报"}
         self.handoff_attempted = True
         pct = ctx_k / 1000.0
         reason = f"ctx {ctx_k}k/1M ≥ {pct:.0%} 交接阈值"
+        old_agent = self._find_agent(agents, self.helm)
+        old_tab = str(old_agent.get("tab_id") or "") if old_agent else ""
+        workspace = str(old_agent.get("workspace_id") or "") if old_agent else ""
+        if not workspace and ":" in old_pane:
+            workspace = old_pane.split(":", 1)[0]
         base = {
             "old": self.helm,
             "oldPane": old_pane,
+            "oldTab": old_tab,
             "time": utc_now(),
             "reason": reason,
         }
+        if not workspace:
+            return self._handoff_fail(
+                "tab create",
+                "无法确定 workspace（agent 无 workspace_id 且旧 pane 无冒号前缀）",
+                base,
+            )
         successor = self._successor_name(agents)
+        tab_label = load_config(self.root)["helm"]["tabLabel"]
 
         code, output, error = self.dispatch(
-            self.root, ["pane", "split", "--pane", old_pane, "--direction", "right"]
+            self.root,
+            ["tab", "create", "--workspace", workspace, "--cwd", str(self.root),
+             "--label", tab_label, "--no-focus"],
         )
         if code != 0:
-            return self._handoff_fail("pane split", error or output, base)
+            return self._handoff_fail("tab create", error or output, base)
         new_pane = self._extract_pane(output)
+        new_tab = self._extract_tab(output)
         if not new_pane:
-            return self._handoff_fail("pane split", f"未返回 pane：{output.strip()}", base)
+            return self._handoff_fail("tab create", f"未返回 pane：{output.strip()}", base)
+        if not new_tab:
+            return self._handoff_fail("tab create", f"未返回 tab：{output.strip()}", base)
 
-        base.update({"new": successor, "newPane": new_pane})
+        base.update({"new": successor, "newPane": new_pane, "newTab": new_tab})
         start_args = ["start", "--role", "helm", "--pane", new_pane]
         runtime = self._helm_runtime()
         if runtime:
@@ -645,7 +696,7 @@ class Guard:
             f"先读 {portfolio}/task_plan.md、findings.md、progress.md（含 progress 尾部），"
             "再读各流 plan 的 Next Step / Status。\n"
             "完成接手首报（当前进度/在跑 agent/待办/下一步），首报前不接新活；"
-            "首报后 guard 会确认并关闭旧舵 pane。"
+            "首报后 guard 会确认并关闭旧舵 pane 与旧 tab。"
         )
         code, output, error = self.dispatch(
             self.root, ["prompt", "--agent", successor, "--message", message]
@@ -658,11 +709,12 @@ class Guard:
         )
         self._notify_handoff(
             "guard 交接",
-            f"交接已启动：继任总舵 {successor}（pane {new_pane}），旧舵 {self.helm} 待首报后关闭；请 Captain 知悉。",
+            f"交接已启动：继任总舵 {successor}（pane {new_pane}，tab {new_tab}），"
+            f"旧舵 {self.helm} 待首报后关闭；请 Captain 知悉。",
         )
-        self.log(f"交接已启动：{self.helm} → {successor}（pane {new_pane}）")
+        self.log(f"交接已启动：{self.helm} → {successor}（pane {new_pane}，tab {new_tab}）")
         return {"action": "started", "reason": reason, "new": successor,
-                "newPane": new_pane}
+                "newPane": new_pane, "newTab": new_tab}
 
     def _continue_handoff(self, fields: dict[str, str], agents: list[dict]) -> dict:
         successor = fields.get("new", "")
@@ -687,21 +739,55 @@ class Guard:
         base = {
             "old": fields.get("old", self.helm),
             "oldPane": old_pane,
+            "oldTab": fields.get("oldTab", ""),
             "new": successor,
             "newPane": fields.get("newPane", ""),
+            "newTab": fields.get("newTab", ""),
             "time": utc_now(),
             "reason": fields.get("reason", ""),
         }
         close_note = "旧舵仍在运行，未关闭"
+        pane_closed = False
         if old_pane and old_status in ("", "idle", "done", "unknown"):
             code, output, error = self.dispatch(
                 self.root, ["pane", "close", "--pane", old_pane]
             )
             if code != 0:
                 return self._handoff_fail("pane close", error or output, base)
+            pane_closed = True
             close_note = "旧舵 pane 已关闭"
         elif not old_pane:
             close_note = "旧舵 pane 未知，未关闭"
+
+        old_tab = fields.get("oldTab", "")
+        if pane_closed and old_tab:
+            remaining = None
+            try:
+                remaining = [
+                    pane for pane in self.list_panes()
+                    if isinstance(pane, dict)
+                    and str(pane.get("tab_id") or "") == old_tab
+                ]
+            except Exception as exc:  # noqa: BLE001 - 无法确认剩余 pane 时不关旧 tab
+                self.log(
+                    f"旧 tab {old_tab} 剩余 pane 检查失败：{type(exc).__name__}: {exc}"
+                )
+            if remaining is None:
+                close_note += f"；旧 tab {old_tab} 未关闭（无法确认剩余 pane）"
+            elif remaining:
+                close_note += (
+                    f"；旧 tab {old_tab} 仍有 {len(remaining)} 个 pane，未关闭"
+                )
+            else:
+                code, output, error = self.dispatch(
+                    self.root, ["tab", "close", "--tab", old_tab]
+                )
+                if code != 0:
+                    detail = (error or output).strip()
+                    close_note += f"；旧 tab {old_tab} 关闭失败（{detail}），待人工或 pane-audit 兜底"
+                    self.log(f"旧 tab {old_tab} 关闭失败：{detail}")
+                else:
+                    close_note += f"；旧 tab {old_tab} 已关闭"
 
         self._write_handoff(
             **base, phase="done", result="ok", successorWasWorking="1",
@@ -735,8 +821,11 @@ class Guard:
             if phase == "warn":
                 return {"action": "none"}
             reason = f"ctx {ctx_k}k/1M ≥ {cfg['ctxWarn']:.0%} 预警阈值"
+            helm_agent = self._find_agent(agents, self.helm)
+            old_tab = str(helm_agent.get("tab_id") or "") if helm_agent else ""
             self._write_handoff(
-                phase="warn", old=self.helm, oldPane=pane, time=utc_now(), reason=reason,
+                phase="warn", old=self.helm, oldPane=pane, oldTab=old_tab,
+                time=utc_now(), reason=reason,
             )
             self._notify_handoff(
                 "guard 交接预警",
@@ -950,8 +1039,12 @@ cwd 在本仓或 linked worktree（git worktree list --porcelain）内的 agent�
 
 自动交接：每轮 `herdr pane read <pane> --lines 80` 解析总舵 `ctx Nk/1M`；
 ctxWarn（默认 30%）写 <crew-dir>/guard.handoff phase=warn 并通知；
-ctxHandoff（默认 60%）一次性 split/start --name <继任>/prompt/首报后 close 旧 pane，
-失败只通知+记录（phase=done, result=failed），不循环、不杀旧舵。
+ctxHandoff（默认 60%）一次性 `dispatch.py tab create` 新 tab（配置 helm.tabLabel
+默认「总舵」）→ `start --name <继任>` → `prompt` → 首报后 close 旧 pane，确认旧 tab
+无剩余 pane 后 close 旧 tab；guard.handoff 记录 oldTab/newTab（旧文件缺字段时只关旧 pane）；
+总舵 tab 永不 split。失败只通知+记录（phase=done, result=failed），不循环、不杀旧舵、
+不回落 pane split；旧 tab 有剩余 pane/无法确认或关闭失败只记 note，由人工或
+pane-audit --apply 兜底。
 
 兜底建议：30–60 分钟 cron 只检查 guard 进程存活（如 pgrep -f crew-guard.py），
 本脚本不自动创建 cron。

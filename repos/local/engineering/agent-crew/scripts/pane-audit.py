@@ -3,14 +3,17 @@
 
 巡检口径（decisions §3）：
 - registry 指 Herdr 运行时 agent 注册表（`herdr agent list`）；
-- 单 tab 最多 3 个 pane（含 root），超出告警（仅报告，人工决定迁出/关闭）；
+- 单 tab 最多 6 个 pane（含 root），超出告警（仅报告，人工决定迁出/关闭）；
+- 总舵 tab（标签含「总舵」）只允许 1 个 pane，多 pane 告警；空 tab 与无 registry 的
+  pane 也报告（均仅报告，不自动关）；
 - 有 pane 无 registry（agent list 无对应 pane）告警；孤儿 pane 无法区分人工终端与
   失联 agent，只报告不自动关；
 - 有 registry 无 pane（registry 指向不存在的 pane）告警；
 - 空 tab（无 pane）告警，--apply 时自动关闭（唯一安全自动动作）；
 - working 永不关闭；
-- 白名单默认：tab 标签前缀 `Captain·` / `流程优化·`、tab 标签「总舵」、agent 名 `helm*`；
-  另可用 `--whitelist-prefix` / `--helm-pane` 追加。
+- 白名单默认：tab 标签前缀 `Captain·` / `流程优化·` 整体跳过；tab 标签含「总舵」只做
+  单 pane / 空 tab / 孤儿 pane 检查（均仅报告）；agent 名 `helm*`；另可用
+  `--whitelist-prefix` / `--helm-pane` 追加。
 
 数据源：默认 `herdr api snapshot`，失败退回 `tab list` + `pane list` + `agent list`；
 `--snapshot FILE` 注入 fixture JSON（测试/复算用，不调用 herdr）。
@@ -31,12 +34,13 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-MAX_PANES_PER_TAB = 3
+MAX_PANES_PER_TAB = 6
 DEFAULT_WHITELIST_PREFIXES = ("Captain·", "流程优化·")
 HELM_TAB_PREFIX = "总舵"
 HELM_AGENT_PREFIX = "helm"
 KIND_TEXT = {
     "tab-overflow": "单 tab pane 超限",
+    "helm-tab-multi-pane": "总舵 tab 多 pane",
     "orphan-pane": "pane 无 registry",
     "orphan-registry": "registry 无 pane",
     "empty-tab": "空 tab",
@@ -160,7 +164,11 @@ def filter_workspace(items: list[dict], workspace: str | None) -> list[dict]:
 
 def is_whitelisted_tab(tab: dict, prefixes: tuple[str, ...]) -> bool:
     label = str(tab.get("label") or "").strip()
-    return label.startswith(prefixes) or label.startswith(HELM_TAB_PREFIX)
+    return label.startswith(prefixes) or HELM_TAB_PREFIX in label
+
+
+def is_helm_tab(tab: dict) -> bool:
+    return HELM_TAB_PREFIX in str(tab.get("label") or "").strip()
 
 
 def is_helm_agent(agent: dict) -> bool:
@@ -197,10 +205,26 @@ def audit(
     findings: list[Finding] = []
 
     for tab_id, tab in tab_by_id.items():
-        if is_whitelisted_tab(tab, whitelist_prefixes):
-            continue
         label = _label(tab)
         child_panes = panes_by_tab.get(tab_id, [])
+        if is_helm_tab(tab):
+            if not child_panes:
+                findings.append(Finding(
+                    "empty-tab", tab_id, label, "无 pane（总舵 tab 仅报告，不自动关）",
+                    None,
+                    "确认总舵已迁出后手动关闭："
+                    f"`python3 scripts/dispatch.py tab close --tab {tab_id}`",
+                ))
+            elif len(child_panes) > 1:
+                findings.append(Finding(
+                    "helm-tab-multi-pane", tab_id, label,
+                    f"{len(child_panes)} 个 pane（总舵 tab 只保留 1 个 pane，含 root）", None,
+                    "人工确认后关闭多余 pane（`herdr pane list --tab "
+                    f"{tab_id}`）；总舵换舵请另开新 tab",
+                ))
+            continue
+        if is_whitelisted_tab(tab, whitelist_prefixes):
+            continue
         if not child_panes:
             findings.append(Finding(
                 "empty-tab", tab_id, label, "无 pane", "tab",
@@ -219,7 +243,7 @@ def audit(
             continue
         pane_id = str(pane_id)
         tab = tab_by_id.get(str(pane.get("tab_id")))
-        if tab and is_whitelisted_tab(tab, whitelist_prefixes):
+        if tab and is_whitelisted_tab(tab, whitelist_prefixes) and not is_helm_tab(tab):
             continue
         if pane_id in helm_panes:
             continue
@@ -299,10 +323,11 @@ def build_parser() -> argparse.ArgumentParser:
     return argparse.ArgumentParser(
         description="工位/tab 巡检：默认 dry-run 只报告，--apply 才关闭安全项。",
         epilog=(
-            "巡检口径：单 tab ≤3 pane（含 root）；pane 无 registry / registry 无 pane / 空 tab 告警；"
+            "巡检口径：单 tab ≤6 pane（含 root）；总舵 tab 只允许 1 个 pane（多 pane 仅报告），"
+            "空 tab / 孤儿 pane 也仅报告；pane 无 registry / registry 无 pane / 空 tab 告警；"
             "working 永不关闭。\n"
-            "白名单默认：tab 标签前缀 Captain· / 流程优化·、tab 标签「总舵」、agent 名 helm*；"
-            "可用 --whitelist-prefix / --helm-pane 追加。\n"
+            "白名单默认：tab 标签前缀 Captain· / 流程优化· 整体跳过；tab 标签含「总舵」只做单 pane/"
+            "空 tab/孤儿 pane 检查（均仅报告）；agent 名 helm*；可用 --whitelist-prefix / --helm-pane 追加。\n"
             "安全自动动作仅「关闭空 tab」，其余告警给出手动下一步。\n"
             "示例：python3 scripts/pane-audit.py --snapshot snapshot.json\n"
             "      python3 scripts/pane-audit.py --apply"

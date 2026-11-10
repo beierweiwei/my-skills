@@ -30,6 +30,7 @@
 - 任务状态：`.planning/<task>/` 三文件为唯一真源；看板由 `python3 scripts/plan-status.py --write` 派生，勿手改；交接前 `--check-fresh`。
 - 状态/回执/占用/值守：`python3 scripts/crew-state.py`、`crew-msg.py`、`crew-ticket.py`、`crew-guard.py`；工位巡检 `pane-audit.py`。
 - 角色启动复用同一工位与 tab；回收窗与标签按 W4–W5。
+- 总舵 tab 单 pane（换舵另开 tab）；其余 tab 容量按 W2（≤6 pane）。
 
 ### 剧本库（playbook 路由）
 

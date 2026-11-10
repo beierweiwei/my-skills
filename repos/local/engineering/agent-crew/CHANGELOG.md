@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.2.2 — 2026-11-10
+
+### 新增
+
+- **W2 每 tab 容量 3→6**：`references/crew-rules.md` W2 上限改为 6 个 pane（含 root）；`pane-audit.py` 阈值同步（6 pane 合法、7 pane 告警 `tab-overflow`），docstring/`--help` 口径同步。
+- **总舵 tab 单 pane**：W2 新增「总舵 tab 只保留总舵自身 1 个 pane，不得 split；总舵换舵另开新 tab，继任首报后关旧 pane/旧 tab」。`pane-audit.py` 新增 `helm-tab-multi-pane` 检查（tab 标签含「总舵」且 pane>1 → 仅报告 action=None，不自动关）；总舵 tab 同时兜底报告空 tab（`empty-tab`）与无 registry 的 pane（`orphan-pane`），均仅报告；`Captain·`/`流程优化·` 前缀仍整体跳过。
+
+### 变更
+
+- **guard 自动交接改新 tab**：`crew-guard.py` 交接流程由同 tab `pane split` 改为 `dispatch.py tab create --workspace <ws> --cwd <root> --label <helm.tabLabel 默认「总舵」> --no-focus` → `start` → `prompt`；`load_config` 读取 `helm.tabLabel`；`guard.handoff` 新增 `oldTab`/`newTab`（旧文件缺字段兼容，只关旧 pane）。首报后先 `pane close`；随后用 `herdr pane list` 确认旧 tab 无剩余 pane 才 `tab close`，有残留 pane 或无法确认时只记 note（phase=done + 通知），不重试；任一步失败 `phase=done result=failed` + 通知，不循环、不杀旧舵、不回落 pane split。
+- **dispatch `tab create` 输出 tab+pane**：新增 `tab_id` 解析 helper（递归取 `tab_id`/`tabId`，缺失时用 `herdr pane list` 反查兜底）；stdout 同时输出 `{"tab": ..., "pane": ...}`，保留 `pane` 键兼容 `start-helm.sh`；仍未取得 tab_id 时 agent-log 记 `result=partial` 并在 stderr 告警（rc 仍 0，guard 侧 fail-closed）。
+- helm 模板（Qoder/opencode）交接流程同步为「新 tab → start → prompt → 首报后关旧 pane/旧 tab」，去掉同 tab pane split 与「自关旧 pane」措辞；`templates/AGENTS-编排节.md`「进度与协同」补总舵单 pane 与 W2 容量提示。
+
 ## 2.2.1 — 2026-11-10
 
 ### 修复
