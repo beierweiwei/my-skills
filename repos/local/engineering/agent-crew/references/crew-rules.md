@@ -10,7 +10,7 @@
 | 前缀 | 领域 | 编号 |
 |---|---|---|
 | D | 派单 | D1–D6 |
-| R | 回执 | R1–R4 |
+| R | 回执与反馈 | R1–R5 |
 | W | 工位 | W1–W5 |
 | O | 占用 | O1–O3 |
 | F | 收口 | F1–F16 |
@@ -42,6 +42,7 @@
 - **R2 回执字段**：`receipt_id`、`from`、`runtime`、`task`、`status`（`done|blocked|captain`）、`commit`、`changed_files[]`、`evidence[]`、`work_slot`、`findings[]`、`summary`、`ts`；缺字段视为无效回执；⏸ 一律用 `status=captain`。
 - **R3 去重**：回执按 `receipt_id` 去重，同一 `receipt_id` 只处理一次。
 - **R4 触发器不是状态**：回执只触发收口与审计，任务状态只认 plan；回执与 plan 不一致时以 plan 为准并触发核对。
+- **R5 反馈分诊**：发现先分四路，不混用——①阻断级（流程跑不下去/工具坏）走回执 `blocked` + 即时推送总舵/副舵，20–30 分钟自检兜底，不进 feedback；②repo 犯错记该流 plan `## Errors Encountered`（回执 findings 带出），correct 启用后转其队列；③跨项目认知由总舵/大副当场 inone 推送（`INONE_AGENT_NAME` 用角色名），船员只报不推；④仅编排/流程/提示词问题进 feedback 信箱（项目 portfolio 目录 `feedback.md`），上报者预分诊填「预判去向」（改规则 R* / 改 SOP 步骤 / 改脚本 / 改模板措辞），格式与生命周期按 [plan-discipline.md](plan-discipline.md) §5.3。复盘去向必须留痕（已改 R*/已改文件、转_correct、已_inone、归档+原因）；待复盘未清零且无去向视为复盘未完成。
 
 ## W 工位
 

@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.2.4 — 2026-11-10
+
+### 新增
+
+- **R5 反馈分诊**：`references/crew-rules.md` 新增 R5（阻断级走回执、repo 犯错记 Errors、跨项目认知走 inone、仅流程问题进 feedback；去向留痕；待复盘未清零=未完成），索引改 R1–R5、领域名「回执与反馈」；14 个角色模板引用区间同步（opencode reviewer 正文回执句不动）。
+- **复盘路由**：qoder helm 动作清单第 8 条改为自学习分诊、新增第 9 条复盘（大收口四条定义 + 每周兜底 + 四路归类 + 报告 `portfolio/retro-YYYYMMDD.md` + 批后清条目留去向）；opencode helm 新增第 13 条同等语义；新增报告骨架 `templates/_templates/retro.md`。
+- **feedback 分诊表**：`references/plan-discipline.md` §5.3 重写为 9 列表结构、状态/去向枚举、Bug 表冻结与未闭环归并、归档与报告保留；新增骨架 `templates/project/portfolio-feedback.md`。
+- **inone 接入**：qoder/opencode firstmate 新增第 11 条（跨项目认知当场 inone，`INONE_AGENT_NAME=firstmate`；船员只报不推）；AGENTS 编排节与 `firstmate-dispatch` §5 补边界。
+- **guard 周复盘兜底**：`crew-guard.py` 解析 feedback 复盘信箱与最近 retro 报告，到期且无在跑 worker 时每日最多提醒一次（`retro.wake` 标记），文件/表缺失或行坏只记日志；`init.py` 新增 `retro` 默认配置与 feedback 骨架（缺失才写）；`doctor.py` 登记 `retro` 并轻校验（不新增检查项）。
+
+### 测试
+
+- 新增 `scripts/tests/test_224_retro.py`；`test_crew_guard.py` 追加周复盘到期/每日一次/损坏 fail-safe/文案用例；`test_init_v2.py` 追加 feedback 骨架新建/不覆盖/幂等。
+- 版本 2.2.4：`SKILL.md` frontmatter 与标题、`init.py` fallback、`test_crew_lint.py` 与 `test_220_final.py` 期望同步。
+
 ## 2.2.3 — 2026-11-10
 
 ### 新增

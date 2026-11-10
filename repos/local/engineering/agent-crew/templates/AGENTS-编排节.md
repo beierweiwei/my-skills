@@ -5,7 +5,7 @@
 
 ### 规则与文档指针（项目不复制正文）
 
-- 通用可执行规则：`{{crew_rules}}`（D 派单 / R 回执 / W 工位 / O 占用 / F 收口 / P 并发 / G 值守 / S 状态机 / X 红线）。
+- 通用可执行规则：`{{crew_rules}}`（D 派单 / R 回执与反馈 / W 工位 / O 占用 / F 收口 / P 并发 / G 值守 / S 状态机 / X 红线）。
 - 验收与呈报：`{{crew_acceptance}}`（A1–A5）。
 - 机制与拓扑：`{{skill_root}}/references/orchestration-guide.md`；plan 纪律与看板：`{{skill_root}}/references/plan-discipline.md`；Herdr 命令速查：`{{skill_root}}/references/herdr-cheatsheet.md`。
 - 角色动作：`.qoder/agents/<role>.md`、`.opencode/agent/<role>.md`（项目自有；`extends: skill:<role>` 继承技能基类，启动时 append-only 组合，权限与 frontmatter 只取基类）。
@@ -64,4 +64,6 @@
 
 - 技能版本见 `{{skill_root}}/SKILL.md` 与 `{{skill_root}}/CHANGELOG.md`；安装版本记录在 `docs/crew/manifest.json`，`doctor.py` 校验一致。
 - 流程与提示词问题记入 `{{portfolio_dir}}/feedback.md`（场景/问题/影响/建议/状态）。
+- 流程反馈格式：写入流程反馈表并预填「预判去向」（R5）；复盘报告落 `{{portfolio_dir}}/retro-<YYYYMMDD>.md`，待复盘未清零=复盘未完成（表结构与保留规则见 plan-discipline §5.3）。
+- 跨项目认知由总舵/大副当场 inone 推送（归因角色名）；船员只报不推；不写任何本地 auto-memory。
 <!-- agent-crew:orchestration:end -->

@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
@@ -1158,6 +1159,188 @@ class HandoffTest(GuardTestBase):
         before = len(self.dispatch_calls)
         guard.run_once()
         self.assertEqual(before, len(self.dispatch_calls))
+
+
+RETRO_FEEDBACK_ONE_OPEN = """# 编排体系自学习反馈
+
+## 流程反馈（复盘信箱）
+
+| ID | 场景/问题 | 影响 | 建议（文件+条目） | 预判去向 | 上报者 | 日期 | 状态 | 去向 |
+|---|---|---|---|---|---|---|---|---|
+| FB-001 | 流程 A | 影响 A | `references/crew-rules.md` 改一句 | 改规则 R5 | builder | 2026-11-01 | 待复盘 | - |
+| FB-002 | 流程 B | 影响 B | 改 SOP 步骤 | 改 SOP 步骤 | runner | 2026-11-02 | 已闭环 | 已改 |
+"""
+
+RETRO_FEEDBACK_NONE_OPEN = """# 编排体系自学习反馈
+
+## 流程反馈（复盘信箱）
+
+| ID | 场景/问题 | 影响 | 建议（文件+条目） | 预判去向 | 上报者 | 日期 | 状态 | 去向 |
+|---|---|---|---|---|---|---|---|---|
+| FB-002 | 流程 B | 影响 B | 改 SOP 步骤 | 改 SOP 步骤 | runner | 2026-11-02 | 已闭环 | 已改 |
+"""
+
+RETRO_FEEDBACK_BROKEN = """# 编排体系自学习反馈
+
+## 流程反馈（复盘信箱）
+
+| ID | 场景/问题 | 影响 | 建议（文件+条目） | 预判去向 | 上报者 | 日期 | 状态 | 去向 |
+|---|---|---|---|---|---|---|---|---|
+| FB-001 | 少了列 | 影响 A |
+"""
+
+
+class RetroDueTest(GuardTestBase):
+    """2.2.4 guard 周复盘兜底：到期条件 / 每日一次 / fail-safe / 文案。"""
+
+    def setUp(self):
+        super().setUp()
+        self.now[0] = datetime(2026, 11, 10, 12, 0).timestamp()
+
+    def prepare(self, feedback: str | None = RETRO_FEEDBACK_ONE_OPEN,
+                retro_days: tuple[str, ...] = ()) -> None:
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        if feedback is not None:
+            write_file(self.root / ".planning" / "portfolio" / "feedback.md", feedback)
+        for day in retro_days:
+            write_file(self.root / ".planning" / "portfolio" / f"retro-{day}.md", "# 复盘\n")
+
+    def test_no_feedback_file_no_retro_wake(self):
+        self.prepare(feedback=None)
+        result = self.make_guard().run_once()
+        self.assertFalse(result["woke"])
+        self.assertEqual([], self.prompt_calls)
+        self.assertTrue(any("读取失败" in line for line in self.logs))
+
+    def test_no_open_rows_no_retro_wake(self):
+        self.prepare(feedback=RETRO_FEEDBACK_NONE_OPEN)
+        result = self.make_guard().run_once()
+        self.assertFalse(result["woke"])
+        self.assertEqual([], self.prompt_calls)
+
+    def test_open_without_retro_report_wakes(self):
+        self.prepare()
+        result = self.make_guard().run_once()
+        self.assertTrue(result["woke"])
+        self.assertTrue(result.get("retro"))
+        message = self.prompt_calls[0][1]
+        self.assertIn("feedback 待复盘 1 条", message)
+        self.assertIn("最近复盘 无", message)
+        self.assertIn(".planning/portfolio/retro-20261110.md", message)
+        self.assertEqual("2026-11-10",
+                         (self.crew / "retro.wake").read_text(encoding="utf-8").strip())
+
+    def test_recent_report_no_wake(self):
+        self.prepare(retro_days=("20261108",))
+        result = self.make_guard().run_once()
+        self.assertFalse(result["woke"])
+        self.assertEqual([], self.prompt_calls)
+
+    def test_overdue_wakes_once_per_day_then_next_day(self):
+        self.prepare(retro_days=("20261001",))
+        guard = self.make_guard()
+        first = guard.run_once()
+        self.assertTrue(first["woke"])
+        message = self.prompt_calls[0][1]
+        self.assertIn("最近复盘 20261001", message)
+        guard.run_once()
+        self.assertEqual(1, len(self.prompt_calls))
+
+        self.now[0] += 86400
+        guard.run_once()
+        self.assertEqual(2, len(self.prompt_calls))
+        self.assertEqual("2026-11-11",
+                         (self.crew / "retro.wake").read_text(encoding="utf-8").strip())
+
+    def test_broken_table_logs_only(self):
+        self.prepare(feedback=RETRO_FEEDBACK_BROKEN)
+        result = self.make_guard().run_once()
+        self.assertFalse(result["woke"])
+        self.assertEqual([], self.prompt_calls)
+        self.assertTrue(any("行格式损坏" in line for line in self.logs))
+
+    def test_working_worker_suppresses_retro_wake(self):
+        self.prepare(retro_days=("20261001",))
+        self.agents = [{"name": "builder-1", "agent_status": "working"}]
+        result = self.make_guard().run_once()
+        self.assertFalse(result["woke"])
+        self.assertEqual([], self.prompt_calls)
+
+    def test_blocked_takes_priority_over_retro(self):
+        self.prepare(retro_days=("20261001",))
+        self.agents = [{"name": "builder-1", "agent_status": "blocked"}]
+        result = self.make_guard().run_once()
+        self.assertTrue(result["woke"])
+        self.assertIn("worker 卡住", self.prompt_calls[0][1])
+        self.assertNotIn("周复盘到期", self.prompt_calls[0][1])
+
+    def test_invalid_utf8_feedback_fails_safe(self):
+        self.prepare(feedback=None)
+        (self.root / ".planning" / "portfolio" / "feedback.md").write_bytes(
+            b"\xff\xfe\x00broken")
+        result = self.make_guard().run_once()
+        self.assertFalse(result["woke"])
+        self.assertEqual([], self.prompt_calls)
+        self.assertTrue(any("跳过复盘提醒" in line for line in self.logs))
+
+    def test_invalid_utf8_marker_fails_safe(self):
+        self.prepare()
+        self.crew.mkdir(parents=True, exist_ok=True)
+        (self.crew / "retro.wake").write_bytes(b"\xff\xfe\x00broken")
+        result = self.make_guard().run_once()
+        self.assertFalse(result["woke"])
+        self.assertEqual([], self.prompt_calls)
+        self.assertTrue(any("跳过复盘提醒" in line for line in self.logs))
+
+    def test_wake_exception_leaves_no_marker_and_retries(self):
+        self.prepare()
+        guard = self.make_guard()
+        calls = {"count": 0}
+
+        def flaky(message: str, agents: list[dict]) -> str:
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise RuntimeError("wake boom")
+            return "prompt"
+
+        guard._wake = flaky  # type: ignore[method-assign]
+        first = guard.run_once()
+        self.assertFalse(first["woke"])
+        self.assertFalse((self.crew / "retro.wake").exists())
+        self.assertTrue(any("复盘叫醒失败" in line for line in self.logs))
+
+        second = guard.run_once()
+        self.assertTrue(second["woke"])
+        self.assertTrue((self.crew / "retro.wake").exists())
+
+    def test_broken_feedback_does_not_block_ordinary_wake(self):
+        self.write_fixture(stream=STREAM_PLAN, portfolio=EMPTY_PORTFOLIO)
+        write_file(self.root / ".planning" / "portfolio" / "feedback.md",
+                   RETRO_FEEDBACK_BROKEN)
+        guard = self.make_guard()
+        guard.run_once()
+        self.assertEqual([], self.prompt_calls)
+        result = guard.run_once()
+        self.assertTrue(result["woke"])
+        self.assertEqual(1, len(self.prompt_calls))
+        message = self.prompt_calls[0][1]
+        self.assertIn("guard 叫醒：有待办", message)
+        self.assertNotIn("周复盘到期", message)
+
+    def test_broken_marker_does_not_block_ordinary_wake(self):
+        self.write_fixture(stream=STREAM_PLAN, portfolio=EMPTY_PORTFOLIO)
+        write_file(self.root / ".planning" / "portfolio" / "feedback.md",
+                   RETRO_FEEDBACK_ONE_OPEN)
+        self.crew.mkdir(parents=True, exist_ok=True)
+        (self.crew / "retro.wake").write_bytes(b"\xff\xfe\x00broken")
+        guard = self.make_guard()
+        guard.run_once()
+        result = guard.run_once()
+        self.assertTrue(result["woke"])
+        self.assertEqual(1, len(self.prompt_calls))
+        message = self.prompt_calls[0][1]
+        self.assertIn("guard 叫醒：有待办", message)
+        self.assertNotIn("周复盘到期", message)
 
 
 if __name__ == "__main__":

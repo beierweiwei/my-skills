@@ -51,7 +51,7 @@ TEMPLATES = SKILL_DIR / "templates"
 MARK_START = "<!-- agent-crew:orchestration:start -->"
 MARK_END = "<!-- agent-crew:orchestration:end -->"
 MARK_PREFIX = "<!-- agent-crew:orchestration:"
-SKILL_VERSION_FALLBACK = "2.2.3"
+SKILL_VERSION_FALLBACK = "2.2.4"
 
 CONFIG_REL = Path(".planning/orchestration.json")
 MANIFEST_REL = Path("docs/crew/manifest.json")
@@ -148,6 +148,7 @@ DEFAULT_CONFIG: dict = {
     "dataDir": "data/raw/",
     "aopReference": "",
     "helm": {"tabLabel": "总舵", "expectedModel": "", "agentName": ""},
+    "retro": {"enabled": True, "periodDays": 7},
     "roles": DEFAULT_ROLES,
     "hooks": DEFAULT_HOOKS,
 }
@@ -1229,6 +1230,9 @@ def _generate_skeletons(root: Path, templates: Path, cfg: dict, ctx: dict) -> di
             plan_tpl.read_text(encoding="utf-8"), ctx)
     products[portfolio / "findings.md"] = FINDINGS_SKELETON
     products[portfolio / "progress.md"] = PROGRESS_SKELETON
+    feedback_tpl = templates / "project" / "portfolio-feedback.md"
+    if feedback_tpl.exists():
+        products[portfolio / "feedback.md"] = feedback_tpl.read_text(encoding="utf-8")
     context_tpl = templates / "CONTEXT-骨架.md"
     if context_tpl.exists():
         products[Path("CONTEXT.md")] = apply_template(
