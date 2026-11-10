@@ -14,7 +14,7 @@ T20 一致性小修（A–E + FB-008）与发布。
 
 ### 新增
 
-- **FB-008 guard ctx 阈值/交接检测**：`parse_ctx_k` 兼容 `ctx (412k/1M)`、`ctx 75.4k/1M`（小数）、`ctx ( 75.4k / 1M )`、`ctx 62.3%`，统一折算为每 1M 的 k 值，多行取最后一个；解析失败返回 None 不抛异常。总舵 pane 先按 agent name 解析，名字缺失/漂移时回退 `<crew-dir>/dispatch-agents.json`（按名或最近 `role=helm` 条目反查），解析不到 fail-safe 不动作、不误交接。`guard.handoff` `phase=done` 后继续监控继任总舵（不再永久短路），一次交接成功后重置 `handoff_attempted` 允许再次交接；失败只通知并写 `phase=done result=failed`，不循环、不回落 split。`test_crew_guard.py` 新增解析/阈值 29/30/59/60/映射/phase 流转用例。
+- **FB-008 guard ctx 阈值/交接检测**：`parse_ctx_k` 兼容 `ctx (412k/1M)`、`ctx 75.4k/1M`（小数）、`ctx ( 75.4k / 1M )`、`ctx 62.3%`，统一折算为每 1M 的 k 值，多行取最后一个；解析失败返回 None 不抛异常。总舵 pane 先按 agent name 解析，名字缺失/漂移时回退 `<crew-dir>/dispatch-agents.json`（按名或最近 `role=helm` 条目反查），解析不到 fail-safe 不动作、不误交接。`guard.handoff` `phase=done` 后继续监控继任总舵（不再永久短路），一次交接成功后重置 `handoff_attempted` 允许再次交接；失败只通知并写 `phase=done result=failed`，不循环、不回落 split。交接阈值 `ctxWarn` 默认 0.30 / `ctxHandoff` 默认 **0.50**（Captain 2026-11-11 修正，原 0.60）；交接收尾按 handoff `old` 识别旧舵（重启不误杀 working 旧舵），继任缺失/blocked/idle 无首报或旧舵停滞连续 3 轮转 `failed` 通知人工，失败通知区分孤儿资源与现役继任，registry 反查仅接受可解释关系（B1–B5）。`test_crew_guard.py` 新增解析/阈值 29/30/49/50/51/映射/phase 流转用例。
 
 ### 测试
 

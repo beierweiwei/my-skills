@@ -1786,12 +1786,13 @@ class Fb008HandoffEdgeCaseTest(GuardTestBase):
         (self.crew / "dispatch-agents.json").write_text(
             json.dumps(registry, ensure_ascii=False), encoding="utf-8")
 
-    def started_handoff(self, old: str = "helm-1", new: str = "helm-1-2") -> None:
+    def started_handoff(self, old: str = "helm-1", new: str = "helm-1-2",
+                        successor_was_working: str = "1") -> None:
         self.write_handoff(
             f"phase=started\nold={old}\noldPane={self.OLD_PANE}\noldTab=wX:tOLD\n"
             f"new={new}\nnewPane={self.NEW_PANE}\nnewTab=wX:tNEW\n"
             "time=2026-11-10T16:18:00Z\nreason=ctx 650k/1M >= 50% 交接阈值\n"
-            "result=ok\nsuccessorWasWorking=1\n"
+            f"result=ok\nsuccessorWasWorking={successor_was_working}\n"
         )
 
     def closes(self) -> list[list[str]]:
@@ -1849,7 +1850,11 @@ class Fb008HandoffEdgeCaseTest(GuardTestBase):
         self.assertEqual("failed", fields["result"])
         self.assertIn("旧舵收口", fields["error"])
         self.assertEqual([], self.closes())
-        self.assertTrue(any("旧舵" in body for _, body in self.notify_calls))
+        body = self.notify_calls[0][1]
+        self.assertIn("旧舵", body)
+        self.assertIn("wX:pNEW", body)
+        self.assertIn("保留", body)
+        self.assertNotIn("清理", body)
 
         before = len(self.notify_calls)
         self.assertEqual("none", guard.run_once()["handoff"]["action"])
@@ -1932,7 +1937,10 @@ class Fb008HandoffEdgeCaseTest(GuardTestBase):
         self.assertEqual("failed", fields["result"])
         self.assertIn("首报等待", fields["error"])
         self.assertEqual([], self.closes())
-        self.assertTrue(any("不存在" in body for _, body in self.notify_calls))
+        body = self.notify_calls[0][1]
+        self.assertIn("不存在", body)
+        self.assertIn("保留", body)
+        self.assertNotIn("清理", body)
         self.assertEqual("none", guard.run_once()["handoff"]["action"])
 
     def test_blocked_successor_fails_after_three_rounds(self):
@@ -1953,6 +1961,34 @@ class Fb008HandoffEdgeCaseTest(GuardTestBase):
         self.assertEqual("failed", self.handoff_fields()["result"])
         self.assertTrue(any("blocked" in body for _, body in self.notify_calls))
         self.assertEqual([], self.closes())
+
+    def test_idle_successor_without_first_report_fails_after_three_rounds(self):
+        """B2r：重启窗口内继任已 idle 但 successorWasWorking≠1 → 有界等待后 failed。"""
+        self.prepare()
+        self.started_handoff(successor_was_working="0")
+        self.agents = [
+            {"name": "helm-1", "pane_id": self.OLD_PANE, "tab_id": "wX:tOLD",
+             "agent_status": "idle"},
+            {"name": "helm-1-2", "pane_id": self.NEW_PANE, "tab_id": "wX:tNEW",
+             "agent_status": "idle"},
+        ]
+        guard = self.make_guard()
+        for _ in range(cg.HANDOFF_STALL_ROUNDS - 1):
+            result = guard.run_once()
+            self.assertEqual("wait", result["handoff"]["action"])
+            self.assertEqual("started", self.handoff_fields()["phase"])
+        failed = guard.run_once()
+        self.assertEqual("failed", failed["handoff"]["action"])
+        fields = self.handoff_fields()
+        self.assertEqual("done", fields["phase"])
+        self.assertEqual("failed", fields["result"])
+        self.assertIn("idle", fields["error"])
+        self.assertIn("首报等待", fields["error"])
+        self.assertEqual([], self.closes())
+        body = self.notify_calls[0][1]
+        self.assertIn("保留", body)
+        self.assertNotIn("清理", body)
+        self.assertEqual("none", guard.run_once()["handoff"]["action"])
 
     def test_done_failed_restart_keeps_configured_helm(self):
         """B3：done(failed) 重启后叫醒真实旧舵，不指向失败继任名。"""
@@ -2004,6 +2040,7 @@ class Fb008HandoffEdgeCaseTest(GuardTestBase):
         self.assertIn("wX:pNEW", body)
         self.assertIn("wX:tNEW", body)
         self.assertIn("清理", body)
+        self.assertNotIn("保留", body)
         self.assertEqual([], self.closes())
 
     def test_stale_registry_worker_pane_is_failsafe(self):

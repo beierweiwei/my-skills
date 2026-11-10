@@ -28,8 +28,8 @@ guard 不自动关闭/杀 agent；agent 不再 blocked 或消失即清除年龄�
 反查关系不可解释时 fail-safe），解析不到则 fail-safe 不动作。按 config
 `helm.ctxWarn`（默认 0.30）/`helm.ctxHandoff`（默认 0.50）写 <crew-dir>/guard.handoff
 并通知；≥交接阈值一次性新建 tab/继任/首报后关旧 pane 与旧 tab，失败只通知不循环；
-旧舵一律按 handoff `old` 身份判定，working 不杀；继任缺失/blocked 或旧舵持续未收口
-连续 HANDOFF_STALL_ROUNDS 轮后记 failed 并通知人工。交接完成（phase=done）后
+旧舵一律按 handoff `old` 身份判定，working 不杀；继任缺失/blocked/idle 无首报或旧舵
+持续未收口连续 HANDOFF_STALL_ROUNDS 轮后记 failed 并通知人工。交接完成（phase=done）后
 继续监控继任总舵，不因 done 永久短路。交接启动前先执行
 `plan-status.py --rotate --apply --keep ROTATE_KEEP`（默认 10）归档 progress；
 rotate 失败或异常只写 guard.log 告警，继续原交接流程（不阻断、不回落 split）。
@@ -84,8 +84,11 @@ CTX_RE = re.compile(
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 DEFAULT_CTX_WARN = 0.30
 DEFAULT_CTX_HANDOFF = 0.50
-# 交接等待有界：继任缺失/blocked 或旧舵持续未收口满 N 轮 → phase=done result=failed
+# 交接等待有界：继任缺失/blocked/idle 无首报，或旧舵持续未收口满 N 轮
+# → phase=done result=failed
 HANDOFF_STALL_ROUNDS = 3
+# 创建阶段失败的 newPane/newTab 是孤儿资源；其它失败步骤下继任可能仍可用，提示保留。
+HANDOFF_CREATE_FAILURE_STEPS = ("tab create", "dispatch start", "dispatch prompt", "state")
 DEFAULT_TAB_LABEL = "总舵"
 RETRO_SECTION = "流程反馈（复盘信箱）"
 RETRO_OPEN_STATUS = "待复盘"
@@ -685,8 +688,12 @@ class Guard:
             if base.get(key)
         ]
         if resources:
-            body += (f"\n已创建资源：{'，'.join(resources)}；"
-                     "请人工确认后清理（dispatch.py pane close / tab close）。")
+            if step in HANDOFF_CREATE_FAILURE_STEPS:
+                body += (f"\n已创建资源：{'，'.join(resources)}；"
+                         "请人工确认后清理（dispatch.py pane close / tab close）。")
+            else:
+                body += (f"\n继任资源：{'，'.join(resources)}；"
+                         "请保留，人工确认后处置（不要当作孤儿资源）。")
         self._notify_handoff("guard 交接失败", body)
         self.log(f"交接失败（{step}）：{detail}")
         return {"action": "failed", "reason": f"交接失败：{error}", "error": error}
@@ -998,10 +1005,14 @@ class Guard:
             status == "idle" and fields.get("successorWasWorking") == "1"
         )
         if not ready:
-            # 有界等待：继任缺失/blocked/unknown 连续 N 轮 → failed 通知人工。
-            if agent is None or status in ("blocked", "unknown"):
+            # 有界等待：继任缺失/blocked/unknown，或 idle 但未观测到首报
+            # （successorWasWorking≠1，常见于 guard 停机窗口内完成首报）连续 N 轮
+            # → failed 通知人工。
+            if agent is None or status in ("idle", "blocked", "unknown"):
                 self.handoff_wait_rounds += 1
                 state_text = "不存在" if agent is None else status
+                if status == "idle":
+                    state_text = "idle（successorWasWorking≠1）"
                 if self.handoff_wait_rounds >= HANDOFF_STALL_ROUNDS:
                     return self._handoff_fail(
                         "首报等待",
@@ -1505,8 +1516,9 @@ ctxHandoff（默认 50%）一次性 `dispatch.py tab create` 新 tab（配置 he
 默认「总舵」）→ `start --name <继任>` → `prompt` → 首报后 close 旧 pane，确认旧 tab
 无剩余 pane 后 close 旧 tab；guard.handoff 记录 oldTab/newTab（旧文件缺字段时只关旧 pane）；
 总舵 tab 永不 split。旧舵按 handoff old 身份判定且不杀：working 时保持 started 等待；
-继任缺失/blocked 或旧舵持续未收口连续 3 轮则记 phase=done result=failed + 通知人工，
-不循环、不自动重试、不回落 pane split；失败通知带已创建的 newPane/newTab 便于人工清理。
+继任缺失/blocked/idle 无首报或旧舵持续未收口连续 3 轮则记 phase=done result=failed + 通知人工，
+不循环、不自动重试、不回落 pane split；失败通知带出 newPane/newTab：
+创建阶段失败按孤儿资源提示清理，首报等待/旧舵收口失败提示保留待人工处置。
 交接完成（phase=done, result=ok）后继续监控继任总舵（handoff new），不因 done 永久短路；
 done(result=failed) 不自动重试，人工删除或改写 <crew-dir>/guard.handoff 后重启 guard 恢复。
 旧 tab 有剩余 pane/无法确认或关闭失败只记 note，由人工或 pane-audit --apply 兜底。

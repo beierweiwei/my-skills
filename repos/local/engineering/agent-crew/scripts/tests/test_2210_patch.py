@@ -111,6 +111,14 @@ class Fb008CtxThresholdRegressionTest(unittest.TestCase):
                 self.assertIn("30% 预警 / 50% 交接", text)
                 self.assertIn("`helm.ctxHandoff` 默认 0.50", text)
 
+    def test_helm_templates_use_only_50_immediate_handoff(self):
+        """D1：helm 自身上下文行只写 ≥50% 立即交接；worker 级 ≥60% 立即停不在此断言。"""
+        for path in (HELM_QODER, HELM_OPENCODE):
+            with self.subTest(path=str(path.relative_to(REPO_ROOT))):
+                text = read(path)
+                self.assertNotIn("≥60% 立即交接", text)
+                self.assertIn("≥50% 立即交接", text)
+
     def test_guard_default_thresholds_and_help(self):
         text = read(CREW_GUARD)
         self.assertIn("DEFAULT_CTX_WARN = 0.30", text)
