@@ -73,7 +73,8 @@ with open(os.environ["CREW_TEST_HERDR_LOG"], "a", encoding="utf-8") as fh:
     fh.write(json.dumps(sys.argv[1:], ensure_ascii=False) + "\\n")
 args = sys.argv[1:]
 if args[:2] == ["agent", "list"]:
-    print(json.dumps({"result": {"agents": []}}))
+    names = json.loads(os.environ.get("CREW_TEST_HERDR_AGENTS", "[]"))
+    print(json.dumps({"result": {"agents": [{"name": name} for name in names]}}))
 elif args[:2] == ["pane", "split"]:
     print(json.dumps({"result": {"pane_id": "wX:pNEW"}}))
 else:
@@ -123,6 +124,7 @@ class DispatchTest(unittest.TestCase):
         stub.write_text(HERDR_STUB, encoding="utf-8")
         stub.chmod(0o755)
         self.herdr_log = self.base / "herdr.log"
+        self.herdr_agents: list[str] = []
 
     # ---------- fixture ----------
 
@@ -203,6 +205,7 @@ class DispatchTest(unittest.TestCase):
         env = dict(os.environ)
         env["PATH"] = str(self.bin) + os.pathsep + env.get("PATH", "")
         env["CREW_TEST_HERDR_LOG"] = str(self.herdr_log)
+        env["CREW_TEST_HERDR_AGENTS"] = json.dumps(self.herdr_agents)
         return env
 
     def run_dispatch(self, *args: str) -> subprocess.CompletedProcess:
@@ -244,11 +247,13 @@ class DispatchTest(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
 
-    def start(self, role: str, runtime: str, pane: str = "wX:p1") -> subprocess.CompletedProcess:
+    def start(self, role: str, runtime: str, pane: str = "wX:p1",
+              name: str | None = None) -> subprocess.CompletedProcess:
         self._write_composed(runtime, role)
-        return self.run_dispatch(
-            "start", "--role", role, "--runtime", runtime, "--pane", pane, "--json",
-        )
+        args = ["start", "--role", role, "--runtime", runtime, "--pane", pane, "--json"]
+        if name is not None:
+            args.extend(["--name", name])
+        return self.run_dispatch(*args)
 
     def herdr_calls(self) -> list[list[str]]:
         if not self.herdr_log.exists():
@@ -481,6 +486,46 @@ class DispatchTest(unittest.TestCase):
         self.assertIn("## 职责边界", composed)
         self.assertIn("## 项目约定", composed)
         self.assertNotIn("{{", composed)
+
+    def test_start_explicit_name_used_for_herdr_and_registry(self):
+        proc = self.start("builder", "qoder", name="custom-builder")
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        starts = [c for c in self.herdr_calls() if c[:2] == ["agent", "start"]]
+        self.assertEqual(1, len(starts), starts)
+        self.assertEqual("custom-builder", starts[0][2])
+        registry = json.loads(
+            (self.root / ".git/crew/dispatch-agents.json").read_text(encoding="utf-8")
+        )
+        self.assertIn("custom-builder", registry)
+        self.assertNotIn("proj-builder", registry)
+        self.assertEqual("custom-builder", self.agent_log()[-1]["agent"])
+
+    def test_start_rejects_invalid_explicit_name_before_herdr(self):
+        proc = self.start("builder", "qoder", name="Bad Name")
+        self.assertEqual(1, proc.returncode)
+        self.assertIn("--name", proc.stderr)
+        self.assertEqual([], self.herdr_calls())
+
+    def test_start_rejects_duplicate_explicit_name(self):
+        self.herdr_agents = ["custom-builder"]
+        proc = self.start("builder", "qoder", name="custom-builder")
+        self.assertEqual(1, proc.returncode)
+        self.assertIn("已存在", proc.stderr)
+        self.assertFalse([c for c in self.herdr_calls() if c[:2] == ["agent", "start"]])
+
+    def test_start_without_name_keeps_derived_behavior(self):
+        self.config["helm"] = {"agentName": "helm-case"}
+        self.write_config()
+        self.write_role("qoder", "helm")
+        helm = self.start("helm", "qoder")
+        self.assertEqual(0, helm.returncode, helm.stdout + helm.stderr)
+        starts = [c for c in self.herdr_calls() if c[:2] == ["agent", "start"]]
+        self.assertEqual("helm-case", starts[-1][2])
+
+        builder = self.start("builder", "qoder")
+        self.assertEqual(0, builder.returncode, builder.stderr)
+        starts = [c for c in self.herdr_calls() if c[:2] == ["agent", "start"]]
+        self.assertEqual("proj-builder", starts[-1][2])
 
     def test_qoder_disallowed_tools_translated(self):
         self.write_role("qoder", "reviewer", body="# Reviewer\n## 项目补充\n项目补充。\n")

@@ -1109,7 +1109,12 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
         hint = "目标 pane" if runtime == "qoder" else "split 源 pane（dispatch 负责创建带 OPENCODE_CONFIG_DIR 的 pane）"
         raise DispatchError(f"{runtime} start 需要 --pane（{hint}）")
 
-    name = agent_name_for(config, args.role, outcome.custom, args.instance, root)
+    name = args.name
+    if name is not None:
+        if not INSTANCE_NAME_RE.match(name):
+            raise DispatchError(f"--name 非法：{name!r}（要求 {INSTANCE_NAME_RE.pattern}）")
+    else:
+        name = agent_name_for(config, args.role, outcome.custom, args.instance, root)
     if name in herdr_agent_names():
         raise DispatchError(
             f"Herdr 实例名 {name} 已存在。三个可执行选项：①关闭旧 agent；"
@@ -1374,6 +1379,7 @@ def build_parser() -> argparse.ArgumentParser:
     start_p.add_argument("--role", required=True)
     start_p.add_argument("--runtime", choices=["qoder", "opencode"])
     start_p.add_argument("--pane", help="Qoder 目标 pane；opencode 为 split 源 pane")
+    start_p.add_argument("--name", help="显式 Herdr/dispatch 实例名（默认 helm 用配置 helm.agentName，其余派生）")
     start_p.add_argument("--instance", type=int, help="同角色多实例编号（Herdr 名后缀）")
     start_p.add_argument("--permission-mode", help="透传 qodercli --permission-mode（默认不传）")
     start_p.add_argument("--json", action="store_true")

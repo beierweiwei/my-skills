@@ -34,10 +34,12 @@ description: 总舵（Chief Helm）：Captain 唯一对话入口；只编排—�
 10. 长 prompt/含反引号等特殊字符的派单：先落临时文件，再用 `"$(cat <file>)"` 传递（BUG-010，避免 shell 转义/长度问题）。
 11. 每轮开工在检查 `<crew-dir>/guard.wake` 的同时查 `<crew-dir>/inbox/`（R1 文件真源）：有则读取、按需处置并消费。
 12. 若 Qoder 弹出跨会话消息审批：按「1. Delivered / 2. Decline」人工处置后继续；不依赖 SendMessage 送达、不当成交接问题（inbox 已落盘为真源）。
+13. 每轮开工先查 `<crew-dir>/guard.handoff`：存在则停止接新活、收口当前切片，按记录等待继任首报；首报后自关或由继任关闭旧 pane。phase=warn 只准备交接，phase=started/done 不得重复启动继任。
 
 ## 上下文与工位
 - ctx ≥30% 停止接新活，按 `{{portfolio_dir}}/progress.md` 尾部交接；≥60% 立即交接；不在运行中压缩。
-- **总舵换舵（物理步骤）**：ctx ≥30% 停止接新活；同 tab 新建 pane（`python3 scripts/dispatch.py pane split --pane <旧> --direction right`）→ `python3 scripts/dispatch.py start --role helm --runtime qoder --pane <新>`（启动名即会话名，两套名一致）；新舵读 portfolio 三文件 + progress 尾部并完成首条汇报后，旧舵关闭自己 pane；不在运行中压缩。
+- **自动交接（30% 预警 / 60% 交接）**：guard 每轮读总舵 pane 的 `ctx Nk/1M`（config `helm.ctxWarn` 默认 0.30、`helm.ctxHandoff` 默认 0.60）。≥30% 写 `<crew-dir>/guard.handoff`（phase=warn）并通知，停止接新活、准备交接；≥60% 一次性执行：同 tab `dispatch.py pane split --pane <旧> --direction right` → `dispatch.py start --role helm --pane <新> --name <继任名>`（`<helmName>-2`，冲突递增 -3/-4…）→ prompt 继任读 portfolio 三文件 + progress 尾部 + 各流 plan Next Step/Status 并完成首报 → 首报后 guard 确认旧舵 idle/无响应再 `dispatch.py pane close`；旧舵不杀，失败只通知不循环，交接期间不接新活。
+- **多流建副舵**：活跃流 ≥2 或并行切片 ≥2 时，为每个流建副舵（tab「副舵·<流>」，`dispatch.py start --role firstmate --name <流>-firstmate`）；总舵只派副舵、不直接派 worker；单流单副舵；新流开工即建，不把多流塞给一个副舵。
 - 交接只给文件路径 + 在跑清单，不复述正文；digest ≤30 行（目标/在跑/待接/待 Captain/定向必读/禁读）；交接前核最新回执 mtime、产物与 `--check-fresh`。
 - 收口回执写明「工位处置：关闭 / 保留至 HH:MM」（F4）；保留工位标签带「·保留至 HH:MM」（W3/W4）；空 tab 关闭。
 - 命名：副舵 `<流>-firstmate`，tab 标签「副舵·<流>」；总舵 agent 名用配置 `helm.agentName`，禁裸名 `helm`，不擅自换名。
