@@ -45,7 +45,7 @@ ROLE_FILES = (
 
 def rules_text() -> str:
     blocks = []
-    counts = {"D": 6, "R": 4, "W": 5, "O": 3, "F": 5, "P": 3, "G": 5, "S": 4, "X": 5}
+    counts = {"D": 6, "R": 4, "W": 5, "O": 3, "F": 12, "P": 3, "G": 5, "S": 4, "X": 5}
     for prefix, count in counts.items():
         blocks.append(f"## {prefix} 组")
         blocks.extend(f"- **{prefix}{i} 规则{i}**：说明。" for i in range(1, count + 1))
@@ -129,7 +129,7 @@ class CrewLintTest(unittest.TestCase):
             text=True,
         )
         self.assertEqual(repo.returncode, 0, repo.stderr)
-        self.assertEqual(repo.stdout.strip(), "2.1.9")
+        self.assertEqual(repo.stdout.strip(), "2.2.0")
 
     # ---- 行数预算 --------------------------------------------------------
 

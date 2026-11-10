@@ -49,6 +49,36 @@ import json
 print(json.dumps({"result": {"agents": []}}))
 """
 
+PLAYBOOK_SEEDS = ("autonomous-run.md", "babysit.md", "session-pickup.md", "investigation.md")
+PLAYBOOK_BODY = """# 剧本：{name}
+
+## 适用与退出条件
+
+- 适用：doctor fixture 最小剧本。
+- 退出：Phase 全部 complete。
+
+## Phases
+
+### Phase 1: {name} 准备
+- owner: fixture
+- [ ] 首个步骤
+- **Status:** pending
+
+## 跳过规则
+
+- 跳过步骤记 `- [x] <步骤>（跳过：<原因>）`。
+"""
+
+
+def write_playbook_library(skill: Path) -> None:
+    """最小技能层剧本库（README + 4 种子），供 doctor playbooks.library 用例。"""
+    directory = skill / "templates/playbooks"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "README.md").write_text(
+        "# 技能层剧本库（fixture）\n\n通用剧本随技能分发，不复制进项目。\n", encoding="utf-8")
+    for name in PLAYBOOK_SEEDS:
+        (directory / name).write_text(PLAYBOOK_BODY.format(name=name), encoding="utf-8")
+
 
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -111,6 +141,7 @@ def make_skill(base: Path) -> Path:
     refs.mkdir()
     for name in ("crew-rules.md", "crew-acceptance.md", "plan-discipline.md"):
         (refs / name).write_text(f"# {name}\n", encoding="utf-8")
+    write_playbook_library(skill)
     (skill / "SKILL.md").write_text(
         "---\nname: agent-crew\nversion: 2.1.0\n---\n# skill\n", encoding="utf-8"
     )
@@ -153,6 +184,10 @@ class ProjectFixture:
             },
         }
         (self.root / ".planning/portfolio").mkdir(parents=True)
+        (self.root / ".planning/playbooks").mkdir(parents=True)
+        (self.root / ".planning/playbooks/README.md").write_text(
+            "# 项目层剧本库（fixture）\n\n项目特有剧本放本目录；同名覆盖技能层。\n",
+            encoding="utf-8")
         (self.root / "docs/orchestration").mkdir(parents=True)
         (self.root / "docs/orchestration/topology.md").write_text(
             "# topology\n", encoding="utf-8")

@@ -7,6 +7,10 @@
     python3 scripts/plan-status.py --check-fresh
                                               # 校验看板是否落后于 plan/配置（过期列明来源并非零退出）
     python3 scripts/plan-status.py --lint     # create-time lint（Phase 标题/单 Status/Next Step/裸编号）
+    python3 scripts/plan-status.py --playbooks <path>
+                                              # 剧本库结构校验：path 为文件或目录（目录取 *.md、
+                                              # 跳过 README.md）；每剧本 ≥1 个 ### Phase N:，
+                                              # 每 Phase 恰一行 **Status:** pending|in_progress|complete
     python3 scripts/plan-status.py --selftest # 对当前 plan 跑一遍解析断言
     python3 scripts/plan-status.py --archive docs/历史/进度追踪-截至20260101.md --write
                                               # 一次性在看板头部写入归档链接（显式动作）
@@ -24,6 +28,11 @@ backlog.captainBlocks（T→C 阻塞映射）。
 > 从 cwd 向上找含 .planning 的目录 > 脚本所在目录的上一级。
 
 真源是各 plan 的 `### Phase N: Name` + `**Status:**`；本脚本不写 .planning。
+
+剧本库校验（--playbooks）复用同一 Phase/Status 解析：Phase 必须位于 `## Phases`
+节内且每剧本至少 1 个合法 `### Phase N:`；每 Phase 恰一行
+`**Status:** pending|in_progress|complete`；Phase 条目只允许 `- [ ]` / `- [x]` /
+`- owner:` / `- plan:`；错误按 `rel:line: [rule] message` 输出（rc 1），路径不存在 rc 3。
 
 看板布局（S8-b1，AGENTS 编排效率原则 11 增补「写法四规则」+ Captain 2026-10-30 渲染细化）：
 业务链总览与待 Captain 置顶（业务主线+人工决策先行），当前目标/总舵 Next Step 居中，
@@ -424,7 +433,7 @@ def _todo_body(text: str) -> str:
     return re.sub(r"^-\s*(?:\[(?:x|X| )\]\s*)?", "", text).strip()
 
 
-def _lint_file(path: Path, root: Path) -> list[LintIssue]:
+def _lint_file(path: Path, root: Path, playbook: bool = False) -> list[LintIssue]:
     rel = path.relative_to(root).as_posix()
     issues: list[LintIssue] = []
 
@@ -434,6 +443,9 @@ def _lint_file(path: Path, root: Path) -> list[LintIssue]:
     section, section_line = None, 0
     phase: tuple[str, int] | None = None
     phase_status: list[int] = []
+    phase_count = 0
+    phases_section_line = 0
+    phases_in_section = 0
     next_step: list[int] = []
     in_comment = False
 
@@ -472,6 +484,8 @@ def _lint_file(path: Path, root: Path) -> list[LintIssue]:
             if section == "Next Step":
                 close_next_step()
             section, section_line = stripped[3:].strip(), line_no
+            if playbook and section == "Phases" and not phases_section_line:
+                phases_section_line = line_no
             continue
         if re.match(r"^###\s+[Pp]hase", stripped):
             close_phase()
@@ -481,6 +495,14 @@ def _lint_file(path: Path, root: Path) -> list[LintIssue]:
                     f"Phase 标题格式应为「### Phase N: 名称」，实际：{stripped}")
                 continue
             phase, phase_status = (m.group(1), line_no), []
+            phase_count += 1
+            if playbook:
+                if section == "Phases":
+                    phases_in_section += 1
+                else:
+                    add(line_no, "Phase 位置",
+                        f"Phase「{m.group(1)}」必须位于 `## Phases` 节内"
+                        f"（当前节：{section or '无'}）")
             continue
         if not stripped:
             continue
@@ -494,6 +516,9 @@ def _lint_file(path: Path, root: Path) -> list[LintIssue]:
             continue
         if STATUS_MARK_RE.search(stripped):
             phase_status.append(line_no)
+            if playbook and not STATUS_RE.search(stripped):
+                add(line_no, "Status 行",
+                    f"Status 值应为 pending|in_progress|complete，实际：{stripped}")
             continue
         if stripped.startswith("-"):
             if re.match(r"^-\s*\[(?:x|X| )\]\s*\S", stripped):
@@ -504,10 +529,41 @@ def _lint_file(path: Path, root: Path) -> list[LintIssue]:
             if re.match(r"^-\s*(?:plan|owner):\s*\S", stripped):
                 continue
             add(line_no, "Phase 项格式", f"Phase 项须为「- [ ]」/「- [x]」形式，实际：{stripped}")
+        elif playbook:
+            add(line_no, "Phase 项格式",
+                f"Phase 项须为「- [ ]」/「- [x]」/「- owner:」/「- plan:」形式，实际：{stripped}")
     close_phase()
+    if playbook:
+        if phases_section_line == 0:
+            add(1, "Phases 节", "缺少 `## Phases` 节（### Phase N: 必须位于其下）")
+        elif not phases_in_section:
+            add(phases_section_line, "Phases 节", "`## Phases` 节内没有 `### Phase N:` 阶段")
+        if phase_count == 0:
+            add(1, "Phase 缺失", "剧本至少需要 1 个「### Phase N: 名称」阶段")
     if section == "Next Step":
         close_next_step()
     return issues
+
+
+def lint_playbooks(target: Path) -> int:
+    """剧本结构校验（复用 _lint_file 的 Phase/Status 解析；目录跳过 README.md）。"""
+    if target.is_dir():
+        root = target
+        files = sorted(p for p in target.glob("*.md")
+                       if p.is_file() and p.name.lower() != "readme.md")
+    else:
+        root = target.parent
+        files = [target]
+    issues: list[LintIssue] = []
+    for path in files:
+        issues.extend(_lint_file(path, root, playbook=True))
+    if issues:
+        for issue in issues:
+            print(issue.format(), file=sys.stderr)
+        print(f"剧本 lint 失败：{len(issues)} 处问题（{len(files)} 个剧本）。", file=sys.stderr)
+        return 1
+    print(f"剧本 lint ok：{len(files)} 个剧本结构合法。")
+    return 0
 
 
 def lint_plans(plans: list[Plan]) -> list[LintIssue]:
@@ -750,6 +806,15 @@ def main(argv: list[str] | None = None) -> int:
         help="create-time lint：Phase 标题格式/单 Status 行/Next Step ≤10/Phase 项格式/裸编号"
              "（失败按 文件:行号 列出并非零退出）",
     )
+    parser.add_argument(
+        "--playbooks",
+        metavar="PATH",
+        help="剧本库结构校验：PATH 为文件或目录（目录取 *.md、跳过 README.md）；"
+             "Phase 必须位于 `## Phases` 节内且每剧本至少 1 个「### Phase N:」，"
+             "每 Phase 恰一行 **Status:** pending|in_progress|complete，"
+             "Phase 条目只用 - [ ]/- [x]/- owner:/- plan:"
+             "（失败按 文件:行号 列出并非零退出；路径不存在 rc=3）",
+    )
     parser.add_argument("--root", help="目标仓根目录（默认：cwd 向上找 .planning）")
     parser.add_argument(
         "--archive",
@@ -758,6 +823,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     root = resolve_root(args.root)
+    if args.playbooks:
+        target = Path(args.playbooks).expanduser()
+        if not target.exists():
+            print(f"剧本校验失败：路径不存在：{target}", file=sys.stderr)
+            return 3
+        return lint_playbooks(target)
     cfg = load_config(root)
     plans = load_plans(root)
     if args.selftest:

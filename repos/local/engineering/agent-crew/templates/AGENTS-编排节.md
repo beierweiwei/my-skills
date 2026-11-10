@@ -31,6 +31,16 @@
 - 状态/回执/占用/值守：`python3 scripts/crew-state.py`、`crew-msg.py`、`crew-ticket.py`、`crew-guard.py`；工位巡检 `pane-audit.py`。
 - 角色启动复用同一工位与 tab；回收窗与标签按 W4–W5。
 
+### 剧本库（playbook 路由）
+
+- 通用剧本：`{{skill_root}}/templates/playbooks/`（随技能分发，不复制进项目）；项目层 `.planning/playbooks/`，同名项目层覆盖技能层；两层都无匹配不硬套。
+- 大副派活按任务类型选剧本，步骤逐字铺进该流 task_plan 的 `## Phases`；不执行的步骤留痕 `- [x] <步骤>（跳过：<原因>）`；剧本名与来源层记入流 plan 的 Decisions。
+- 校验：`python3 scripts/plan-status.py --playbooks .planning/playbooks`；目录与契约见 `{{skill_root}}/templates/playbooks/README.md`。
+
+### 收口与验证原则
+
+- F6–F12 为收口验证与委派原则（真实证据、可验证单元、断言行为、沉淀杠杆、数字可解释、上下文预算、不空等人工）；摘要不复述正文，定义见 `{{crew_rules}}`。
+
 ### 决策与门禁
 
 - 可逆、可配置、不涉合同/合规/主数据/架构口径的事项可代决，标注「代决（可覆盖）」。

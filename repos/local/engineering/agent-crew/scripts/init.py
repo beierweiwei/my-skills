@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""init.py — agent-crew v2.1 安装 / bootstrap / 受管块刷新（幂等）。
+"""init.py — agent-crew v2.2 安装 / bootstrap / 受管块刷新（幂等）。
 
 行为契约（arch-proposal-v1 §7/§8、role-path-contract、impl-plan slice C）：
 - 只安装必要脚本、AGENTS 受管块、配置、项目角色 stub、portfolio/CONTEXT/topology 骨架；
@@ -51,7 +51,7 @@ TEMPLATES = SKILL_DIR / "templates"
 MARK_START = "<!-- agent-crew:orchestration:start -->"
 MARK_END = "<!-- agent-crew:orchestration:end -->"
 MARK_PREFIX = "<!-- agent-crew:orchestration:"
-SKILL_VERSION_FALLBACK = "2.1.0"
+SKILL_VERSION_FALLBACK = "2.2.0"
 
 CONFIG_REL = Path(".planning/orchestration.json")
 MANIFEST_REL = Path("docs/crew/manifest.json")
@@ -1203,6 +1203,10 @@ def _generate_skeletons(root: Path, templates: Path, cfg: dict, ctx: dict) -> di
         topology_ctx["red_lines"] = "项目红线与人工门以 `AGENTS.md` 受管块为准（唯一落点）。"
         products[topology_rel] = apply_template(
             topology_tpl.read_text(encoding="utf-8"), topology_ctx)
+    playbooks_readme = templates / "project" / "playbooks-README.md"
+    if playbooks_readme.exists():
+        products[Path(".planning/playbooks/README.md")] = apply_template(
+            playbooks_readme.read_text(encoding="utf-8"), ctx)
     return products
 
 
@@ -1479,7 +1483,7 @@ def _run_apply_locked(root: Path, source_dir: Path, templates: Path, skill_versi
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="agent-crew 编排体系初始化（v2.1 幂等）")
+    parser = argparse.ArgumentParser(description="agent-crew 编排体系初始化（v2.2 幂等）")
     parser.add_argument("--root", help="目标项目仓根（默认 cwd）")
     parser.add_argument("--templates", help=f"模板目录覆盖（默认 {TEMPLATES}）")
     parser.add_argument("--yes", action="store_true", help="零交互（兼容参数）")

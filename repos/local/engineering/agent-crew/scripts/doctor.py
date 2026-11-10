@@ -56,6 +56,7 @@ RUNTIME_DIRECT_PATTERNS = (
 )
 THIRD_PARTY_DIRS = frozenset({".venv", "site-packages", "node_modules"})
 ARCHIVED_DOCS_PREFIX = "docs/历史/"
+PLAYBOOK_SEEDS = ("autonomous-run.md", "babysit.md", "session-pickup.md", "investigation.md")
 
 
 def utc_now() -> str:
@@ -1683,6 +1684,62 @@ class Doctor:
             return Result("skill.purity", "pass", (stdout.strip().splitlines() or [""])[-1])
         return Result("skill.purity", "fail", (stdout + stderr).strip()[:500])
 
+    # ================= I. playbooks =================
+
+    def check_playbooks_library(self) -> Result:
+        skill_root = self.skill_root()
+        if skill_root is None:
+            return Result("playbooks.library", "fail",
+                          self._config_error or "配置缺 skillRoot",
+                          next="先跑 python3 scripts/init.py 生成配置")
+        layers = (
+            ("技能层", skill_root / "templates/playbooks", ("README.md", *PLAYBOOK_SEEDS)),
+            ("项目层", self.root / ".planning/playbooks", ("README.md",)),
+        )
+        lint = Path(__file__).resolve().parent / "plan-status.py"
+        problems: list[str] = []
+        next_steps: list[str] = []
+        summary: list[str] = []
+        for layer, directory, required in layers:
+            if not directory.is_dir():
+                problems.append(f"{layer}剧本库目录缺失：{directory}")
+                next_steps.append(
+                    "重跑 python3 scripts/init.py 生成 .planning/playbooks/README.md"
+                    if layer == "项目层"
+                    else "补齐技能源 templates/playbooks/（README + 种子剧本）"
+                )
+                continue
+            missing = [name for name in required if not (directory / name).is_file()]
+            if missing:
+                problems.append(f"{layer}剧本库缺少：{', '.join(missing)}")
+                next_steps.append(
+                    "重跑 python3 scripts/init.py 生成项目层 README"
+                    if layer == "项目层"
+                    else "补齐技能源 templates/playbooks/ 种子剧本"
+                )
+            files = sorted(path for path in directory.glob("*.md")
+                           if path.is_file() and path.name.lower() != "readme.md")
+            summary.append(f"{layer} {len(files)} 个剧本")
+            if not files:
+                continue
+            rc, stdout, stderr = self._run_cli(
+                [sys.executable, str(lint), "--playbooks", str(directory)], timeout=60)
+            if rc == 3:
+                problems.append(f"剧本校验不可用：{stderr.strip()[:200]}")
+                next_steps.append("确认 scripts/plan-status.py 已随技能安装")
+            elif rc != 0:
+                detail = (stdout + stderr).strip().replace("\n", "；")[:400]
+                problems.append(f"{layer}剧本结构不合法：{detail}")
+                next_steps.append(
+                    f"按输出修复剧本结构后重跑 python3 scripts/plan-status.py "
+                    f"--playbooks {directory}")
+        if problems:
+            return Result("playbooks.library", "fail", "；".join(problems),
+                          evidence={"layers": summary},
+                          next="；".join(dict.fromkeys(next_steps)))
+        return Result("playbooks.library", "pass",
+                      f"两层剧本库结构合法（{'；'.join(summary)}；README 齐全）")
+
 
 def _pid_alive(pid: int) -> bool:
     try:
@@ -1706,6 +1763,7 @@ CHECKS = [
     "hooks.schema", "hooks.gates", "hooks.scripts",
     "install.log", "install.version", "upgrade.scripts",
     "skill.purity", "skill.lint",
+    "playbooks.library",
 ]
 METHODS = {
     "manifest.schema": "check_manifest_schema",
@@ -1751,6 +1809,7 @@ METHODS = {
     "upgrade.scripts": "check_upgrade_scripts",
     "skill.purity": "check_skill_purity",
     "skill.lint": "check_skill_lint",
+    "playbooks.library": "check_playbooks_library",
 }
 
 

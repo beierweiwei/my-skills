@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.2.0 — 2026-11-10
+
+### 新增
+
+- **剧本库（playbook 路由，B1/B2/B4）**：技能层新增 `templates/playbooks/`（README + 4 个多线版种子剧本 `autonomous-run` / `babysit` / `session-pickup` / `investigation`），随技能分发、不复制进项目；项目层 `.planning/playbooks/` 由 init 渲染 `templates/project/playbooks-README.md` 生成骨架（已存在不重建），同名项目层覆盖技能层。剧本按流 plan 解析契约书写：每 Phase 恰一行 `- **Status:** pending`、条目只用 `- [ ]`/`- [x]`/`- owner:`。
+- **大副选板 SOP**：`templates/skills/firstmate-dispatch/SKILL.md` 增「2.1 选板（剧本路由）」——按任务类型选剧本 → 步骤逐字铺进该流 task_plan 的 `## Phases` → 跳过留痕 `- [x] <步骤>（跳过：<原因>）` → 剧本名与来源层记入 Decisions；qoder/opencode firstmate 基类动作清单各补一句运行期指针。
+- **收口规则 F6–F12（B5）**：`references/crew-rules.md` 收口节新增 prove-it-works、sequence-verifiable-units、test-behavior-not-implementation、build-the-lever、explain-the-number、guard-the-context-window、never-block-on-the-human 七条原则（含 pstack 原名溯源），索引表改 `F1–F12`；`templates/AGENTS-编排节.md` 新增「剧本库（playbook 路由）」与「收口与验证原则」两节（摘要 + 指针，不复述正文）；orchestration-guide 与角色模板引用区间同步 F1–F12。
+- **剧本契约校验（B3/B6）**：`plan-status.py --playbooks <dir>` 校验剧本结构（至少一个 Phase、每 Phase 恰一行 Status、Phase 条目标准 todo）；doctor 增加剧本库体检（发现两层、校验契约、缺失给可执行 next）；init 生成项目层剧本目录与 README。
+
+### 变更
+
+- 版本 2.2.0：`SKILL.md` frontmatter、标题与「读哪里」同步剧本库指针。
+
 ## 2.1.9 — 2026-11-10
 
 ### 新增

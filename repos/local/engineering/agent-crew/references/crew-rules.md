@@ -13,7 +13,7 @@
 | R | 回执 | R1–R4 |
 | W | 工位 | W1–W5 |
 | O | 占用 | O1–O3 |
-| F | 收口 | F1–F5 |
+| F | 收口 | F1–F12 |
 | P | 并发 | P1–P3 |
 | G | 值守 | G1–G5 |
 | S | 状态机 | S1–S4 |
@@ -64,6 +64,13 @@
 - **F3 plan 更新**：owner 收到回执后必须更新对应 plan 的阶段 Status、Next Step 与证据指针；回执不替代 plan，未更新视为未收口。
 - **F4 工位处置**：每段收口回执必须写明「工位处置：关闭 / 保留至 HH:MM」；不填视为未收口。
 - **F5 越界即 BLOCK**：reviewer 对超出工单目标的 diff 可直接 BLOCK；收口方只看结果与证据，不看实现细节。
+- **F6 prove-it-works**：结论只认真实运行证据（测试、复现、真实数据回放、可执行命令输出）；自述完成与演示样例不算数（pstack 原名 prove-it-works）。
+- **F7 sequence-verifiable-units**：工作切成可独立验证的最小单元，前一单元验证通过再开下一个，禁止最后批量补验（pstack 原名 sequence-verifiable-units）。
+- **F8 test-behavior-not-implementation**：测试断言对外行为与契约，不断言内部实现细节，重构不因实现变动而重写测试（pstack 原名 test-behavior-not-implementation）。
+- **F9 build-the-lever**：一次性验证沉淀为可复用的脚本、检查或看板，让同类验证自动完成，不重复手工操作（pstack 原名 build-the-lever）。
+- **F10 explain-the-number**：报数必须带口径（来源、算法、时间窗口、限制），解释不了的数字不进结论（pstack 原名 explain-the-number）。
+- **F11 guard-the-context-window**：主动管理上下文预算，长材料交子代理或脚本归纳只带回结论，到阈值按交接规则换舵，不在运行中压缩硬撑（pstack 原名 guard-the-context-window）。
+- **F12 never-block-on-the-human**：只有不可逆、超授权或需偏好判断的事项交人工，其余按红线自主推进并留里程（pstack 原名 never-block-on-the-human）。
 
 ## P 并发
 
