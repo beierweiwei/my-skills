@@ -4,12 +4,15 @@
 回执落点：<git-common-dir>/crew/inbox/<receipt-id>.json（tmp + rename 原子写）。
 注册表：<git-common-dir>/crew/registry.json，只存 Herdr 不知道的路由；默认不创建。
 
-推送边界（首批）：
+推送边界（2.1.7）：
 - opencode→opencode：POST /api/session/{id}/prompt，请求体 delivery=queue；
-- qoder→qoder：脚本无法跨进程调用 SendMessage，push 输出 DELEGATE 消息正文，
-  由调用方 Agent 用 SendMessage 转发；
+- qoder→qoder：默认 `herdr agent prompt <目标名>` 直推（非交互、无跨会话审批）；
+  `--via sendmessage` 显式回到 DELEGATE（需接收方人工确认，inbox 为真源）；
+  `--via herdr` 强制 herdr，失败时回退 DELEGATE 并返回诊断错误；
 - claude / codex：本期只做路由校验与接口占位，不真实投递；
-- 跨产品 / 未知 Herdr 目标：只写文件 + Herdr 通知（回执已是真源）。
+- 跨产品 / Herdr 目标：只写文件 + Herdr 通知；`--via` 只作用于同 runtime=qoder 的推送。
+- `--target-runtime auto` 只查 registry；无路由按 Herdr 目标处理（文件+通知）。需要 qoder
+  直推时显式传 `--target-runtime qoder`。
 
 推送失败不回滚回执。退出码：0 成功；1 参数/注册表/回执错误；3 回执成立但投递失败。
 
@@ -55,6 +58,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from crew_paths import CrewPathsError, crew_dir  # noqa: E402
 
 SENDER_RUNTIMES = ("qoder", "opencode", "claude", "codex")
+VIA_MODES = ("auto", "herdr", "sendmessage")
+QODER_APPROVAL_WARNING = "需接收方人工确认（Qoder 跨会话审批），inbox 为真源"
+HERDR_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 STATUSES = ("done", "blocked", "captain")
 RECEIPT_FIELDS = (
     "receipt_id",
@@ -369,15 +375,118 @@ def _notify_result(receipt: dict, crew_dir: Path, runtime: str, note: str) -> di
     }
 
 
+def herdr_prompt(name: str, message: str, timeout: float = 10.0) -> tuple[bool, str]:
+    """通过 herdr 直接把消息推入目标 agent；返回 (ok, 诊断)。"""
+    try:
+        proc = subprocess.run(
+            ["herdr", "agent", "prompt", name, message],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    if proc.returncode == 0:
+        return True, ""
+    detail = (proc.stderr or proc.stdout or "").strip()
+    error = f"herdr agent prompt 退出码 {proc.returncode}"
+    if detail:
+        error += f": {detail[:200]}"
+    return False, error
+
+
+def _herdr_target_name(to: str | None) -> str:
+    name = str(to or "").strip()
+    return name if HERDR_NAME_RE.fullmatch(name) else ""
+
+
+def _delegate_qoder(
+    receipt: dict,
+    to: str | None,
+    *,
+    note: str,
+    ok: bool = True,
+    warning: str = "",
+    error: str | None = None,
+) -> dict:
+    result = {
+        "target": to,
+        "runtime": "qoder",
+        "delivery": "delegate",
+        "ok": ok,
+        "message": format_message(receipt),
+        "note": note,
+    }
+    if warning:
+        result["warning"] = warning
+    if error:
+        result["error"] = error
+    return result
+
+
+def deliver_qoder(
+    receipt: dict,
+    *,
+    to: str | None,
+    via: str,
+    timeout: float = 10.0,
+) -> dict:
+    if via == "sendmessage":
+        return _delegate_qoder(
+            receipt,
+            to,
+            note="--via sendmessage：由调用方 Agent 用 SendMessage 转发 message",
+            warning=QODER_APPROVAL_WARNING,
+        )
+    target = _herdr_target_name(to)
+    if not target:
+        if via == "herdr":
+            return _delegate_qoder(
+                receipt,
+                to,
+                ok=False,
+                note="已回退 DELEGATE；请调用方 Agent 用 SendMessage 转发 message",
+                warning=QODER_APPROVAL_WARNING,
+                error="无可用 herdr 名，无法执行 --via herdr",
+            )
+        return _delegate_qoder(
+            receipt,
+            to,
+            note="无可用 herdr 名，回退 DELEGATE（兼容行为）",
+            warning=QODER_APPROVAL_WARNING,
+        )
+    ok, error = herdr_prompt(target, format_message(receipt), timeout=timeout)
+    if ok:
+        return {
+            "target": target,
+            "runtime": "qoder",
+            "delivery": "herdr",
+            "ok": True,
+            "note": "herdr agent prompt 直推（非交互、无跨会话审批）",
+        }
+    return _delegate_qoder(
+        receipt,
+        target,
+        ok=False,
+        note="herdr prompt 失败，已回退 DELEGATE；inbox 为真源，请调用方转发 message",
+        warning=QODER_APPROVAL_WARNING,
+        error=error,
+    )
+
+
 def deliver_receipt(
     receipt: dict,
     crew_dir: Path,
     *,
     to: str | None = None,
     target_runtime: str | None = None,
+    via: str = "auto",
     timeout: float = 10.0,
 ) -> dict:
     validate_receipt(receipt)
+    if via not in VIA_MODES:
+        raise CrewMsgError(f"未知 via: {via!r}（可选: {', '.join(VIA_MODES)}）")
     registry = load_registry(crew_dir)
     routes = registry.get("routes", {})
     if not to:
@@ -410,14 +519,7 @@ def deliver_receipt(
         return result
 
     if runtime == "qoder":
-        return {
-            "target": to,
-            "runtime": "qoder",
-            "delivery": "delegate",
-            "ok": True,
-            "message": format_message(receipt),
-            "note": "脚本不能跨进程 SendMessage，请调用方 Agent 用 SendMessage 转发 message",
-        }
+        return deliver_qoder(receipt, to=to, via=via, timeout=timeout)
 
     if route is None:
         raise RegistryError(f'目标 "{to}" 缺少 {runtime} 路由（registry.json）')
@@ -480,6 +582,7 @@ def write_receipt(
     push: bool = True,
     to: str | None = None,
     target_runtime: str | None = None,
+    via: str = "auto",
     timeout: float = 10.0,
 ) -> dict:
     validate_receipt(receipt)
@@ -495,7 +598,12 @@ def write_receipt(
     result = None
     if push and to:
         result = deliver_receipt(
-            receipt, crew_dir, to=to, target_runtime=target_runtime, timeout=timeout
+            receipt,
+            crew_dir,
+            to=to,
+            target_runtime=target_runtime,
+            via=via,
+            timeout=timeout,
         )
     return {
         "receipt_id": receipt["receipt_id"],
@@ -517,6 +625,8 @@ def _print_push(result: dict) -> None:
     if result.get("error"):
         line += f" error={result['error']}"
     print(line)
+    if result.get("warning"):
+        print(f"warning: {result['warning']}")
     if result.get("note"):
         print(f"说明：{result['note']}")
     if result.get("delivery") == "delegate":
@@ -545,6 +655,7 @@ def _cmd_write(args, crew_dir: Path) -> int:
             push=not args.no_push,
             to=args.to,
             target_runtime=args.target_runtime,
+            via=args.via,
             timeout=args.timeout,
         )
     except RegistryError as exc:
@@ -604,6 +715,7 @@ def _cmd_push(args, crew_dir: Path) -> int:
         crew_dir,
         to=args.to,
         target_runtime=args.target_runtime,
+        via=args.via,
         timeout=args.timeout,
     )
     if args.json:
@@ -630,10 +742,14 @@ changed_files[] / evidence[] / work_slot / findings[] / summary / ts。
 status=captain 表示 ⏸ 待 Captain。回执先原子落盘，推送失败不影响回执成立。
 
 推送边界：
+- qoder→qoder：默认 `herdr agent prompt <目标名>` 直推（非交互、无跨会话审批）；
+  `--via sendmessage` 保留 DELEGATE（由调用方用 SendMessage 转发）并告警需接收方
+  人工确认；`--via herdr` 强制 herdr，失败时回退 DELEGATE 并返回诊断错误；
 - opencode→opencode：POST /api/session/{id}/prompt，请求体 delivery=queue；
-- qoder→qoder：push 输出 DELEGATE 消息，由调用方 Agent 用 SendMessage 转发；
 - claude / codex：本批仅校验路由并返回 placeholder，不真实投递；
-- 跨产品 / Herdr 目标：只写文件 + Herdr 通知。
+- 跨产品 / Herdr 目标：只写文件 + Herdr 通知；`--via` 只作用于同 runtime=qoder 的推送。
+- `--target-runtime auto` 只查 registry；无路由按 Herdr 目标处理（文件+通知）。需要 qoder
+  直推时显式传 `--target-runtime qoder`。
 
 注册表 .git/crew/registry.json 只存 Herdr 不知道的路由，默认不创建；非法路由明确报错。
 退出码：0 成功；1 参数/注册表/回执错误；3 回执成立但投递失败。
@@ -677,7 +793,13 @@ status=captain 表示 ⏸ 待 Captain。回执先原子落盘，推送失败不�
         help="auto=查注册表；无注册表路由按 Herdr 目标处理",
     )
     write.add_argument("--no-push", action="store_true", help="只落文件，不推送")
-    write.add_argument("--timeout", type=float, default=10.0, help="HTTP 推送超时秒数")
+    write.add_argument(
+        "--via",
+        choices=VIA_MODES,
+        default="auto",
+        help="推送方式：auto=qoder 默认 herdr；herdr 强制；sendmessage 保留 DELEGATE 并告警",
+    )
+    write.add_argument("--timeout", type=float, default=10.0, help="HTTP/herdr 推送超时秒数")
 
     ls = subparsers.add_parser("ls", parents=[common], help="列回执")
     ls.add_argument("--status", choices=STATUSES, help="按状态过滤")
@@ -694,7 +816,13 @@ status=captain 表示 ⏸ 待 Captain。回执先原子落盘，推送失败不�
         default="auto",
         help="auto=查注册表；无注册表路由按 Herdr 目标处理",
     )
-    push.add_argument("--timeout", type=float, default=10.0, help="HTTP 推送超时秒数")
+    push.add_argument(
+        "--via",
+        choices=VIA_MODES,
+        default="auto",
+        help="推送方式：auto=qoder 默认 herdr；herdr 强制；sendmessage 保留 DELEGATE 并告警",
+    )
+    push.add_argument("--timeout", type=float, default=10.0, help="HTTP/herdr 推送超时秒数")
 
     return parser
 

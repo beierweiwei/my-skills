@@ -228,15 +228,92 @@ class RegistryTest(CrewDirTestBase):
 
 
 class DeliveryBoundaryTest(CrewDirTestBase):
-    def test_qoder_target_returns_delegate_message(self):
+    def test_qoder_sendmessage_returns_delegate_with_warning(self):
         receipt = make_receipt(runtime="qoder")
         result = cm.deliver_receipt(
-            receipt, self.crew, to="helm", target_runtime="qoder"
+            receipt, self.crew, to="helm", target_runtime="qoder", via="sendmessage"
         )
         self.assertEqual(result["delivery"], "delegate")
         self.assertTrue(result["ok"])
         self.assertIn(receipt["receipt_id"], result["message"])
         self.assertIn(receipt["summary"], result["message"])
+        self.assertIn("需接收方人工确认", result["warning"])
+        self.assertIn("inbox 为真源", result["warning"])
+
+    def test_qoder_auto_uses_herdr_prompt_without_sendmessage(self):
+        receipt = make_receipt(runtime="qoder")
+        completed = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(cm.subprocess, "run", return_value=completed) as run:
+            result = cm.deliver_receipt(
+                receipt, self.crew, to="helm-qoder", target_runtime="qoder", via="auto"
+            )
+
+        self.assertEqual(result["delivery"], "herdr")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["target"], "helm-qoder")
+        self.assertNotIn("SendMessage", result.get("note", ""))
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[:4], ["herdr", "agent", "prompt", "helm-qoder"])
+        self.assertIn(receipt["receipt_id"], argv[4])
+        self.assertIn(receipt["summary"], argv[4])
+
+    def test_qoder_herdr_failure_falls_back_to_delegate_with_error(self):
+        receipt = make_receipt(runtime="qoder")
+        completed = mock.Mock(returncode=1, stdout="", stderr="agent not found")
+        with mock.patch.object(cm.subprocess, "run", return_value=completed):
+            result = cm.deliver_receipt(
+                receipt, self.crew, to="helm-qoder", target_runtime="qoder", via="herdr"
+            )
+
+        self.assertEqual(result["delivery"], "delegate")
+        self.assertFalse(result["ok"])
+        self.assertIn("退出码 1", result["error"])
+        self.assertIn("agent not found", result["error"])
+        self.assertIn(receipt["receipt_id"], result["message"])
+        self.assertIn("inbox 为真源", result["note"])
+
+    def test_qoder_auto_without_herdr_name_falls_back_to_delegate(self):
+        receipt = make_receipt(runtime="qoder")
+        with mock.patch.object(cm.subprocess, "run") as run:
+            result = cm.deliver_receipt(
+                receipt, self.crew, to="session:ses_123", target_runtime="qoder", via="auto"
+            )
+
+        self.assertEqual(result["delivery"], "delegate")
+        self.assertTrue(result["ok"])
+        self.assertIn("无可用 herdr 名", result["note"])
+        self.assertIn(receipt["receipt_id"], result["message"])
+        run.assert_not_called()
+
+    def test_via_is_ignored_for_non_qoder_paths(self):
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+            cm, "notify", return_value=False
+        ) as notify:
+            herdr_result = cm.deliver_receipt(
+                make_receipt(runtime="qoder"), self.crew, to="herdr-peer", via="herdr"
+            )
+        self.assertEqual(herdr_result["delivery"], "notification")
+        self.assertEqual(notify.call_count, 1)
+
+        self.write_registry(
+            {"lead": {"runtime": "opencode", "server": "http://127.0.0.1:1", "session": "ses_1"}}
+        )
+        with mock.patch.object(cm, "http_post_json", return_value=(200, b"{}")) as post:
+            opencode_result = cm.deliver_receipt(
+                make_receipt(), self.crew, to="lead", via="sendmessage"
+            )
+        self.assertEqual(opencode_result["delivery"], "http")
+        post.assert_called_once()
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            cross_result = cm.deliver_receipt(
+                make_receipt(runtime="qoder"),
+                self.crew,
+                to="claude-side",
+                target_runtime="claude",
+                via="herdr",
+            )
+        self.assertEqual(cross_result["delivery"], "notification")
 
     def test_cross_product_only_notifies(self):
         self.write_registry(
@@ -345,9 +422,40 @@ class CliTest(CrewDirTestBase):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out)["receipt_id"], "r-1")
 
+    def test_push_via_sendmessage_prints_warning(self):
+        cm.write_receipt(self.crew, make_receipt(runtime="qoder"), push=False)
+        code, out, _ = self._run(
+            [
+                "push",
+                "--crew-dir",
+                str(self.crew),
+                "r-1",
+                "--to",
+                "helm-qoder",
+                "--target-runtime",
+                "qoder",
+                "--via",
+                "sendmessage",
+            ]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("warning:", out)
+        self.assertIn("需接收方人工确认", out)
+        self.assertIn("DELEGATE", out)
+
     def test_help_is_self_describing(self):
         text = cm.build_parser().format_help()
-        for token in ("write", "ls", "read", "push", "delivery=queue", "SendMessage", "registry.json"):
+        for token in (
+            "write",
+            "ls",
+            "read",
+            "push",
+            "delivery=queue",
+            "SendMessage",
+            "registry.json",
+            "--via",
+            "herdr agent prompt",
+        ):
             self.assertIn(token, text)
 
 

@@ -37,6 +37,8 @@ permission:
 5. 收口：核 F1 三件与 F5 越界；按回执更新 plan 的 Status/Next Step/证据指针（F3），回执不替代 plan；回执写明工位处置（F4）。
 6. 决策：可逆/可配置自行代决并标「代决（可覆盖）」，只上抛「难回头」与「影响最终验收」两类；当前项对 Captain 用三段式 + 推荐，一次 ≤3；将来项登记后新开 `future-<主题>` worker，副手只交接/跟踪/收口；决策落定同步需求待澄清/plan Decisions/门禁清单。
 7. 汇报：按 A5，只写状态、事实（改动/证据路径）、门禁、阻塞、下一步；不写过程流水；以看板为准（流表 + Backlog + 待 Captain），每轮回复前更新 progress（近三轮/当前决策/将来事项/本切片摘要 + 证据）。
+8. 每轮开工先查 `<crew-dir>/inbox/`（R1 文件真源）与 `<crew-dir>/guard.wake`：有则读取、按需处置并消费。
+9. 若会话弹出跨会话消息审批：按「1. Delivered / 2. Decline」人工处置后继续；不依赖 SendMessage 送达、不当成交接问题（inbox 已落盘为真源）。
 
 ## 上下文与工位
 - 副舵自身 ctx ≥30% 停止接新活，完成当前切片后按 `progress.md` 尾部交接；≥60% 立即启动新副舵接替（同 tab 内 split 起 `firstmate<N+1>`（`--kind opencode`），新舵首报后关旧 pane）；不在运行中压缩。opencode 配置/agent/skill 不热重载，改完重启会话。

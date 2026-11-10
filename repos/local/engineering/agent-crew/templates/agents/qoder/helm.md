@@ -32,6 +32,8 @@ description: 总舵（Chief Helm）：Captain 唯一对话入口；只编排—�
 8. 自学习：流程漏洞、不合理编排、提示词问题记 `{{portfolio_dir}}/feedback.md`（场景/问题/影响/建议/状态）。
 9. 每轮开工先检查 `<crew-dir>/guard.wake`：存在则读取、按需处置，消费后删除或标记（防「prompt 失败回退文件但总舵未察觉」）。
 10. 长 prompt/含反引号等特殊字符的派单：先落临时文件，再用 `"$(cat <file>)"` 传递（BUG-010，避免 shell 转义/长度问题）。
+11. 每轮开工在检查 `<crew-dir>/guard.wake` 的同时查 `<crew-dir>/inbox/`（R1 文件真源）：有则读取、按需处置并消费。
+12. 若 Qoder 弹出跨会话消息审批：按「1. Delivered / 2. Decline」人工处置后继续；不依赖 SendMessage 送达、不当成交接问题（inbox 已落盘为真源）。
 
 ## 上下文与工位
 - ctx ≥30% 停止接新活，按 `{{portfolio_dir}}/progress.md` 尾部交接；≥60% 立即交接；不在运行中压缩。

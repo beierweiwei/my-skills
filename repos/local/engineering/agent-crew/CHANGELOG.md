@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.1.7 — 2026-11-10
+
+### 新增
+
+- `crew-msg.py` 的 qoder→qoder 推送默认改走 `herdr agent prompt <目标名>`（非交互、无 Qoder 跨会话审批）；新增 `--via {auto,herdr,sendmessage}`（默认 auto）。`--via sendmessage` 保留 DELEGATE 输出并告警「需接收方人工确认（Qoder 跨会话审批），inbox 为真源」；`--via herdr` 强制直推，失败时回退 DELEGATE 并返回诊断错误，不静默丢回执。`--via` 只作用于同 runtime=qoder 的推送；Herdr 目标/跨产品仍只写文件+通知。
+- helm / firstmate 四个 Qoder/opencode 模板动作清单补两条：每轮开工检查 `<crew-dir>/inbox/` 与 `<crew-dir>/guard.wake` 并消费；Qoder 跨会话审批按「1. Delivered / 2. Decline」人工处置，不依赖 SendMessage 送达（inbox 为真源）。
+
 ## 2.1.6 — 2026-11-10
 
 ### 新增
