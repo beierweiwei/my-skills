@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.2.3 — 2026-11-10
+
+### 新增
+
+- **engineering-disciplines 通用技能（跨仓，my-skills 分发）**：单技能六节——断言二元、先磨后干、止损不盲试、运行证实、报告契约、无发现合法 + 同根因合并；每节 3–5 行，`disable-model-invocation: true`，手动或主舵点名触发。本仓不复制正文、不加接线引用。
+- **reviewer 强化四条（F13–F16）**：`references/crew-rules.md` 新增意图前置、证据门槛分级、防凑数、择优场景盲审（默认关）；索引 F1–F16，收口节名不变。reviewer qoder/opencode 两模板动作清单嵌入同样四条，保留结论枚举 PASS/BLOCK/可延后；firstmate-dispatch §5 收口补评审报告验收口径。
+- **经济档选板**：firstmate qoder/opencode 两模板与 firstmate-dispatch §2.1 增加经济档/升档表（interrogate 1 攻击者→2；arena 2 候选跳过评委→开评委；swarm 只分片→救火竞速）；升档判断权在大副并记流 plan Decision。
+- **arena 剧本**：`templates/playbooks/arena.md`（Frame/Fan out/Pick/Graft/Verify/Output；2 候选、跳过评委、盲审默认关、败者 1–2 点嫁接、真实验证）；README 剧本表补 `arena.md`。
+
+### 修复
+
+- **BUG-023**：`templates/skills/firstmate-dispatch/SKILL.md` §3 派活示例改走唯一入口——`dispatch.py tab create` / `scripts/start-agent.sh`（或 `dispatch.py start`）/ `dispatch.py prompt`；只读 `herdr agent list/tab list/get/read` 保留，`send-keys` 标注仅人工恢复。
+- **BUG-024**：`scripts/crew-state.py` 文档中的回执状态枚举去掉 `ack`，与 `scripts/crew-msg.py` 的 `done|blocked|captain` 一致。
+
+### 变更
+
+- 版本 2.2.3：`SKILL.md` frontmatter 与标题、`init.py` 版本 fallback 同步。
+
 ## 2.2.2 — 2026-11-10
 
 ### 新增

@@ -17,7 +17,7 @@ permission:
 # First Mate（大副 · opencode）
 
 ## 引用
-- 规则：`{{crew_rules}}`（D1–D6、R1–R4、W1–W5、O1–O3、F1–F12、P1–P3、G1–G5、S1–S4、X1–X5）。
+- 规则：`{{crew_rules}}`（D1–D6、R1–R4、W1–W5、O1–O3、F1–F16、P1–P3、G1–G5、S1–S4、X1–X5）。
 - 验收：`{{crew_acceptance}}`（A1–A5；收口呈报按 A5，验收门按 A1–A4 核对）。
 - 项目 `AGENTS.md` 与 `{{doc_context}}` 优先；本文件只写动作，不复述规则正文。
 - 通信：不主动使用 SendMessage；回执走 inbox + herdr；Qoder 弹出跨会话审批一律选 **Decline**（inbox 为真源），除非 Captain 明确要求 Delivered。
@@ -39,6 +39,15 @@ permission:
    - 铺设：剧本 `## Phases` 的步骤逐字铺进该流 task_plan 的 `## Phases`，不改写步骤措辞。
    - 跳过：不执行的步骤保留行并标 `- [x] <步骤>（跳过：<原因>）`。
    - 记账：剧本名与来源层（项目层/技能层）记入该流 plan 的 Decisions。
+   - 经济档（默认）与升档：
+
+     | 机制 | 经济档（默认） | 升档条件 |
+     |---|---|---|
+     | interrogate | 1 攻击者 inherit-parent | 核心模块 / 对外 API / 数据安全红线 → 2 |
+     | arena | 2 候选 + 跳过评委（主会话自评） | 架构/API 设计且方向分歧大 → 开评委 |
+     | swarm | 只分片不竞速 | 救火（速度比 token 贵）→ 竞速 |
+
+   - 升档判断权在大副，升档记该流 plan Decision。
 3. 工位：同流复用；新建/容量/标签/回收按 W1–W5；worker 一律 YOLO 启动，禁止手敲裸命令；派新活前查 ctx（≥30% 先 `/compact` 复核，≥60% 关闭重建）。
 4. 监听：派完立即返回，后台 `agent-watch` 或 Monitor，不前台 `--wait`/sleep/轮询；超时先 re-arm + 状态与产物双确认；guard 为自动触发器（G1–G5）。
 5. 收口：核 F1 三件与 F5 越界；按回执更新 plan 的 Status/Next Step/证据指针（F3），回执不替代 plan；回执写明工位处置（F4）。
