@@ -32,48 +32,38 @@ herdr tab create --cwd "$PWD" --label "<task>-builder" --no-focus
 
 返回 JSON 里取 `result.tab.tab_id` 和 `result.root_pane.pane_id`。
 
-## 4. 启动 Agent
+## 4. 启动 Agent（只走 dispatch）
+
+Agent 生命周期与工位变更的唯一入口是 `python3 scripts/dispatch.py`；`start-agent.sh` / `start-helm.sh` 只是薄包装，不直接拼 runtime 参数。只读查看仍用 `herdr agent list` / `tab list` / `pane list`。
 
 ```bash
-herdr agent start <task>-builder --kind qodercli --pane <root_pane_id>
+# 组合 dry-run（不启动，先看 base/overlay/权限/残留 token）
+python3 scripts/dispatch.py --root . compose --role builder --runtime qoder --json
+
+# 启动角色（pane/tab 由 dispatch 创建或复用；同名预检失败 rc=1）
+python3 scripts/dispatch.py --root . start --role builder --runtime qoder --pane <pane_id>
+
+# 提示 / 关闭 / 状态（--agent 取 dispatch 托管的 agent 名）
+python3 scripts/dispatch.py --root . prompt --agent <task>-builder --message "读工单 <路径>，执行。"
+python3 scripts/dispatch.py --root . close --agent <task>-builder
+python3 scripts/dispatch.py --root . status --json
 ```
 
-- `--kind` 可用 `herdr agent` 查看当前支持的 Agent。启动前先确认 `qodercli --version` 可用（qodercli 需在 PATH 中）。
-- Agent 名必须匹配 `[a-z][a-z0-9_-]{0,31}`，如 `demo-builder`；tab label 可以用中文。
-- 成功时返回 `interactive_ready: true`。
-- **角色固化**：项目在 `.qoder/agents/builder.md` / `reviewer.md` / `scout.md` / `runner.md` 定义了 Qoder subagent（角色 + 工具权限），启动时带 `-- --agent builder|reviewer|scout|runner`，不再每次发身份 prompt。启动后界面应显示对应 `@角色`。
-- **YOLO 模式**：副手启动 worker/crew 时加 `--permission-mode bypass_permissions`（界面显示 YOLO），减少实现过程中的权限确认；只在隔离 worktree 和明确工单边界内使用，合并/推送/清理与数据安全门禁不因此放宽。opencode worker 用 `--auto` 代替，副舵自身不用 `--auto`。
-  完整启动命令：
-
-  ```bash
-  herdr agent start <流>-builder --kind qodercli --pane <pane_id> -- --agent builder --permission-mode bypass_permissions
-  herdr agent start <流>-reviewer --kind qodercli --pane <pane_id> -- --agent reviewer --permission-mode bypass_permissions
-  herdr agent start misc-runner --kind qodercli --pane <pane_id> -- --agent runner --permission-mode bypass_permissions
-  ```
-
-- **总舵**：不手敲裸命令——跑 `scripts/start-helm.sh` 一键完成（建 tab、起 agent、发首条汇报）。总舵 agent 名＝`orchestration.json` 的 `helm.agentName`，默认派生 `helm-<项目名>`；herdr agent 名同机全局唯一，不用裸名 `helm`（跨项目撞名），撞名时脚本提示关闭冲突 agent 或换名后重跑。
-- **opencode**：项目级角色在 `.opencode/agent/`，已支持 `--agent`，不再需要手动身份 prompt；**角色按 tab/会话选择，项目不设默认 agent**（普通 opencode 会话是 `build`）。当前技能只带 `firstmate` 一份 opencode 角色，crew 默认继续用 Qoder；需要 opencode crew 时先补 `.opencode/agent/<role>.md` 并重启：
-
-  ```bash
-  # 主控 tab：副舵（agent 名同机唯一，一律带流/项目前缀）
-  herdr agent start <流>-firstmate --kind opencode --pane <pane_id> -- --agent firstmate
-  # 已补齐 builder 角色文件后
-  herdr agent start <流>-builder --kind opencode --pane <pane_id> -- --agent builder
-  ```
-
-  用 `opencode agent list` 确认角色已加载，`opencode debug skill` 确认技能可见；改完 agent/skill/config 必须重启会话（opencode 配置不热重载）。
-
-> 编排封装：日常用 `scripts/start-agent.sh <agent-name> <pane-id> <role>` 一条命令完成 YOLO 启动，不必手敲裸命令。
+- **角色与权限**：项目角色文件（`.qoder/agents/<role>.md` / `.opencode/agent/<role>.md`）只放发现字段与 `extends: skill:<role>`；运行时 frontmatter/权限只取技能基类。Qoder 基类 `disallowedTools` 翻译为 `--disallowed-tools`；opencode 基类 `permission`/`mode` 原样进入组合产物。
+- **YOLO 模式**：副舵派 worker 时由 dispatch 透传 `--permission-mode bypass_permissions`（Qoder）或 `--auto`（opencode）；只在隔离 worktree 与明确工单边界内，合并/推送/清理与数据安全门禁不放宽。
+- **总舵**：`bash scripts/start-helm.sh`（内部走 dispatch）；agent 名取 `orchestration.json` 的 `helm.agentName`，默认派生 `helm-<项目名>`，同机全局唯一。
+- **opencode**：技能源已带 7 个 `mode: primary` 基类；项目 stub 由 init 生成。dispatch 以 `OPENCODE_CONFIG_DIR` 指向组合目录启动；用 `opencode agent list` 确认发现，改 agent/skill/config 后必须重启会话（不热重载）。
 
 ## 5. 派活、等待、读结果
 
 ```bash
-herdr agent prompt <task>-builder "读 <需求文档路径>，执行工单 <工单路径>；只改指定文件。" --wait --timeout 600000
+python3 scripts/dispatch.py --root . prompt --agent <task>-builder --message "读 <需求文档路径>，执行工单 <工单路径>；只改指定文件。"
 herdr agent read <task>-builder --source recent-unwrapped --lines 200
 herdr agent get <task>-builder
 ```
 
-- `--wait` 等到 `idle / done / blocked`；批量任务把超时设大。
+- 提示走 dispatch（写 agent-log）；`herdr agent read/get` 只读。
+- 手工 `herdr agent prompt` 仅作排障旁路，不作为主路径。
 - `recent-unwrapped` 适合读长输出；读不到时让它把结论写成 Markdown 文件，再读文件。
 - 超时不等于 prompt 没送到，不要盲目重复提交。
 - 编排会话内禁止前台 `--wait` 占住主控：改用后台 `python3 scripts/agent-watch.py --interval 15` 或完成通知。
@@ -95,12 +85,13 @@ herdr agent send-keys <task>-builder enter    # 默认选中 Allow once
 ## 7. 日常操作
 
 ```bash
-herdr agent list                      # 所有 Agent 状态
-herdr tab list                        # 当前 workspace 的 tab
+herdr agent list                      # 所有 Agent 状态（只读）
+herdr tab list                        # 当前 workspace 的 tab（只读）
+herdr pane list                       # pane 清单（只读）
 herdr tab rename <tab_id> 新名字
-herdr pane move <pane_id> --new-tab   # 把误分屏的 pane 移成独立 tab
-herdr tab close <tab_id>
-herdr pane close <pane_id>
+# 关 tab / pane 走 dispatch（写 agent-log、带工位约束）
+python3 scripts/dispatch.py --root . tab close --tab <tab_id>
+python3 scripts/dispatch.py --root . pane close --pane <pane_id>
 ```
 
 - TUI 里 `Ctrl+B` 然后 `Q` detach；Agent 继续在后台跑，重新 `herdr` 回来。

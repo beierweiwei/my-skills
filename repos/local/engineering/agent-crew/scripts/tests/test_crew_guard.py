@@ -1,0 +1,983 @@
+#!/usr/bin/env python3
+"""crew-guard.py 值守逻辑回归测试。
+（python3 scripts/tests/test_crew_guard.py 或 python3 -m unittest discover -s scripts/tests）"""
+
+from __future__ import annotations
+
+import importlib.util
+import io
+import json
+import os
+import sys
+import tempfile
+import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+from unittest import mock
+
+_SPEC_PATH = Path(__file__).resolve().parent.parent / "crew-guard.py"
+_spec = importlib.util.spec_from_file_location("crew_guard", _SPEC_PATH)
+cg = importlib.util.module_from_spec(_spec)
+sys.modules["crew_guard"] = cg  # dataclass 注解解析需要模块已注册
+_spec.loader.exec_module(cg)
+
+
+STREAM_PLAN = """# Task Plan: Flow A
+
+## Next Step
+
+- [ ] 不在 Phase 里的待办
+
+## Phases
+
+### Phase 1: 进行中
+- owner: builder
+- [x] 已完成项
+- [ ] 待办A
+- [ ] ⏸ 待拍板
+- [ ] 待 Captain 的项
+- [ ] 留 Captain 的项
+- **Status:** in_progress
+
+### Phase 2: 已完成
+- [x] 做完
+- [ ] 残留待办B
+- **Status:** complete
+"""
+
+PORTFOLIO_PLAN = """# Task Plan: 总览
+
+## Phases
+
+### Phase 1: 流 A
+- plan: `.planning/flow-a/task_plan.md`
+- owner: helm
+- [ ] 流A首个切片
+- **Status:** in_progress
+
+## Backlog
+
+| # | 目标 | P | 依赖 | 阻塞 |
+|---|---|---|---|---|
+| T1 | 可执行任务 | P1 | - | - |
+| T2 | 待船长任务 | P1 | T1 | 待 C1 |
+| T3 | 已阻塞任务 | P1 | - | blocked |
+| T4 | 留船长任务 | P1 | - | 留 Captain |
+| C1 | 待拍板 | P1 | - | - |
+"""
+
+BACKLOG_DONE_PORTFOLIO = """# Task Plan: 总览
+
+## Backlog
+
+| # | 目标 | P | 依赖 | 阻塞 |
+|---|---|---|---|---|
+| T1 | 中文已完成 | P1 | - | 已完成 |
+| T2 | 英文 done | P1 | - | done |
+| T3 | 英文 Complete | P1 | - | Complete |
+| T4 | 英文 completed | P1 | - | completed |
+"""
+
+BACKLOG_WAITING_PORTFOLIO = """# Task Plan: 总览
+
+## Backlog
+
+| # | 目标 | P | 依赖 | 阻塞 |
+|---|---|---|---|---|
+| T1 | 待 Captain | P1 | - | 待 Captain |
+| T2 | 留 Captain | P1 | - | 留 Captain |
+| T3 | 待 C1 | P1 | - | 待 C1 |
+"""
+
+BACKLOG_MIXED_PORTFOLIO = """# Task Plan: 总览
+
+## Backlog
+
+| # | 目标 | P | 依赖 | 阻塞 |
+|---|---|---|---|---|
+| T1 | 未完成主线 | P1 | - | - |
+| T2 | 待拍板 | P1 | - | 待 C1 |
+| T3 | 已完成任务 | P1 | - | 已完成 |
+| T4 | 边界词 | P1 | - | incomplete |
+| T5 | 中文未完成 | P1 | - | 未完成 |
+"""
+
+RESIDUAL_ONLY_STREAM = """# Task Plan: Done
+
+## Phases
+
+### Phase 1: 完成
+- [x] 做完
+- [ ] 残留待办B
+- **Status:** complete
+"""
+
+EMPTY_STREAM = """# Task Plan: Empty
+
+## Phases
+"""
+
+EMPTY_PORTFOLIO = """# Task Plan: Empty
+
+## Backlog
+
+| # | 目标 | P | 依赖 | 阻塞 |
+|---|---|---|---|---|
+"""
+
+
+def write_file(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+class GuardTestBase(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.base = Path(self._tmp.name)
+        self.root = self.base / "repo"
+        self.crew = self.base / "crew"
+        self.now = [0.0]
+        self.agents: list[dict] = []
+        self.prompt_calls: list[tuple[str, str]] = []
+        self.notify_calls: list[tuple[str, str]] = []
+        self.status_calls: list[str] = []
+        self.logs: list[str] = []
+        self.prompt_ok = True
+        self.status_result = (0, "看板新鲜")
+        self.pane_outputs: dict[str, str] = {}
+        self.pane_reads: list[tuple[str, int]] = []
+        self.dispatch_calls: list[list[str]] = []
+        self.dispatch_override = None
+
+    def fake_pane_read(self, pane: str, lines: int) -> str:
+        self.pane_reads.append((pane, lines))
+        return self.pane_outputs.get(pane, "")
+
+    def fake_dispatch(self, root: Path, args: list[str]) -> tuple[int, str, str]:
+        self.dispatch_calls.append(list(args))
+        if self.dispatch_override is not None:
+            result = self.dispatch_override(args)
+            if result is not None:
+                return result
+        if args[:2] == ["pane", "split"]:
+            return 0, json.dumps({"pane": "wX:pNEW"}), ""
+        if args[:1] == ["start"]:
+            return 0, json.dumps({"agent": args[args.index("--name") + 1]}), ""
+        return 0, "", ""
+
+    def handoff_fields(self) -> dict[str, str]:
+        text = (self.crew / "guard.handoff").read_text(encoding="utf-8")
+        return dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+
+    def write_fixture(
+        self,
+        stream: str = STREAM_PLAN,
+        portfolio: str = PORTFOLIO_PLAN,
+        config: dict | None = None,
+    ) -> None:
+        write_file(self.root / ".planning" / "flow-a" / "task_plan.md", stream)
+        write_file(self.root / ".planning" / "portfolio" / "task_plan.md", portfolio)
+        if config is not None:
+            write_file(
+                self.root / ".planning" / "orchestration.json",
+                json.dumps(config, ensure_ascii=False),
+            )
+
+    def make_guard(self, **overrides) -> "cg.Guard":
+        kwargs = dict(
+            root=self.root,
+            crew_dir=self.crew,
+            helm="helm-1",
+            interval=120,
+            clock=lambda: self.now[0],
+            list_agents=lambda: self.agents,
+            prompt=lambda name, message: (
+                self.prompt_calls.append((name, message)) or self.prompt_ok
+            ),
+            notify=lambda title, body: (
+                self.notify_calls.append((title, body)) or True
+            ),
+            run_status=lambda root, flag: (
+                self.status_calls.append(flag) or self.status_result
+            ),
+            pane_read=self.fake_pane_read,
+            dispatch=self.fake_dispatch,
+            log_fn=self.logs.append,
+        )
+        kwargs.update(overrides)
+        return cg.Guard(**kwargs)
+
+    def run_main(self, argv: list[str]) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = cg.main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+
+class TodoScanTest(GuardTestBase):
+    def test_phase_and_backlog_rules(self):
+        self.write_fixture()
+        pending, residual = cg.scan_todos(self.root)
+        texts = [todo.text for todo in pending]
+
+        self.assertIn("待办A", texts)
+        self.assertIn("流A首个切片", texts)
+        self.assertIn("T1 可执行任务", texts)
+        self.assertNotIn("不在 Phase 里的待办", texts)
+        self.assertFalse(any("待拍板" in text for text in texts))
+        self.assertFalse(any("待 Captain 的项" in text for text in texts))
+        self.assertFalse(any("留 Captain 的项" in text for text in texts))
+        self.assertFalse(any(text.startswith("T2") for text in texts))
+        self.assertFalse(any(text.startswith("T3") for text in texts))
+        self.assertFalse(any(text.startswith("T4") for text in texts))
+        self.assertFalse(any(text.startswith("C1") for text in texts))
+        self.assertEqual([todo.text for todo in residual], ["残留待办B"])
+
+    def test_backlog_completed_rows_are_skipped(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=BACKLOG_DONE_PORTFOLIO)
+        pending, residual = cg.scan_todos(self.root)
+        self.assertEqual(pending, [])
+        self.assertEqual(residual, [])
+
+    def test_backlog_waiting_captain_rows_are_skipped(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=BACKLOG_WAITING_PORTFOLIO)
+        pending, residual = cg.scan_todos(self.root)
+        self.assertEqual(pending, [])
+        self.assertEqual(residual, [])
+
+    def test_comment_examples_are_ignored(self):
+        self.write_fixture(
+            stream=(
+                EMPTY_STREAM
+                + "\n<!--\n"
+                + "### Phase 9: 注释示例\n- [ ] 注释里的待办\n- **Status:** pending\n"
+                + "-->\n"
+            )
+        )
+        pending, _ = cg.scan_todos(self.root)
+        self.assertNotIn("注释里的待办", [todo.text for todo in pending])
+
+
+class WakeConditionTest(GuardTestBase):
+    def test_backlog_unfinished_rows_still_wake(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=BACKLOG_MIXED_PORTFOLIO)
+        self.agents = [{"name": "worker-1", "agent_status": "idle"}]
+        guard = self.make_guard()
+
+        self.assertFalse(guard.run_once()["woke"])
+        self.assertTrue(guard.run_once()["woke"])
+        message = self.prompt_calls[0][1]
+        self.assertIn("T1 未完成主线", message)
+        self.assertIn("T4 边界词", message)
+        self.assertIn("T5 中文未完成", message)
+        self.assertNotIn("T2", message)
+        self.assertNotIn("T3", message)
+
+    def test_working_to_idle_with_pending_wakes_immediately(self):
+        self.write_fixture()
+        self.agents = [{"name": "worker-1", "agent_status": "working"}]
+        guard = self.make_guard()
+
+        first = guard.run_once()
+        self.assertFalse(first["woke"])
+        self.assertEqual(first["consecutive"], 0)
+        self.assertEqual(guard.prev_working, 1)
+
+        self.agents = [{"name": "worker-1", "agent_status": "idle"}]
+        second = guard.run_once()
+        self.assertTrue(second["woke"])
+        self.assertEqual(second["consecutive"], 1)
+        self.assertIn("上一轮 1 个 working 已转 idle", self.prompt_calls[0][1])
+        self.assertIn("T1 可执行任务", self.prompt_calls[0][1])
+
+        # 冷却内不再重复叫醒
+        third = guard.run_once()
+        self.assertFalse(third["woke"])
+        self.assertEqual(len(self.prompt_calls), 1)
+        self.assertTrue(any("冷却中" in line for line in self.logs))
+
+    def test_working_to_idle_without_pending_does_not_wake(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.agents = [{"name": "worker-1", "agent_status": "working"}]
+        guard = self.make_guard()
+        self.assertFalse(guard.run_once()["woke"])
+
+        self.agents = [{"name": "worker-1", "agent_status": "idle"}]
+        result = guard.run_once()
+        self.assertFalse(result["woke"])
+        self.assertEqual(result["consecutive"], 0)
+        self.assertEqual(self.prompt_calls, [])
+
+    def test_consecutive_idle_with_pending_keeps_two_round_debounce(self):
+        self.write_fixture()
+        self.agents = [{"name": "worker-1", "agent_status": "idle"}]
+        guard = self.make_guard()
+
+        first = guard.run_once()
+        self.assertFalse(first["woke"])
+        self.assertEqual(first["consecutive"], 1)
+        self.assertEqual(guard.prev_working, 0)
+
+        second = guard.run_once()
+        self.assertTrue(second["woke"])
+        self.assertEqual(second["consecutive"], 2)
+        self.assertIn("连续 2 轮", self.prompt_calls[0][1])
+
+    def test_pending_and_no_running_needs_two_consecutive_rounds(self):
+        self.write_fixture()
+        self.agents = [{"name": "worker-1", "agent_status": "idle"}]
+        guard = self.make_guard()
+
+        first = guard.run_once()
+        self.assertFalse(first["woke"])
+        self.assertEqual(first["consecutive"], 1)
+        self.assertEqual(self.prompt_calls, [])
+        self.assertEqual(self.status_calls, ["--write"])
+
+        second = guard.run_once()
+        self.assertTrue(second["woke"])
+        self.assertEqual(len(self.prompt_calls), 1)
+        name, message = self.prompt_calls[0]
+        self.assertEqual(name, "helm-1")
+        self.assertIn("待办A", message)
+        self.assertIn("T1 可执行任务", message)
+        self.assertEqual(self.status_calls, ["--write", "--check-fresh"])
+
+    def test_running_worker_blocks_wake(self):
+        self.write_fixture()
+        self.agents = [{"name": "worker-1", "agent_status": "working"}]
+        guard = self.make_guard()
+        for _ in range(3):
+            result = guard.run_once()
+            self.assertFalse(result["woke"])
+        self.assertEqual(guard.consecutive, 0)
+        self.assertEqual(self.prompt_calls, [])
+
+    def test_cooldown_suppresses_repeat_wake_for_600s(self):
+        self.write_fixture()
+        self.agents = [{"name": "worker-1", "agent_status": "idle"}]
+        guard = self.make_guard()
+
+        guard.run_once()
+        guard.run_once()
+        self.assertEqual(len(self.prompt_calls), 1)
+
+        self.now[0] = 100
+        guard.run_once()
+        self.assertEqual(len(self.prompt_calls), 1)
+
+        self.now[0] = 601
+        guard.run_once()
+        self.assertEqual(len(self.prompt_calls), 2)
+
+    def test_blocked_worker_wakes_alone(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.agents = [{"name": "worker-1", "agent_status": "blocked"}]
+        guard = self.make_guard()
+
+        result = guard.run_once()
+        self.assertTrue(result["woke"])
+        self.assertEqual(len(self.prompt_calls), 1)
+        self.assertIn("blocked", self.prompt_calls[0][1])
+        self.assertIn("worker-1", self.prompt_calls[0][1])
+
+    def test_excludes_helm_and_captain_from_running(self):
+        self.write_fixture()
+        self.agents = [
+            {"name": "helm-1", "agent_status": "working", "focused": False},
+            {"name": "Captain-1", "agent_status": "working"},
+            {"name": "worker-1", "agent_status": "idle"},
+        ]
+        guard = self.make_guard()
+        guard.run_once()
+        self.assertFalse(self.prompt_calls)
+        guard.run_once()
+        self.assertEqual(len(self.prompt_calls), 1)
+
+    def test_probe_names_blocked_do_not_wake(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        for name in ("s9-probe", "S9-UPPER", "probe-alpha", "PROBE-1",
+                     "test-builder", "Test-2"):
+            with self.subTest(name=name):
+                self.agents = [{"name": name, "agent_status": "blocked",
+                                "cwd": str(self.root)}]
+                self.prompt_calls.clear()
+                guard = self.make_guard()
+                result = guard.run_once()
+                self.assertFalse(result["woke"])
+                self.assertEqual(result["blocked"], 0)
+                self.assertEqual(self.prompt_calls, [])
+
+    def test_probe_cwd_tmp_blocked_does_not_wake(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        for cwd in ("/tmp", "/tmp/s9-probe/session"):
+            with self.subTest(cwd=cwd):
+                self.agents = [{"name": "worker-1", "agent_status": "blocked",
+                                "cwd": cwd}]
+                self.prompt_calls.clear()
+                guard = self.make_guard()
+                result = guard.run_once()
+                self.assertFalse(result["woke"])
+                self.assertEqual(result["blocked"], 0)
+                self.assertEqual(self.prompt_calls, [])
+
+    def test_external_cwd_blocked_is_ignored(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.agents = [{"name": "worker-1", "agent_status": "blocked",
+                        "cwd": "/tmpfoo/project"}]
+        guard = self.make_guard(project_roots={self.root})
+        result = guard.run_once()
+        self.assertFalse(result["woke"])
+        self.assertEqual(result["blocked"], 0)
+        self.assertEqual(self.prompt_calls, [])
+
+    def test_real_blocked_worker_still_wakes(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        project = Path("/home/worker/project")
+        self.agents = [{"name": "builder-1", "agent_status": "blocked",
+                        "cwd": str(project)}]
+        guard = self.make_guard(project_roots={project})
+        result = guard.run_once()
+        self.assertTrue(result["woke"])
+        self.assertEqual(len(self.prompt_calls), 1)
+        self.assertIn("builder-1", self.prompt_calls[0][1])
+
+    def test_probe_working_still_counts_as_running(self):
+        self.write_fixture()
+        self.agents = [{"name": "s9-probe", "agent_status": "working",
+                        "cwd": str(self.root)}]
+        guard = self.make_guard(project_roots={self.root})
+        for _ in range(3):
+            result = guard.run_once()
+            self.assertFalse(result["woke"])
+        self.assertEqual(guard.consecutive, 0)
+        self.assertEqual(self.prompt_calls, [])
+
+    def test_captain_blocked_does_not_wake(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.agents = [{"name": "Captain-1", "agent_status": "blocked"}]
+        guard = self.make_guard()
+        for _ in range(2):
+            result = guard.run_once()
+            self.assertFalse(result["woke"])
+        self.assertEqual(self.prompt_calls, [])
+
+    def test_residual_todo_in_complete_phase_only_logs(self):
+        self.write_fixture(stream=RESIDUAL_ONLY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.agents = []
+        guard = self.make_guard()
+        for _ in range(2):
+            result = guard.run_once()
+            self.assertFalse(result["woke"])
+        self.assertEqual(self.prompt_calls, [])
+        self.assertTrue(any("残留待办B" in line for line in self.logs))
+
+
+class WakeChannelTest(GuardTestBase):
+    def test_focused_helm_uses_wake_file_and_notify(self):
+        self.write_fixture()
+        self.agents = [
+            {"name": "helm-1", "agent_status": "idle", "focused": True},
+            {"name": "worker-1", "agent_status": "idle"},
+        ]
+        guard = self.make_guard()
+        guard.run_once()
+        guard.run_once()
+
+        self.assertEqual(self.prompt_calls, [])
+        self.assertEqual(len(self.notify_calls), 1)
+        wake = (self.crew / "guard.wake").read_text(encoding="utf-8")
+        self.assertIn("guard 叫醒", wake)
+        self.assertIn("待办A", wake)
+
+    def test_prompt_failure_falls_back_to_wake_file(self):
+        self.write_fixture()
+        self.agents = [{"name": "worker-1", "agent_status": "idle"}]
+        self.prompt_ok = False
+        guard = self.make_guard()
+        guard.run_once()
+        guard.run_once()
+
+        self.assertEqual(len(self.prompt_calls), 1)
+        self.assertTrue((self.crew / "guard.wake").exists())
+        self.assertEqual(len(self.notify_calls), 1)
+
+    def test_herdr_failure_does_not_wake_or_crash(self):
+        self.write_fixture()
+
+        def broken():
+            raise RuntimeError("herdr down")
+
+        guard = self.make_guard(list_agents=broken)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            result = guard.run_once()
+        self.assertFalse(result["woke"])
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(self.prompt_calls, [])
+        self.assertTrue(any("herdr" in line for line in self.logs))
+
+
+class SchedulingTest(GuardTestBase):
+    def test_wake_runs_check_fresh_and_write_every_5min(self):
+        self.write_fixture()
+        self.agents = [{"name": "worker-1", "agent_status": "idle"}]
+        guard = self.make_guard()
+
+        guard.run_once()
+        self.assertEqual(self.status_calls, ["--write"])
+
+        self.now[0] = 301
+        guard.run_once()
+        self.assertEqual(self.status_calls, ["--write", "--write", "--check-fresh"])
+        self.assertIn("看板新鲜", self.prompt_calls[0][1])
+
+
+class LockAndOutputTest(GuardTestBase):
+    def test_single_instance_lock_is_silent(self):
+        self.write_fixture()
+        handle = cg.acquire_lock(self.crew)
+        self.assertIsNotNone(handle)
+        try:
+            self.assertIsNone(cg.acquire_lock(self.crew))
+            code, out, err = self.run_main(
+                ["--once", "--root", str(self.root), "--crew-dir", str(self.crew)]
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(out, "")
+            self.assertEqual(err, "")
+        finally:
+            handle.close()
+
+    def test_lock_file_records_current_pid(self):
+        handle = cg.acquire_lock(self.crew)
+        self.assertIsNotNone(handle)
+        try:
+            lock = self.crew / "guard.lock"
+            self.assertEqual(f"{os.getpid()}\n", lock.read_text(encoding="utf-8"))
+            # 第二实例拿不到锁，不改写持有者 pid
+            self.assertIsNone(cg.acquire_lock(self.crew))
+            self.assertEqual(f"{os.getpid()}\n", lock.read_text(encoding="utf-8"))
+        finally:
+            handle.close()
+
+    def test_normal_round_has_zero_stdout(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.agents = [{"name": "worker-1", "agent_status": "idle"}]
+        guard = self.make_guard()
+        out = io.StringIO()
+        with redirect_stdout(out):
+            result = guard.run_once()
+        self.assertFalse(result["woke"])
+        self.assertEqual(out.getvalue(), "")
+
+    def test_cli_once_wires_injected_backends_with_zero_stdout(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        with mock.patch.object(
+            cg, "herdr_agents", return_value=[{"name": "w", "agent_status": "idle"}]
+        ), mock.patch.object(
+            cg, "run_plan_status", return_value=(0, "看板新鲜")
+        ) as status, mock.patch.object(
+            cg, "herdr_prompt"
+        ) as prompt, mock.patch.object(
+            cg, "herdr_notify"
+        ) as notify:
+            code, out, err = self.run_main(
+                [
+                    "--once",
+                    "--root",
+                    str(self.root),
+                    "--crew-dir",
+                    str(self.crew),
+                    "--helm",
+                    "helm-1",
+                ]
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "")
+        self.assertEqual(err, "")
+        status.assert_called_once()
+        prompt.assert_not_called()
+        notify.assert_not_called()
+
+    def test_help_documents_guard_contract(self):
+        text = cg.build_parser().format_help()
+        for token in (
+            "guard.wake",
+            "--check-fresh",
+            "--write",
+            "blocked",
+            "Captain*",
+            "cron",
+        ):
+            self.assertIn(token, text)
+
+
+class PhaseStatusParseTest(GuardTestBase):
+    """Status 行需同时识别 `in_progress` 与 `in progress`（真实 plan 两种写法并存）。"""
+
+    IN_PROGRESS_PLAN = """# Task Plan: Flow A
+
+## Phases
+
+### Phase 6: 进行中
+- owner: builder
+- [ ] 待办A
+- **Status:** {status}
+"""
+
+    def test_status_regex_matches_in_progress_spellings(self):
+        for line in (
+            "**Status:** in_progress",
+            "**Status:** in progress",
+            "**Status:**    in progress",
+            "**Status:**   in_progress",
+        ):
+            with self.subTest(line=line):
+                match = cg.STATUS_RE.search(line)
+                self.assertIsNotNone(match, line)
+                self.assertIn(match.group(1), ("in_progress", "in progress"))
+
+    def test_status_regex_keeps_pending_and_complete(self):
+        for line, expected in (
+            ("**Status:** pending", "pending"),
+            ("**Status:** complete", "complete"),
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(cg.STATUS_RE.search(line).group(1), expected)
+
+    def test_both_in_progress_spellings_keep_todos_active(self):
+        for status in ("in_progress", "in progress"):
+            with self.subTest(status=status):
+                self.write_fixture(
+                    stream=self.IN_PROGRESS_PLAN.format(status=status),
+                    portfolio=EMPTY_PORTFOLIO,
+                )
+                pending, residual = cg.scan_todos(self.root)
+                self.assertEqual([todo.text for todo in pending], ["待办A"])
+                self.assertEqual(residual, [])
+
+    def test_pending_and_complete_buckets_unchanged(self):
+        self.write_fixture(
+            stream=(
+                "# Task Plan: Flow A\n\n## Phases\n\n"
+                "### Phase 1: 待开工\n- [ ] 待办P\n- **Status:** pending\n\n"
+                "### Phase 2: 已完成\n- [ ] 残留C\n- **Status:** complete\n"
+            ),
+            portfolio=EMPTY_PORTFOLIO,
+        )
+        pending, residual = cg.scan_todos(self.root)
+        self.assertEqual([todo.text for todo in pending], ["待办P"])
+        self.assertEqual([todo.text for todo in residual], ["残留C"])
+
+    def test_space_spelling_still_wakes_guard(self):
+        self.write_fixture(
+            stream=self.IN_PROGRESS_PLAN.format(status="in progress"),
+            portfolio=EMPTY_PORTFOLIO,
+        )
+        self.agents = [{"name": "worker-1", "agent_status": "idle"}]
+        guard = self.make_guard()
+        first = guard.run_once()
+        self.assertFalse(first["woke"])
+        second = guard.run_once()
+        self.assertTrue(second["woke"])
+        self.assertIn("待办A", self.prompt_calls[0][1])
+
+
+class CwdIsolationTest(GuardTestBase):
+    def test_parse_worktree_paths(self):
+        roots = cg.parse_worktree_paths(
+            "worktree /tmp/main\nHEAD abc\n\nworktree /tmp/linked\nHEAD def\n"
+        )
+        self.assertEqual(
+            {Path("/tmp/main").resolve(), Path("/tmp/linked").resolve()}, roots
+        )
+
+    def test_git_worktree_roots_uses_porcelain_output(self):
+        fake = mock.Mock(returncode=0, stdout=(
+            "worktree /home/project/main\nHEAD a\n\n"
+            "worktree /home/project/linked\nHEAD b\n"
+        ))
+        with mock.patch.object(cg.subprocess, "run", return_value=fake) as run:
+            roots = cg.git_worktree_roots(Path("/home/project/main"))
+        self.assertEqual(
+            {Path("/home/project/main").resolve(), Path("/home/project/linked").resolve()},
+            roots,
+        )
+        self.assertEqual(
+            ["git", "-C", "/home/project/main", "worktree", "list", "--porcelain"],
+            run.call_args.args[0],
+        )
+
+    def test_external_cwd_working_does_not_block_wake(self):
+        self.write_fixture()
+        self.agents = [{"name": "worker-1", "agent_status": "working",
+                        "cwd": "/home/other/project"}]
+        guard = self.make_guard(project_roots={self.root})
+        first = guard.run_once()
+        self.assertEqual(first["running"], 0)
+        second = guard.run_once()
+        self.assertTrue(second["woke"])
+        self.assertIn("待办A", self.prompt_calls[0][1])
+
+    def test_linked_worktree_cwd_blocked_wakes(self):
+        main = Path("/home/project/main")
+        linked = Path("/home/project/linked")
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.agents = [{"name": "builder-1", "agent_status": "blocked",
+                        "cwd": str(linked)}]
+        guard = self.make_guard(project_roots={main, linked})
+        result = guard.run_once()
+        self.assertTrue(result["woke"])
+        self.assertEqual(result["blocked"], 1)
+
+    def test_missing_cwd_falls_back_to_include(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.agents = [{"name": "builder-1", "agent_status": "blocked"}]
+        guard = self.make_guard(project_roots={self.root})
+        result = guard.run_once()
+        self.assertTrue(result["woke"])
+        self.assertIn("builder-1", self.prompt_calls[0][1])
+
+
+class HandoffTest(GuardTestBase):
+    OLD_PANE = "wX:pOLD"
+
+    def prepare_handoff(self, ctx_k: int = 650, config: dict | None = None) -> None:
+        self.write_fixture(
+            stream=EMPTY_STREAM,
+            portfolio=EMPTY_PORTFOLIO,
+            config=config,
+        )
+        self.agents = [
+            {"name": "helm-1", "pane_id": self.OLD_PANE, "agent_status": "working"}
+        ]
+        self.pane_outputs[self.OLD_PANE] = f"status line ctx ({ctx_k}k/1M) tail"
+
+    def reset_handoff_artifacts(self) -> None:
+        for name in ("guard.handoff", "guard.wake"):
+            path = self.crew / name
+            if path.exists():
+                path.unlink()
+        self.pane_reads.clear()
+        self.dispatch_calls.clear()
+        self.notify_calls.clear()
+        self.logs.clear()
+
+    def test_parse_ctx_success_and_failure(self):
+        self.assertEqual(412, cg.parse_ctx_k("ctx (412k/1M)"))
+        self.assertEqual(412, cg.parse_ctx_k("... ctx ( 412k / 1M ) ..."))
+        self.assertIsNone(cg.parse_ctx_k("ctx unknown"))
+        self.assertIsNone(cg.parse_ctx_k(""))
+
+    def test_warn_threshold_marks_and_notifies_once(self):
+        self.prepare_handoff(ctx_k=320)
+        guard = self.make_guard()
+
+        first = guard.run_once()
+        self.assertFalse(first["woke"])
+        fields = self.handoff_fields()
+        self.assertEqual("warn", fields["phase"])
+        self.assertEqual("helm-1", fields["old"])
+        self.assertEqual(self.OLD_PANE, fields["oldPane"])
+        self.assertIn("30%", fields["reason"])
+        self.assertEqual([], self.dispatch_calls)
+        self.assertTrue(any("准备交接" in body for _, body in self.notify_calls))
+
+        count = len(self.notify_calls)
+        guard.run_once()
+        self.assertEqual(count, len(self.notify_calls))
+        self.assertEqual("warn", self.handoff_fields()["phase"])
+
+    def test_handoff_threshold_starts_successor_once(self):
+        self.prepare_handoff(ctx_k=650)
+        guard = self.make_guard()
+
+        result = guard.run_once()
+        self.assertFalse(result["woke"])
+        self.assertEqual(
+            [["pane", "split", "--pane", self.OLD_PANE, "--direction", "right"],
+             ["start", "--role", "helm", "--pane", "wX:pNEW",
+              "--name", "helm-1-2", "--json"],
+             ["prompt", "--agent", "helm-1-2", "--message"]],
+            [call[:4] if call[:1] == ["prompt"] else call
+             for call in self.dispatch_calls],
+        )
+        fields = self.handoff_fields()
+        self.assertEqual("started", fields["phase"])
+        self.assertEqual("helm-1", fields["old"])
+        self.assertEqual("helm-1-2", fields["new"])
+        self.assertEqual("wX:pNEW", fields["newPane"])
+        self.assertEqual([], [c for c in self.dispatch_calls if c[:2] == ["pane", "close"]])
+        self.assertTrue(any("交接" in body for _, body in self.notify_calls))
+
+        before = len(self.dispatch_calls)
+        guard.run_once()
+        self.assertEqual(before, len(self.dispatch_calls))
+        self.assertEqual("started", self.handoff_fields()["phase"])
+
+    def test_name_conflict_increments_successor_suffix(self):
+        self.prepare_handoff(ctx_k=650)
+        self.agents.extend([
+            {"name": "helm-1-2", "agent_status": "idle"},
+            {"name": "helm-1-3", "agent_status": "idle"},
+        ])
+        guard = self.make_guard()
+        guard.run_once()
+        starts = [c for c in self.dispatch_calls if c[:1] == ["start"]]
+        self.assertEqual(1, len(starts))
+        self.assertEqual("helm-1-4", starts[0][starts[0].index("--name") + 1])
+
+    def test_restart_resolver_uses_handoff_successor(self):
+        self.write_fixture(
+            stream=EMPTY_STREAM,
+            portfolio=EMPTY_PORTFOLIO,
+            config={
+                "portfolioDir": ".planning/portfolio",
+                "helm": {"agentName": "helm-1"},
+            },
+        )
+        self.crew.mkdir(parents=True, exist_ok=True)
+        (self.crew / "guard.handoff").write_text(
+            "phase=done\nold=helm-1\nnew=helm-1-2\n", encoding="utf-8",
+        )
+        self.assertEqual(
+            "helm-1-2", cg.resolve_guard_helm(self.root, self.crew, None)
+        )
+        self.assertEqual(
+            "helm-explicit", cg.resolve_guard_helm(self.root, self.crew, "helm-explicit")
+        )
+
+    def test_successor_start_reuses_registered_helm_runtime(self):
+        self.prepare_handoff(ctx_k=650)
+        self.crew.mkdir(parents=True, exist_ok=True)
+        (self.crew / "dispatch-agents.json").write_text(
+            json.dumps({"helm-1": {"role": "helm", "runtime": "qoder"}}),
+            encoding="utf-8",
+        )
+        self.make_guard().run_once()
+        starts = [c for c in self.dispatch_calls if c[:1] == ["start"]]
+        self.assertEqual(1, len(starts))
+        self.assertEqual("qoder", starts[0][starts[0].index("--runtime") + 1])
+
+    def test_first_report_then_close_old_pane(self):
+        self.prepare_handoff(ctx_k=650)
+        guard = self.make_guard()
+        guard.run_once()
+
+        self.agents = [
+            {"name": "helm-1", "pane_id": self.OLD_PANE, "agent_status": "idle"},
+            {"name": "helm-1-2", "pane_id": "wX:pNEW", "agent_status": "working"},
+        ]
+        guard.run_once()
+        self.assertEqual([], [c for c in self.dispatch_calls if c[:2] == ["pane", "close"]])
+
+        self.agents = [
+            {"name": "helm-1", "pane_id": self.OLD_PANE, "agent_status": "idle"},
+            {"name": "helm-1-2", "pane_id": "wX:pNEW", "agent_status": "idle"},
+        ]
+        guard.run_once()
+        closes = [c for c in self.dispatch_calls if c[:2] == ["pane", "close"]]
+        self.assertEqual([["pane", "close", "--pane", self.OLD_PANE]], closes)
+        fields = self.handoff_fields()
+        self.assertEqual("done", fields["phase"])
+        self.assertEqual("ok", fields["result"])
+
+        before = len(self.dispatch_calls)
+        guard.run_once()
+        self.assertEqual(before, len(self.dispatch_calls))
+
+    def test_custom_thresholds_are_read_from_config(self):
+        self.prepare_handoff(
+            ctx_k=250,
+            config={
+                "portfolioDir": ".planning/portfolio",
+                "helm": {"ctxWarn": 0.20, "ctxHandoff": 0.50},
+            },
+        )
+        self.make_guard().run_once()
+        self.assertEqual("warn", self.handoff_fields()["phase"])
+
+    def test_parse_failure_logs_but_leaves_normal_wake_working(self):
+        self.write_fixture()
+        self.agents = [
+            {"name": "helm-1", "pane_id": self.OLD_PANE, "agent_status": "idle"},
+            {"name": "worker-1", "agent_status": "idle"},
+        ]
+        self.pane_outputs[self.OLD_PANE] = "no context line"
+        guard = self.make_guard()
+
+        self.assertFalse(guard.run_once()["woke"])
+        self.assertTrue(guard.run_once()["woke"])
+        self.assertFalse((self.crew / "guard.handoff").exists())
+        self.assertEqual([], self.dispatch_calls)
+        self.assertTrue(any("ctx 解析失败" in line for line in self.logs))
+        self.assertIn("待办A", self.prompt_calls[0][1])
+
+    def test_split_start_prompt_failure_notifies_once_and_does_not_loop(self):
+        for step in ("split", "start", "prompt"):
+            with self.subTest(step=step):
+                self.reset_handoff_artifacts()
+                self.prepare_handoff(ctx_k=650)
+
+                def override(args, step=step):
+                    if step == "split" and args[:2] == ["pane", "split"]:
+                        return 1, "", "split boom"
+                    if step == "start" and args[:1] == ["start"]:
+                        return 1, "", "start boom"
+                    if step == "prompt" and args[:1] == ["prompt"]:
+                        return 1, "", "prompt boom"
+                    return None
+
+                self.dispatch_override = override
+                guard = self.make_guard()
+                guard.run_once()
+                fields = self.handoff_fields()
+                self.assertEqual("done", fields["phase"])
+                self.assertEqual("failed", fields["result"])
+                self.assertIn(step, fields["error"])
+                self.assertTrue(any("失败" in body for _, body in self.notify_calls))
+                self.assertEqual([], [c for c in self.dispatch_calls
+                                      if c[:2] == ["pane", "close"]])
+
+                before = len(self.dispatch_calls)
+                guard.run_once()
+                self.assertEqual(before, len(self.dispatch_calls))
+
+    def test_close_failure_notifies_once_and_does_not_retry(self):
+        self.prepare_handoff(ctx_k=650)
+        guard = self.make_guard()
+        guard.run_once()
+
+        self.agents = [
+            {"name": "helm-1", "pane_id": self.OLD_PANE, "agent_status": "idle"},
+            {"name": "helm-1-2", "pane_id": "wX:pNEW", "agent_status": "working"},
+        ]
+        guard.run_once()
+        self.agents = [
+            {"name": "helm-1", "pane_id": self.OLD_PANE, "agent_status": "idle"},
+            {"name": "helm-1-2", "pane_id": "wX:pNEW", "agent_status": "idle"},
+        ]
+
+        def override(args):
+            if args[:2] == ["pane", "close"]:
+                return 1, "", "close boom"
+            return None
+
+        self.dispatch_override = override
+        guard.dispatch = self.fake_dispatch  # type: ignore[method-assign]
+        guard.run_once()
+        fields = self.handoff_fields()
+        self.assertEqual("done", fields["phase"])
+        self.assertEqual("failed", fields["result"])
+        self.assertIn("close", fields["error"])
+
+        before = len(self.dispatch_calls)
+        guard.run_once()
+        self.assertEqual(before, len(self.dispatch_calls))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

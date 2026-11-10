@@ -1,0 +1,1021 @@
+#!/usr/bin/env python3
+"""编排值守（guard）：待办存在且无在跑 worker 时，连续 2 轮后叫醒总舵。
+
+正常路径零 stdout；事件与异常写 <crew-dir>/guard.log。
+单实例锁：<crew-dir>/guard.lock（第二实例静默退出）。
+叫醒：优先 `herdr agent prompt <helm>`；总舵 pane 处于聚焦时改为写
+<crew-dir>/guard.wake + Herdr 通知。每 5 分钟顺带执行 plan-status.py --write；
+叫醒时执行 plan-status.py --check-fresh 并把结果带进叫醒消息。
+
+待办口径（decisions §1）：
+- 活跃流 plan 中 Phase Status ≠ complete 的未勾选 `[ ]`（排除含 ⏸ / 待 Captain / 留 Captain）；
+- portfolio Backlog 中 T 行且阻塞列无 待 C / blocked / 已完成（complete/done）；
+- 已完成 Phase 的残留 `[ ]` 只记日志，不叫醒。
+在跑口径：Herdr agent_status == working，排除总舵自身与 Captain*；blocked 单独叫醒。
+cwd 隔离：只统计 cwd 在本仓或 `git worktree list --porcelain` 列出的 linked worktree
+内的 agent；外部项目（如 CASE）不参与 running/blocked/快速叫醒。cwd 缺失或不可解析时
+沿用旧口径包含（无法确认归属时不改变既有行为）。
+快速叫醒：上一轮有 working、本轮全部转 idle 且有待办时立即叫醒（仍受 10 分钟冷却）。
+自动交接：每轮读总舵 pane 的 `ctx Nk/1M`（`herdr pane read <pane> --lines 80`），
+按 config `helm.ctxWarn`（默认 0.30）/`helm.ctxHandoff`（默认 0.60）写
+<crew-dir>/guard.handoff 并通知；≥交接阈值一次性新建 pane/继任/首报/关旧 pane，
+失败只通知不循环，不杀旧舵。
+
+用法：
+  python3 scripts/crew-guard.py                 # 每 120s 一轮
+  python3 scripts/crew-guard.py --once          # 单轮（测试/人工抽查）
+  python3 scripts/crew-guard.py --root <仓根> --helm <agent名> --crew-dir <目录>
+
+兜底：建议另配 30–60 分钟 cron 只检查 guard 进程存活（如 pgrep -f crew-guard.py），
+本脚本不自动创建 cron。
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable
+
+sys.dont_write_bytecode = True  # 不在项目 scripts/ 留 __pycache__
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from crew_paths import CrewPathsError, crew_dir as resolve_crew_dir  # noqa: E402
+
+PHASE_RE = re.compile(r"^### Phase\s+\d+\s*[:：]\s*(.+?)\s*$")
+STATUS_RE = re.compile(r"\*\*Status:\*\*\s+(pending|in[ _]progress|complete)")
+TODO_RE = re.compile(r"^\s*-\s*\[\s\]\s*(.+)$")
+PAUSE_MARKS = ("⏸", "待 Captain", "留 Captain")
+# 英文完成态按词边界判定：避免 incomplete / undone 误命中 complete / done
+DONE_RE = re.compile(r"(?<![a-z])(?:complete|completed|done)(?![a-z])")
+COOLDOWN_SECONDS = 600
+WRITE_INTERVAL_SECONDS = 300
+PROBE_NAME_PREFIXES = ("s9-", "probe-", "test-")
+CTX_RE = re.compile(r"ctx\s*\(?\s*(\d+)k\s*/\s*1M\s*\)?", re.IGNORECASE)
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+DEFAULT_CTX_WARN = 0.30
+DEFAULT_CTX_HANDOFF = 0.60
+
+
+@dataclass(frozen=True)
+class Todo:
+    plan: str
+    phase: str
+    text: str
+
+    @property
+    def label(self) -> str:
+        return f"{self.plan} · {self.phase}: {self.text}"
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def is_probe_agent(agent: dict) -> bool:
+    """测试探针：按 agent 名或 cwd 判定，仅用于排除 blocked 叫醒。"""
+    name = str(agent.get("name") or "").strip().lower()
+    if name.startswith(PROBE_NAME_PREFIXES):
+        return True
+    cwd = agent.get("cwd")
+    if not isinstance(cwd, str) or not cwd.strip():
+        return False
+    try:
+        path = Path(cwd).expanduser()
+        if not path.is_absolute():
+            return False
+        path = path.resolve()
+        tmp = Path("/tmp").resolve()
+        return path == tmp or tmp in path.parents
+    except (OSError, RuntimeError):
+        return False
+
+
+def parse_ctx_k(text: str) -> int | None:
+    """从 `herdr pane read` 文本解析 `ctx (123k/1M)`；多个取最后一个。"""
+    if not isinstance(text, str):
+        return None
+    matches = CTX_RE.findall(ANSI_RE.sub("", text))
+    return int(matches[-1]) if matches else None
+
+
+def parse_worktree_paths(output: str) -> set[Path]:
+    roots: set[Path] = set()
+    for line in output.splitlines():
+        if line.startswith("worktree "):
+            value = line[len("worktree "):].strip()
+            if value:
+                roots.add(Path(value).expanduser().resolve())
+    return roots
+
+
+def git_worktree_roots(root: Path) -> set[Path]:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "worktree", "list", "--porcelain"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return parse_worktree_paths(proc.stdout) if proc.returncode == 0 else set()
+
+
+def load_config(root: Path) -> dict:
+    config = {
+        "portfolioDir": ".planning/portfolio",
+        "backlog": {"agentPrefix": "T"},
+        "helm": {"ctxWarn": DEFAULT_CTX_WARN, "ctxHandoff": DEFAULT_CTX_HANDOFF},
+    }
+    path = root / ".planning" / "orchestration.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return config
+    if not isinstance(data, dict):
+        return config
+    portfolio = data.get("portfolioDir")
+    if isinstance(portfolio, str) and portfolio.strip():
+        config["portfolioDir"] = portfolio
+    backlog = data.get("backlog")
+    if isinstance(backlog, dict):
+        prefix = backlog.get("agentPrefix")
+        if isinstance(prefix, str) and prefix:
+            config["backlog"]["agentPrefix"] = prefix
+    helm = data.get("helm")
+    if isinstance(helm, dict):
+        for key, default in (("ctxWarn", DEFAULT_CTX_WARN),
+                             ("ctxHandoff", DEFAULT_CTX_HANDOFF)):
+            value = helm.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value <= 1:
+                config["helm"][key] = float(value)
+    return config
+
+
+def resolve_root(explicit: str | None) -> Path:
+    if explicit:
+        return Path(explicit).resolve()
+    current = Path.cwd().resolve()
+    for candidate in [current, *current.parents]:
+        if (candidate / ".planning").is_dir():
+            return candidate
+    return Path(__file__).resolve().parent.parent
+
+
+def default_crew_dir(root: Path) -> Path:
+    try:
+        return resolve_crew_dir(root)
+    except CrewPathsError as exc:
+        raise SystemExit(f"crew-guard: 运行时目录解析失败：{exc}") from exc
+
+
+def resolve_helm_name(root: Path, explicit: str | None) -> str:
+    if explicit:
+        return explicit
+    configured = ""
+    try:
+        cfg = json.loads((root / ".planning" / "orchestration.json").read_text(encoding="utf-8"))
+        if isinstance(cfg, dict) and isinstance(cfg.get("helm"), dict):
+            configured = str(cfg["helm"].get("agentName") or "").strip()
+    except (OSError, ValueError):
+        pass
+    if configured:
+        return configured
+    slug = re.sub(r"[^a-z0-9_-]+", "-", root.name.strip().lower()).strip("-")
+    return f"helm-{slug or 'project'}"
+
+
+def _strip_comments(lines: list[str]):
+    """逐行产出非 HTML 注释行（与 plan-status.py 同口径）。"""
+    in_comment = False
+    for raw in lines:
+        line = raw.rstrip()
+        if in_comment:
+            if "-->" in line:
+                in_comment = False
+            continue
+        if line.strip().startswith("<!--"):
+            if "-->" not in line:
+                in_comment = True
+            continue
+        yield line
+
+
+def _table_rows(lines: list[str]) -> list[list[str]]:
+    rows, seen_header = [], False
+    for line in lines:
+        text = line.strip()
+        if not (text.startswith("|") and text.endswith("|")):
+            continue
+        cells = [cell.strip() for cell in text.strip("|").split("|")]
+        if all(set(cell) <= set("-: ") for cell in cells):
+            continue
+        if not seen_header:
+            seen_header = True
+            continue
+        rows.append(cells)
+    return rows
+
+
+def _section_lines(path: Path, section: str) -> list[str]:
+    lines, current = [], None
+    for line in _strip_comments(path.read_text(encoding="utf-8").splitlines()):
+        if line.startswith("## "):
+            current = line[3:].strip()
+            continue
+        if current == section:
+            lines.append(line)
+    return lines
+
+
+def _parse_plan_todos(path: Path, rel: str, pending: list[Todo], residual: list[Todo]) -> None:
+    phases: list[dict] = []
+    current: dict | None = None
+    for line in _strip_comments(path.read_text(encoding="utf-8").splitlines()):
+        if line.startswith("## "):
+            current = None
+            continue
+        head = PHASE_RE.match(line)
+        if head:
+            current = {"name": head.group(1), "status": "pending", "todos": []}
+            phases.append(current)
+            continue
+        if current is None:
+            continue
+        status = STATUS_RE.search(line)
+        if status:
+            current["status"] = status.group(1)
+            continue
+        todo = TODO_RE.match(line)
+        if todo:
+            text = todo.group(1).strip()
+            if any(mark in text for mark in PAUSE_MARKS):
+                continue
+            current["todos"].append(text)
+    for phase in phases:
+        bucket = residual if phase["status"] == "complete" else pending
+        for text in phase["todos"]:
+            bucket.append(Todo(rel, phase["name"], text))
+
+
+def _parse_backlog(root: Path, path: Path, rel: str, pending: list[Todo]) -> None:
+    config = load_config(root)
+    prefix = config["backlog"]["agentPrefix"]
+    for cells in _table_rows(_section_lines(path, "Backlog")):
+        if len(cells) < 2:
+            continue
+        ident = cells[0]
+        if not ident.startswith(prefix):
+            continue
+        if any("⏸" in cell for cell in cells):
+            continue
+        blocker = cells[-1]
+        if any(mark in blocker for mark in ("待 C", "待 Captain", "留 Captain")):
+            continue
+        if "blocked" in blocker.lower():
+            continue
+        if "已完成" in blocker or DONE_RE.search(blocker.lower()):
+            continue
+        pending.append(Todo(rel, "Backlog", " ".join(cells[:2]).strip()))
+
+
+def scan_todos(root: Path) -> tuple[list[Todo], list[Todo]]:
+    planning = root / ".planning"
+    pending: list[Todo] = []
+    residual: list[Todo] = []
+    if not planning.is_dir():
+        return pending, residual
+    config = load_config(root)
+    portfolio = (root / config["portfolioDir"] / "task_plan.md").resolve()
+    for path in sorted(planning.glob("*/task_plan.md")):
+        rel = path.relative_to(root).as_posix()
+        _parse_plan_todos(path, rel, pending, residual)
+        if path.resolve() == portfolio:
+            _parse_backlog(root, path, rel, pending)
+    return pending, residual
+
+
+def herdr_agents() -> list[dict]:
+    env = {**os.environ, "HERDR_ENV": "1"}
+    proc = subprocess.run(
+        ["herdr", "agent", "list"],
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+        timeout=15,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or "herdr agent list failed")
+    payload = json.loads(proc.stdout)
+    return payload.get("result", {}).get("agents", [])
+
+
+def herdr_prompt(name: str, message: str) -> bool:
+    try:
+        proc = subprocess.run(
+            ["herdr", "agent", "prompt", name, message],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=60,
+        )
+        return proc.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def herdr_pane_read(pane: str, lines: int = 80) -> str:
+    env = {**os.environ, "HERDR_ENV": "1"}
+    proc = subprocess.run(
+        ["herdr", "pane", "read", pane, "--lines", str(lines)],
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+        timeout=15,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or "herdr pane read failed")
+    return proc.stdout
+
+
+def run_dispatch(root: Path, args: list[str]) -> tuple[int, str, str]:
+    script = Path(__file__).resolve().parent / "dispatch.py"
+    proc = subprocess.run(
+        [sys.executable, str(script), "--root", str(root), *args],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def herdr_notify(title: str, body: str) -> bool:
+    if os.environ.get("HERDR_ENV") != "1":
+        return False
+    try:
+        subprocess.run(
+            ["herdr", "notification", "show", title, "--body", body],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def run_plan_status(root: Path, flag: str) -> tuple[int, str]:
+    script = Path(__file__).resolve().parent / "plan-status.py"
+    proc = subprocess.run(
+        [sys.executable, str(script), flag, "--root", str(root)],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+    return proc.returncode, (proc.stdout + proc.stderr).strip()
+
+
+def acquire_lock(crew_dir: Path):
+    """单实例锁；拿不到返回 None（第二实例静默退出）。"""
+    crew_dir.mkdir(parents=True, exist_ok=True)
+    handle = (crew_dir / "guard.lock").open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    handle.seek(0)
+    handle.truncate()
+    handle.write(f"{os.getpid()}\n")
+    handle.flush()
+    return handle
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def read_handoff_state(crew_dir: Path) -> dict[str, str]:
+    try:
+        text = (crew_dir / "guard.handoff").read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    fields: dict[str, str] = {}
+    for line in text.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key:
+            fields[key] = value.strip()
+    return fields if fields.get("phase") else {}
+
+
+def resolve_guard_helm(root: Path, crew_dir: Path, explicit: str | None) -> str:
+    """交接后重启 guard 时优先沿用 handoff 记录的继任名（显式 --helm 不覆盖）。"""
+    current = resolve_helm_name(root, explicit)
+    if explicit:
+        return current
+    state = read_handoff_state(crew_dir)
+    if (state.get("phase") in ("started", "done")
+            and state.get("old") == current and state.get("new")):
+        return state["new"]
+    return current
+
+
+@dataclass
+class Guard:
+    root: Path
+    crew_dir: Path
+    helm: str
+    interval: int = 120
+    clock: Callable[[], float] = time.time
+    list_agents: Callable[[], list[dict]] = herdr_agents
+    prompt: Callable[[str, str], bool] = herdr_prompt
+    notify: Callable[[str, str], bool] = herdr_notify
+    pane_read: Callable[[str, int], str] = herdr_pane_read
+    dispatch: Callable[[Path, list[str]], tuple[int, str, str]] = run_dispatch
+    run_status: Callable[[Path, str], tuple[int, str]] = run_plan_status
+    log_fn: Callable[[str], None] | None = None
+    consecutive: int = field(default=0, init=False)
+    prev_working: int = field(default=0, init=False)
+    last_wake_at: float | None = field(default=None, init=False)
+    last_write_at: float | None = field(default=None, init=False)
+    handoff_attempted: bool = field(default=False, init=False)
+    project_roots: set[Path] | None = None
+    roots_cache: set[Path] | None = field(default=None, init=False)
+
+    def log(self, message: str) -> None:
+        if self.log_fn is not None:
+            self.log_fn(message)
+            return
+        try:
+            path = self.crew_dir / "guard.log"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(f"{utc_now()} {message}\n")
+        except OSError:
+            pass
+
+    def _read_handoff(self) -> dict[str, str]:
+        return read_handoff_state(self.crew_dir)
+
+    def _write_handoff(self, **updates: object) -> None:
+        fields = self._read_handoff()
+        fields.update({key: str(value).replace("\n", " ") for key, value in updates.items()})
+        order = ("phase", "old", "oldPane", "new", "newPane", "time", "reason",
+                 "result", "error", "successorWasWorking")
+        lines = [f"{key}={fields[key]}" for key in order if key in fields]
+        lines.extend(f"{key}={value}" for key, value in fields.items() if key not in order)
+        atomic_write_text(self.crew_dir / "guard.handoff", "\n".join(lines) + "\n")
+
+    def _notify_handoff(self, title: str, body: str) -> None:
+        try:
+            self.notify(title, body)
+        except Exception as exc:  # noqa: BLE001 - 通知失败不影响值守
+            self.log(f"guard 交接通知失败：{exc}")
+
+    def _handoff_fail(self, step: str, detail: str, base: dict[str, str]) -> dict:
+        error = f"{step}: {detail}".strip()
+        fields = dict(base)
+        fields.setdefault("time", utc_now())
+        self._write_handoff(**fields, phase="done", result="failed", error=error)
+        self._notify_handoff(
+            "guard 交接失败",
+            f"{self.helm} 自动交接失败（{step}），旧舵未关闭；请 Captain 人工接手。\n{detail}",
+        )
+        self.log(f"交接失败（{step}）：{detail}")
+        return {"action": "failed", "reason": f"交接失败：{error}", "error": error}
+
+    def _find_agent(self, agents: list[dict], name: str) -> dict | None:
+        return next(
+            (agent for agent in agents if str(agent.get("name") or "") == name),
+            None,
+        )
+
+    def _agent_pane(self, agent: dict | None) -> str:
+        if not isinstance(agent, dict):
+            return ""
+        for key in ("pane_id", "pane"):
+            value = agent.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    def _ctx_for_helm(self, agents: list[dict]) -> tuple[int, str] | None:
+        helm_agent = self._find_agent(agents, self.helm)
+        if helm_agent is None:
+            self.log(f"ctx 检查跳过：未找到总舵 agent {self.helm}")
+            return None
+        pane = self._agent_pane(helm_agent)
+        if not pane:
+            self.log(f"ctx 检查跳过：总舵 agent {self.helm} 无 pane")
+            return None
+        try:
+            text = self.pane_read(pane, 80)
+        except Exception as exc:  # noqa: BLE001 - 读 pane 失败不动作
+            self.log(f"pane read 失败（{pane}）：{type(exc).__name__}: {exc}")
+            return None
+        ctx_k = parse_ctx_k(text)
+        if ctx_k is None:
+            self.log(f"ctx 解析失败（{pane}），本轮不动作")
+            return None
+        return ctx_k, pane
+
+    def _helm_runtime(self) -> str:
+        try:
+            registry = json.loads(
+                (self.crew_dir / "dispatch-agents.json").read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            return ""
+        info = registry.get(self.helm) if isinstance(registry, dict) else None
+        runtime = info.get("runtime") if isinstance(info, dict) else None
+        return runtime if runtime in ("qoder", "opencode") else ""
+
+    def _successor_name(self, agents: list[dict]) -> str:
+        names = {str(agent.get("name") or "") for agent in agents}
+        names.add(self.helm)
+        try:
+            registry = json.loads(
+                (self.crew_dir / "dispatch-agents.json").read_text(encoding="utf-8")
+            )
+            if isinstance(registry, dict):
+                names.update(str(name) for name in registry)
+        except (OSError, ValueError):
+            pass
+        number = 2
+        candidate = f"{self.helm}-{number}"
+        while candidate in names:
+            number += 1
+            candidate = f"{self.helm}-{number}"
+        return candidate
+
+    @staticmethod
+    def _extract_pane(output: str) -> str:
+        try:
+            data = json.loads(output)
+        except ValueError:
+            return ""
+
+        def walk(value: object) -> str:
+            if isinstance(value, dict):
+                for key in ("pane_id", "pane"):
+                    item = value.get(key)
+                    if isinstance(item, str) and ":" in item:
+                        return item
+                for item in value.values():
+                    found = walk(item)
+                    if found:
+                        return found
+            elif isinstance(value, list):
+                for item in value:
+                    found = walk(item)
+                    if found:
+                        return found
+            return ""
+
+        return walk(data)
+
+    def _start_handoff(self, agents: list[dict], ctx_k: int, old_pane: str) -> dict:
+        if self.handoff_attempted:
+            return {"action": "wait", "reason": "交接已尝试，等待继任首报"}
+        self.handoff_attempted = True
+        pct = ctx_k / 1000.0
+        reason = f"ctx {ctx_k}k/1M ≥ {pct:.0%} 交接阈值"
+        base = {
+            "old": self.helm,
+            "oldPane": old_pane,
+            "time": utc_now(),
+            "reason": reason,
+        }
+        successor = self._successor_name(agents)
+
+        code, output, error = self.dispatch(
+            self.root, ["pane", "split", "--pane", old_pane, "--direction", "right"]
+        )
+        if code != 0:
+            return self._handoff_fail("pane split", error or output, base)
+        new_pane = self._extract_pane(output)
+        if not new_pane:
+            return self._handoff_fail("pane split", f"未返回 pane：{output.strip()}", base)
+
+        base.update({"new": successor, "newPane": new_pane})
+        start_args = ["start", "--role", "helm", "--pane", new_pane]
+        runtime = self._helm_runtime()
+        if runtime:
+            start_args.extend(["--runtime", runtime])
+        start_args.extend(["--name", successor, "--json"])
+        code, output, error = self.dispatch(self.root, start_args)
+        if code != 0:
+            return self._handoff_fail("dispatch start", error or output, base)
+
+        portfolio = load_config(self.root)["portfolioDir"]
+        message = (
+            f"交接接手：原总舵 {self.helm} 的 ctx 已达 {ctx_k}k/1M（{pct:.0%}）。\n"
+            f"先读 {portfolio}/task_plan.md、findings.md、progress.md（含 progress 尾部），"
+            "再读各流 plan 的 Next Step / Status。\n"
+            "完成接手首报（当前进度/在跑 agent/待办/下一步），首报前不接新活；"
+            "首报后 guard 会确认并关闭旧舵 pane。"
+        )
+        code, output, error = self.dispatch(
+            self.root, ["prompt", "--agent", successor, "--message", message]
+        )
+        if code != 0:
+            return self._handoff_fail("dispatch prompt", error or output, base)
+
+        self._write_handoff(
+            **base, phase="started", result="ok", successorWasWorking="0",
+        )
+        self._notify_handoff(
+            "guard 交接",
+            f"交接已启动：继任总舵 {successor}（pane {new_pane}），旧舵 {self.helm} 待首报后关闭；请 Captain 知悉。",
+        )
+        self.log(f"交接已启动：{self.helm} → {successor}（pane {new_pane}）")
+        return {"action": "started", "reason": reason, "new": successor,
+                "newPane": new_pane}
+
+    def _continue_handoff(self, fields: dict[str, str], agents: list[dict]) -> dict:
+        successor = fields.get("new", "")
+        old_pane = fields.get("oldPane", "")
+        if not successor:
+            return self._handoff_fail("state", "guard.handoff 缺 new", fields)
+
+        agent = self._find_agent(agents, successor)
+        status = str(agent.get("agent_status") or "") if agent else ""
+        if status == "working" and fields.get("successorWasWorking") != "1":
+            self._write_handoff(successorWasWorking="1")
+            fields["successorWasWorking"] = "1"
+            self.log(f"继任 {successor} 正在接手")
+        ready = status == "done" or (
+            status == "idle" and fields.get("successorWasWorking") == "1"
+        )
+        if not ready:
+            return {"action": "wait", "reason": f"等待继任 {successor} 首报"}
+
+        old_agent = self._find_agent(agents, self.helm)
+        old_status = str(old_agent.get("agent_status") or "") if old_agent else ""
+        base = {
+            "old": fields.get("old", self.helm),
+            "oldPane": old_pane,
+            "new": successor,
+            "newPane": fields.get("newPane", ""),
+            "time": utc_now(),
+            "reason": fields.get("reason", ""),
+        }
+        close_note = "旧舵仍在运行，未关闭"
+        if old_pane and old_status in ("", "idle", "done", "unknown"):
+            code, output, error = self.dispatch(
+                self.root, ["pane", "close", "--pane", old_pane]
+            )
+            if code != 0:
+                return self._handoff_fail("pane close", error or output, base)
+            close_note = "旧舵 pane 已关闭"
+        elif not old_pane:
+            close_note = "旧舵 pane 未知，未关闭"
+
+        self._write_handoff(
+            **base, phase="done", result="ok", successorWasWorking="1",
+        )
+        self.helm = successor
+        self._notify_handoff(
+            "guard 交接",
+            f"交接完成：{base['old']} → {successor}；{close_note}；请 Captain 知悉。",
+        )
+        self.log(f"交接完成：{base['old']} → {successor}；{close_note}")
+        return {"action": "done", "reason": f"交接完成（{close_note}）",
+                "new": successor, "newPane": base["newPane"]}
+
+    def _check_handoff(self, agents: list[dict]) -> dict:
+        fields = self._read_handoff()
+        phase = fields.get("phase")
+        if phase == "started":
+            return self._continue_handoff(fields, agents)
+        if phase == "done":
+            return {"action": "none"}
+
+        ctx = self._ctx_for_helm(agents)
+        if ctx is None:
+            return {"action": "none"}
+        ctx_k, pane = ctx
+        ratio = ctx_k / 1000.0
+        cfg = load_config(self.root)["helm"]
+        if ratio >= cfg["ctxHandoff"]:
+            return self._start_handoff(agents, ctx_k, pane)
+        if ratio >= cfg["ctxWarn"]:
+            if phase == "warn":
+                return {"action": "none"}
+            reason = f"ctx {ctx_k}k/1M ≥ {cfg['ctxWarn']:.0%} 预警阈值"
+            self._write_handoff(
+                phase="warn", old=self.helm, oldPane=pane, time=utc_now(), reason=reason,
+            )
+            self._notify_handoff(
+                "guard 交接预警",
+                f"总舵 {self.helm} ctx 已达 {ctx_k}k/1M（{ratio:.0%}），该准备交接。",
+            )
+            self.log(f"交接预警：{self.helm} ctx {ctx_k}k/1M")
+            return {"action": "warn", "reason": reason}
+        return {"action": "none"}
+
+    def _roots(self) -> set[Path]:
+        if self.project_roots is not None:
+            return {Path(root).expanduser().resolve() for root in self.project_roots}
+        if self.roots_cache is None:
+            self.roots_cache = {self.root.resolve()} | git_worktree_roots(self.root)
+        return self.roots_cache
+
+    def _in_project(self, agent: dict) -> bool:
+        """只统计本仓 / linked worktree 的 agent；cwd 缺失或不可解析时沿用旧口径包含。"""
+        cwd = agent.get("cwd")
+        if not isinstance(cwd, str) or not cwd.strip():
+            return True
+        try:
+            path = Path(cwd).expanduser().resolve()
+        except (OSError, RuntimeError):
+            return True
+        return any(path == root or root in path.parents for root in self._roots())
+
+    def _excluded(self, agent: dict) -> bool:
+        name = str(agent.get("name") or "")
+        return name == self.helm or name.startswith("Captain")
+
+    def _periodic_write(self, now: float) -> None:
+        if self.last_write_at is not None and now - self.last_write_at < WRITE_INTERVAL_SECONDS:
+            return
+        self.last_write_at = now
+        try:
+            code, output = self.run_status(self.root, "--write")
+        except Exception as exc:  # noqa: BLE001 - 值守不能因刷新失败崩溃
+            self.log(f"plan-status --write 失败：{type(exc).__name__}: {exc}")
+            return
+        if code != 0:
+            self.log(f"plan-status --write 退出码 {code}：{output}")
+
+    def _freshness_note(self) -> str:
+        try:
+            code, output = self.run_status(self.root, "--check-fresh")
+        except Exception as exc:  # noqa: BLE001
+            return f"--check-fresh 失败：{type(exc).__name__}: {exc}"
+        state = "新鲜" if code == 0 else "已过期"
+        detail = " / ".join(line for line in output.splitlines()[:3] if line.strip())
+        return f"看板{state}（--check-fresh）{('：' + detail) if detail else ''}"
+
+    def _write_wake_file(self, message: str) -> None:
+        atomic_write_text(
+            self.crew_dir / "guard.wake",
+            f"{utc_now()}\n{message}\n",
+        )
+
+    def _wake(self, message: str, agents: list[dict]) -> str:
+        helm_agent = next(
+            (agent for agent in agents if str(agent.get("name") or "") == self.helm),
+            None,
+        )
+        if helm_agent is not None and helm_agent.get("focused"):
+            self._write_wake_file(message)
+            try:
+                self.notify("guard 叫醒", message)
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"guard 通知失败：{exc}")
+            self.log(f"叫醒（总舵 pane 聚焦，写 guard.wake）：{message.splitlines()[0]}")
+            return "wake-file"
+
+        try:
+            prompted = bool(self.prompt(self.helm, message))
+        except Exception as exc:  # noqa: BLE001
+            prompted = False
+            self.log(f"herdr agent prompt 异常：{exc}")
+        if prompted:
+            self.log(f"叫醒（herdr agent prompt {self.helm}）：{message.splitlines()[0]}")
+            return "prompt"
+
+        self._write_wake_file(message)
+        try:
+            self.notify("guard 叫醒", message)
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"guard 通知失败：{exc}")
+        self.log(f"prompt 失败，回退 guard.wake：{message.splitlines()[0]}")
+        return "wake-file"
+
+    def run_once(self) -> dict:
+        now = self.clock()
+        self._periodic_write(now)
+
+        try:
+            agents = self.list_agents()
+        except Exception as exc:  # noqa: BLE001 - Herdr 故障时不误判“无在跑”
+            self.log(f"herdr agent list 失败：{type(exc).__name__}: {exc}")
+            return {"error": str(exc), "woke": False}
+
+        workers = [
+            agent for agent in agents
+            if not self._excluded(agent) and self._in_project(agent)
+        ]
+        running = [
+            agent for agent in workers if str(agent.get("agent_status")) == "working"
+        ]
+        blocked = [
+            agent for agent in workers
+            if str(agent.get("agent_status")) == "blocked" and not is_probe_agent(agent)
+        ]
+        pending, residual = scan_todos(self.root)
+
+        for todo in residual:
+            self.log(f"已完成 Phase 残留 [ ]（仅记日志）：{todo.label}")
+
+        current_working = len(running)
+        prev_working = self.prev_working
+        # worker 从 working 全部转 idle 且仍有待办：立即叫醒，不等连续 2 轮
+        fast_wake = prev_working > 0 and current_working == 0 and bool(pending)
+        self.prev_working = current_working
+
+        condition = bool(pending) and not running
+        if condition:
+            self.consecutive += 1
+        else:
+            self.consecutive = 0
+
+        reason = ""
+        if blocked:
+            names = ", ".join(
+                str(agent.get("name") or agent.get("pane_id") or "?") for agent in blocked
+            )
+            reason = f"worker 卡住（blocked）：{names}"
+        elif condition and fast_wake:
+            reason = (
+                f"有待办 {len(pending)} 条且无在跑 worker"
+                f"（上一轮 {prev_working} 个 working 已转 idle）"
+            )
+        elif condition and self.consecutive >= 2:
+            reason = f"有待办 {len(pending)} 条且无在跑 worker（连续 {self.consecutive} 轮）"
+
+        plan_path = pending[0].plan if pending else ""
+        if plan_path and not Path(plan_path).is_absolute():
+            plan_path = str((self.root / plan_path).resolve())
+        result = {
+            "pending": len(pending),
+            "residual": len(residual),
+            "running": len(running),
+            "blocked": len(blocked),
+            "consecutive": self.consecutive,
+            "woke": False,
+            "reason": reason,
+            "planPath": plan_path,
+            "workers": [
+                {"name": str(agent.get("name") or ""),
+                 "status": str(agent.get("agent_status") or "")}
+                for agent in workers
+            ],
+        }
+        try:
+            handoff = self._check_handoff(agents)
+        except Exception as exc:  # noqa: BLE001 - 交接检测失败不终止值守
+            self.log(f"交接检测异常：{type(exc).__name__}: {exc}")
+            handoff = {"action": "none"}
+        if handoff.get("action") in ("started", "wait", "done"):
+            result["reason"] = handoff.get("reason", "")
+            result["handoff"] = handoff
+            return result
+        if handoff.get("action") != "none":
+            result["handoff"] = handoff
+        if not reason:
+            return result
+        if self.last_wake_at is not None and now - self.last_wake_at < COOLDOWN_SECONDS:
+            self.log(f"冷却中，跳过叫醒：{reason}")
+            return result
+
+        lines = [f"guard 叫醒：{reason}"]
+        if pending:
+            lines.append(f"待办（前 {min(5, len(pending))} 条）：")
+            lines.extend(f"- {todo.label}" for todo in pending[:5])
+        lines.append(self._freshness_note())
+        lines.append("请接手编排。")
+        message = "\n".join(lines)
+        try:
+            self._wake(message, agents)
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"叫醒失败：{type(exc).__name__}: {exc}")
+        self.last_wake_at = now
+        result["woke"] = True
+        return result
+
+    def run_forever(self) -> None:
+        while True:
+            try:
+                self.run_once()
+            except Exception as exc:  # noqa: BLE001 - 单轮异常不终止值守
+                self.log(f"轮次异常：{type(exc).__name__}: {exc}")
+            time.sleep(self.interval)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    epilog = """\
+叫醒口径：有待办 + 无在跑 worker 连续 2 轮；若上一轮有 working、本轮全部转 idle
+则立即叫醒（仍受 10 分钟冷却）；blocked 单独叫醒；
+排除总舵自身与 Captain*（按 agent 名）；blocked 判定排除测试探针（agent 名
+s9-/probe-/test- 前缀，或 cwd 在 /tmp 下），真实 blocked 仍叫醒。cwd 隔离：只统计
+cwd 在本仓或 linked worktree（git worktree list --porcelain）内的 agent，外部项目
+忽略；cwd 缺失/不可解析时沿用旧口径包含。优先 herdr agent prompt <helm>；总舵 pane
+聚焦时写 <crew-dir>/guard.wake + 通知。叫醒时执行 plan-status.py --check-fresh；
+每 5 分钟顺带执行 plan-status.py --write。正常零 stdout，事件写 <crew-dir>/guard.log。
+
+自动交接：每轮 `herdr pane read <pane> --lines 80` 解析总舵 `ctx Nk/1M`；
+ctxWarn（默认 30%）写 <crew-dir>/guard.handoff phase=warn 并通知；
+ctxHandoff（默认 60%）一次性 split/start --name <继任>/prompt/首报后 close 旧 pane，
+失败只通知+记录（phase=done, result=failed），不循环、不杀旧舵。
+
+兜底建议：30–60 分钟 cron 只检查 guard 进程存活（如 pgrep -f crew-guard.py），
+本脚本不自动创建 cron。
+"""
+    parser = argparse.ArgumentParser(
+        prog="crew-guard.py",
+        description="编排值守：待办存在且无在跑 worker 时叫醒总舵（单实例，正常零输出）。",
+        epilog=epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--root", help="目标仓根目录（默认：cwd 向上找 .planning）")
+    parser.add_argument("--crew-dir", help="crew 运行时目录（默认 <git-common-dir>/crew）")
+    parser.add_argument("--helm", help="总舵 herdr agent 名（默认读配置 helm.agentName 或派生）")
+    parser.add_argument("--interval", type=int, default=120, help="轮询秒数（默认 120）")
+    parser.add_argument("--once", action="store_true", help="只跑一轮（测试/人工抽查）")
+    parser.add_argument("--json", action="store_true",
+                        help="配合 --once 输出 JSON（crewDir/planPath/pending/workers/wake）")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.interval <= 0:
+        print("error: --interval 必须为正数", file=sys.stderr)
+        return 1
+    root = resolve_root(args.root)
+    crew_dir = Path(args.crew_dir) if args.crew_dir else default_crew_dir(root)
+    try:
+        lock = acquire_lock(crew_dir)
+    except OSError as exc:
+        print(f"error: 无法创建单实例锁：{exc}", file=sys.stderr)
+        return 1
+    if lock is None:
+        return 0
+    guard = Guard(
+        root=root,
+        crew_dir=crew_dir,
+        helm=resolve_guard_helm(root, crew_dir, args.helm),
+        interval=args.interval,
+        list_agents=herdr_agents,
+        prompt=herdr_prompt,
+        notify=herdr_notify,
+        run_status=run_plan_status,
+    )
+    try:
+        if args.once:
+            result = guard.run_once()
+            if args.json:
+                payload = {
+                    "crewDir": str(crew_dir),
+                    "planPath": result.get("planPath", ""),
+                    "pending": result.get("pending", 0),
+                    "workers": result.get("workers", []),
+                    "wake": bool(result.get("woke")),
+                }
+                print(json.dumps(payload, ensure_ascii=False))
+            return 0
+        guard.run_forever()
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        lock.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

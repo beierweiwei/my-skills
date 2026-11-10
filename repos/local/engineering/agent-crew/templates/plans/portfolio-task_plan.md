@@ -4,7 +4,8 @@
      约定（plan-status.py 解析依赖，勿改结构）：
      - 每个 Phase 标题下恰好一行 `**Status:** pending|in_progress|complete`；
      - Phase 内 `- plan: \`.planning/<流目录>/task_plan.md\`` 行是流 plan 的引用锚点；
-     - Phases 是「活跃流」视图（≤4 条），队列只住 Backlog；同一项只在一处。 -->
+     - Phases 是「活跃流」视图（≤4 条），队列只住 Backlog；同一项只在一处。
+     - 规则与看板写法见技能源 references/plan-discipline.md（项目不复制）。 -->
 
 <!-- 可选节「业务链」＝业务主线节点视图（流程图节点级通断＋人话说明）；该表可选，
      启用时参照下方示例新增同名节并填表，看板将其自动置顶渲染。

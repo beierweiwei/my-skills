@@ -1,29 +1,35 @@
 {
-  "_readme": "项目配置模板（init 渲染为 <仓根>/.planning/orchestration.json 的默认值母本）。init 渲染模板时按下表『占位符』列替换模板文件中的 {{占位符}}；plan-status.py / start-helm.sh 运行期直接读本文件对应键。带 _ 前缀的键为说明性注释，运行期忽略。列表键（captainDecisions/redLines）渲染为多行文本。",
+  "_readme": "项目配置模板（init 渲染为 <仓根>/.planning/orchestration.json 的默认值母本）。带 _ 前缀的键为说明性注释，运行期忽略。skillRoot/skillVersion/projectId 由 init 写入（已有值保留）；roles/hooks 只承载启用与扩展点，不承载规则正文。",
   "_placeholders": {
+    "projectId": "稳定 slug（^[a-z][a-z0-9-]*$；init 从目录名派生，已有值保留）",
     "projectName": "{{project_name}}（角色文案/汇报用显示名；默认=目标目录名）",
+    "skillRoot": "普通技能安装路径（init 写入实际路径；项目内相对路径更可移植）",
+    "skillVersion": "init 写入的技能版本戳（doctor install.version 校验；勿手改）",
     "portfolioDir": "{{portfolio_dir}}（portfolio plan 目录）",
     "board.path": "{{board_path}}（派生看板落点；父目录不存在时 --write 自动创建）",
     "board.title": "{{board_title}}（派生看板标题）",
-    "board.archive": "{{board_archive}}（历史归档路径；空=看板不写归档链接行，需要归档时用 --archive <path> 显式执行）",
-    "portfolioMatch": "{{portfolio_match}}（portfolio 目录识别 glob，匹配 .planning 下的目录名）",
+    "board.archive": "{{board_archive}}（历史归档路径；空=看板不写归档链接行）",
+    "portfolioMatch": "{{portfolio_match}}（portfolio 目录识别 glob）",
     "backlog.captainPrefix": "{{captain_prefix}}（待 Captain 编号前缀）",
     "backlog.agentPrefix": "{{agent_prefix}}（agent 可执行项编号前缀）",
-    "backlog.captainBlocks": "无占位符（T→C 阻塞映射，运行期读取；键=Backlog T 编号，值=C 编号，映射存在时看板阻塞列改写为「待 <C 编号>」）",
     "docNames.req": "{{doc_req}}（正文文档名）",
-    "docNames.reqPath": "{{doc_req_path}}（正文文档路径，示例命令用；空=渲染为字面 <需求文档路径>，提示补配）",
+    "docNames.reqPath": "{{doc_req_path}}（正文文档路径，示例命令用；空=字面占位）",
     "docNames.accept": "{{doc_accept}}（验收文档名）",
     "docNames.context": "{{doc_context}}（术语表/上下文文档名）",
-    "captainDecisions": "{{captain_decisions}}（必须找 Captain 决策的事项清单；通用 8 项，业务项由项目追加）",
-    "redLines": "{{red_lines}}（项目红线清单；默认通用分层表述，有平台契约的项目由 init 注入项目同款）",
+    "captainDecisions": "{{captain_decisions}}（必须找 Captain 决策的事项清单）",
+    "redLines": "{{red_lines}}（项目红线清单）",
     "dataDir": "{{data_dir}}（原始数据目录约定，数据安全边界用）",
-    "aopReference": "{{aop_reference}}（AOP/SOP 总纲外部真源；空=按六维自审并记入 plan Decisions）",
+    "aopReference": "{{aop_reference}}（AOP/SOP 总纲外部真源；空=按六维自审）",
     "helm.tabLabel": "{{helm_tab_label}}（总舵 tab 标签）",
-    "helm.expectedModel": "{{helm_expected_model}}（总舵期望模型；空=只提示实测模型值，不做断言）",
-    "helm.agentName": "空=不写入实际配置，start-helm.sh 派生 helm-<projectName slug>（herdr agent 实例名，同机全局唯一，限 [a-z0-9_-]）；同机多项目撞名或需固定名时才手工填值",
-    "topic": "{{topic}}（工单主题 slug 模板，用于 .scratch/<topic>/ 类路径；未配置时渲染为字面 <topic>）"
+    "helm.expectedModel": "{{helm_expected_model}}（总舵期望模型；空=只提示实测值）",
+    "helm.agentName": "空=start-helm 派生 helm-<projectName slug>（同机全局唯一）",
+    "topic": "{{topic}}（工单主题 slug 模板；未配置时渲染为字面 <topic>）"
   },
+  "schemaVersion": 1,
+  "projectId": "",
   "projectName": "",
+  "skillRoot": "",
+  "skillVersion": "",
   "portfolioDir": ".planning/portfolio",
   "board": {
     "path": "docs/进度追踪.md",
@@ -63,5 +69,18 @@
     "tabLabel": "总舵",
     "expectedModel": "",
     "agentName": ""
+  },
+  "roles": {
+    "enabled": ["helm", "firstmate", "builder", "planner", "reviewer", "runner", "scout"],
+    "instances": {}
+  },
+  "hooks": {
+    "paths": {
+      "topology": "docs/orchestration/topology.md"
+    },
+    "roleExt": {},
+    "customRoles": [],
+    "gatePolicy": {"appendGates": []},
+    "projectScripts": []
   }
 }

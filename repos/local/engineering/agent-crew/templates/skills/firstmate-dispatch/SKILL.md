@@ -35,6 +35,17 @@ description: 副舵/大副/First Mate/Orchestrator 派活 SOP。Use when 需要�
 - 不把需求正文复制进工单或 prompt，只给路径。
 - 同一任务流/相关任务复用同一船员与 tab；任务无关或 Captain 指定才新开。
 
+### 2.1 选板（剧本路由）
+
+按任务类型选剧本模板，把步骤逐字铺进该流 plan：
+
+1. 解析顺序：项目层 `.planning/playbooks/<name>.md` 优先，未命中回落技能层 `{{skill_root}}/templates/playbooks/<name>.md`；同名项目层覆盖技能层。
+2. 无匹配剧本不硬套，按本 SOP 直接拆任务；剧本是方法模板，不是规则源。
+3. 铺设：剧本每个 `### Phase`（标题、`- owner:`、步骤、`- **Status:** pending`）逐字复制进流 plan 的 `## Phases`，不擅改阶段顺序。
+4. 跳过留痕：不执行的步骤改写为 `- [x] <步骤>（跳过：<原因>）`，禁止直接删行。
+5. 记账：剧本名与来源层（项目层/技能层）写入流 plan 的 `## Decisions Made`。
+6. 目录与契约见 `{{skill_root}}/templates/playbooks/README.md`；校验 `python3 scripts/plan-status.py --playbooks .planning/playbooks`。
+
 ## 3. Herdr 派活
 
 ### 3.1 建 tab
