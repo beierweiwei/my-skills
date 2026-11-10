@@ -19,7 +19,7 @@ T20 一致性小修（A–E + FB-008）与发布。
 ### 测试
 
 - 新增 `test_2210_patch.py`（B/E 文档断言）；`test_init_v2.py`、`test_doctor_config.py`、`test_upgrade.py`、`test_crew_guard.py` 补对应正反例。
-- 全量 pytest 611 passed + 139 subtests（2.2.9 基线 586+117，0 fail）；`crew-lint`（含 `--purity`）、本仓 `plan-status --lint`/`--playbooks` 绿。
+- 全量 pytest 629 passed + 143 subtests（2.2.9 基线 586+117，0 fail）；`crew-lint`（含 `--purity`）、本仓 `plan-status --lint`/`--playbooks` 绿。
 - 版本 2.2.10：`SKILL.md` frontmatter 与标题、`init.py` fallback、`test_crew_lint.py`、`test_220_final.py`、`test_224_retro.py`、`test_225_patch.py` 版本断言同步。
 
 ## 2.2.9 — 2026-11-10

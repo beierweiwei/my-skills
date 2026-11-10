@@ -56,9 +56,40 @@ class UpgradeTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
 
     def upgrade(self, *args: str) -> subprocess.CompletedProcess:
+        return self.upgrade_from(self.v2, *args)
+
+    def upgrade_from(self, skill: Path, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run(
-            [sys.executable, str(self.v2 / "scripts/upgrade.py"), "--root", str(self.root), *args],
+            [sys.executable, str(skill / "scripts/upgrade.py"), "--root", str(self.root), *args],
             capture_output=True, text=True)
+
+    def make_version_only_skill(self, version: str) -> Path:
+        """复制 v1 脚本（零脚本差异）只改 SKILL.md 版本，模拟版本-only 升级。"""
+        target = self.base / f"skill-{version}"
+        shutil.copytree(self.v1, target, dirs_exist_ok=True)
+        text = (target / "SKILL.md").read_text(encoding="utf-8")
+        (target / "SKILL.md").write_text(
+            re.sub(r"^version: .*$", f"version: {version}", text, count=1, flags=re.M),
+            encoding="utf-8")
+        return target
+
+    def install_log_rows(self) -> list[dict]:
+        return [
+            json.loads(line) for line in
+            (self.root / "docs/crew/install-log.jsonl").read_text(
+                encoding="utf-8").splitlines()
+        ]
+
+    def manifest(self) -> dict:
+        return json.loads(
+            (self.root / "docs/crew/manifest.json").read_text(encoding="utf-8"))
+
+    def config(self) -> dict:
+        return json.loads(
+            (self.root / ".planning/orchestration.json").read_text(encoding="utf-8"))
+
+    def apply_version_only(self, version: str = "2.0.1") -> subprocess.CompletedProcess:
+        return self.upgrade_from(self.make_version_only_skill(version), "--apply", "--confirm")
 
     def backups(self) -> list[Path]:
         common = subprocess.run(
@@ -151,6 +182,56 @@ class UpgradeTest(unittest.TestCase):
         self.assertIn("skillVersion", doc)
         self.assertIn("仅此一项", doc)
         self.assertNotIn("不做路径/配置迁移；不改 orchestration.json", doc)
+
+    def test_apply_syncs_version_when_scripts_unchanged(self):
+        # F1：零脚本差异但版本戳落后时，仍需锁内同步 config/manifest 版本并写 install-log。
+        dispatch = self.root / "scripts/dispatch.py"
+        h0 = sha(dispatch)
+        before_backups = len(self.backups())
+
+        applied = self.apply_version_only()
+        self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
+        self.assertEqual(sha(dispatch), h0)  # 脚本未动
+        self.assertEqual(self.config()["skillVersion"], "2.0.1")
+        self.assertEqual(self.manifest()["skillVersion"], "2.0.1")
+        upgrades = [row for row in self.install_log_rows() if row.get("action") == "upgrade"]
+        self.assertTrue(upgrades)
+        self.assertEqual(upgrades[-1]["files"], [])
+        self.assertIn("已自动同步", upgrades[-1]["next"])
+        self.assertEqual(len(self.backups()), before_backups + 1)
+        backup_manifest = json.loads(
+            (self.backups()[-1] / "backup-manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(backup_manifest["skillVersionBefore"], "2.0.0")
+        self.assertIn(".planning/orchestration.json",
+                      [entry["path"] for entry in backup_manifest["files"]])
+
+    def test_apply_version_only_is_noop_when_versions_aligned(self):
+        applied = self.apply_version_only()
+        self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
+        before_backups = len(self.backups())
+        before_log = len(self.install_log_rows())
+        before_cfg = sha(self.root / ".planning/orchestration.json")
+        before_manifest = sha(self.root / "docs/crew/manifest.json")
+
+        again = self.upgrade_from(
+            self.make_version_only_skill("2.0.1"), "--apply", "--confirm")
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertIn("已是最新", again.stdout)
+        self.assertEqual(len(self.backups()), before_backups)  # 不再备份
+        self.assertEqual(len(self.install_log_rows()), before_log)  # 不再写日志
+        self.assertEqual(sha(self.root / ".planning/orchestration.json"), before_cfg)
+        self.assertEqual(sha(self.root / "docs/crew/manifest.json"), before_manifest)
+
+    def test_rollback_restores_version_after_version_only_apply(self):
+        # 版本-only 升级的备份可回滚版本戳（无脚本差异时仍可恢复）。
+        applied = self.apply_version_only()
+        self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
+        latest = self.backups()[-1]
+
+        rolled = self.upgrade("--rollback", latest.name)
+        self.assertEqual(rolled.returncode, 0, rolled.stdout + rolled.stderr)
+        self.assertEqual(self.config()["skillVersion"], "2.0.0")
+        self.assertEqual(self.manifest()["skillVersion"], "2.0.0")
 
     def test_rollback_unknown_backup_fails(self):
         proc = self.upgrade("--rollback", "no-such-backup")

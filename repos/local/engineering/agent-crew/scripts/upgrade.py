@@ -121,13 +121,25 @@ def _refresh_manifest_hashes(root: Path, manifest: dict) -> None:
             entry["sha256"] = init_lib.sha256_text(target.read_text(encoding="utf-8"))
 
 
+def _config_skill_version(config_path: Path) -> str | None:
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return config.get("skillVersion") if isinstance(config, dict) else None
+
+
 def apply_upgrade(root: Path, confirm: bool, version: str, source_dir: Path) -> int:
     manifest = _load_manifest(root)
     if not confirm:
         print("upgrade --apply 需要 --confirm（不会自动覆盖受管脚本）。")
         return 2
     report = diff_report(root, manifest, version, source_dir)
-    if not report["changed"]:
+    config_path = root / init_lib.CONFIG_REL
+    config_stale = (
+        config_path.is_file() and _config_skill_version(config_path) != version)
+    if (not report["changed"] and manifest.get("skillVersion") == version
+            and not config_stale):
         print("受管脚本已是最新，无需升级。")
         return 0
     try:
@@ -135,7 +147,6 @@ def apply_upgrade(root: Path, confirm: bool, version: str, source_dir: Path) -> 
             manifest = _load_manifest(root)
             names = [Path(row["path"]).name for row in report["scripts"]
                      if row["status"] != "same"]
-            config_path = root / init_lib.CONFIG_REL
             backup_paths = [root / "scripts" / name for name in names]
             if config_path.is_file():
                 backup_paths.append(config_path)
@@ -168,12 +179,13 @@ def apply_upgrade(root: Path, confirm: bool, version: str, source_dir: Path) -> 
                     config["skillVersion"] = version
                     init_lib.atomic_write_text(
                         config_path, json.dumps(config, ensure_ascii=False, indent=2) + "\n")
-            try:
-                manifest["composedAgents"] = init_lib.regenerate_composed_agents(
-                    root, skill_root=source_dir)
-            except init_lib.InitError as exc:
-                raise UpgradeError(f"组合基础代理重建失败：{exc}") from exc
-            _refresh_manifest_hashes(root, manifest)
+            if names:
+                try:
+                    manifest["composedAgents"] = init_lib.regenerate_composed_agents(
+                        root, skill_root=source_dir)
+                except init_lib.InitError as exc:
+                    raise UpgradeError(f"组合基础代理重建失败：{exc}") from exc
+                _refresh_manifest_hashes(root, manifest)
             manifest["skillVersion"] = version
             _write_manifest(root, manifest)
             init_lib.append_install_log(root, {
@@ -200,7 +212,10 @@ def apply_upgrade(root: Path, confirm: bool, version: str, source_dir: Path) -> 
     except (OSError, UpgradeError, init_lib.InitError) as exc:
         print(f"upgrade 失败：{exc}", file=sys.stderr)
         return 1
-    print(f"upgrade 完成：{len(report['changed'])} 个受管脚本更新；backup={backup_id}")
+    if report["changed"]:
+        print(f"upgrade 完成：{len(report['changed'])} 个受管脚本更新；backup={backup_id}")
+    else:
+        print(f"upgrade 完成：仅同步版本戳 {version}；backup={backup_id}")
     return 0
 
 
