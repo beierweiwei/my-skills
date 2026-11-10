@@ -19,6 +19,7 @@ import importlib.util
 import io
 import json
 import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -234,6 +235,25 @@ class HandoverTest(_TmpRepoTest):
             self.assertIn(needle, recent)
         self.assertNotIn("条目 001", recent)
 
+    def test_digest_date_line_in_tail_not_counted_as_progress(self):
+        entries = numbered_entries(100, extra="·" * 200)
+        progress = progress_body(entries, digest=False) + (
+            "\n\n## 交接摘要\n\n- 2026-12-31 DIGEST-DATE\n")
+        repo = self._repo(progress)
+        self.assertGreater((repo / ".planning/portfolio/progress.md").stat().st_size,
+                           ps.PROGRESS_TAIL_BYTES)
+        rc, out, _err = self._run(repo)
+        self.assertEqual(rc, 0)
+        recent = out.split("## 最近 progress", 1)[1].split("## 最近完成", 1)[0]
+        self.assertIn("条目 100", recent)
+        self.assertNotIn("DIGEST-DATE", recent)
+        self.assertNotIn("DIGEST-DATE", out)
+        out_s, err_s = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out_s), contextlib.redirect_stderr(err_s):
+            self.assertEqual(ps.main(["--root", str(repo), "--write"]), 0)
+        self.assertIn("100 条 ≥ 100", err_s.getvalue())
+        self.assertNotIn("101 条", err_s.getvalue())
+
     def test_overflow_capped_and_still_bounded(self):
         refs = [f".planning/s{i:02d}/task_plan.md" for i in range(12)]
         plans = {f"s{i:02d}": stream_body([("阶段一", "in_progress")]) for i in range(12)}
@@ -278,6 +298,56 @@ class RotateTest(_TmpRepoTest):
         self.assertIn("dry-run", out)
         self.assertEqual(snapshot(repo), before)
         self.assertFalse((repo / ".planning/_archive").exists())
+
+    def test_apply_without_rotate_rejected(self):
+        repo = self._repo()
+        before = snapshot(repo)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = ps.main(["--root", str(repo), "--apply"])
+        self.assertEqual(rc, 1)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("--rotate", err.getvalue())
+        self.assertEqual(snapshot(repo), before)
+
+    def test_apply_preserves_progress_and_archive_mode(self):
+        repo = self._repo()
+        progress = repo / ".planning/portfolio/progress.md"
+        os.chmod(progress, 0o600)
+        rc, _out, err = self._run(repo, "--keep", "3", "--apply")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(stat.S_IMODE(progress.stat().st_mode), 0o600)
+        archive = next((repo / ".planning/_archive").glob("progress-*.md"))
+        self.assertEqual(stat.S_IMODE(archive.stat().st_mode), 0o600)
+
+    def test_retry_after_live_rename_failure_does_not_duplicate_archive(self):
+        repo = self._repo()
+        progress = repo / ".planning/portfolio/progress.md"
+        real_replace = os.replace
+
+        def fake_replace(src, dst):
+            if Path(dst).name == "progress.md":
+                raise OSError("模拟 rename 失败")
+            return real_replace(src, dst)
+
+        with mock.patch.object(ps.os, "replace", side_effect=fake_replace):
+            rc, _out, err = self._run(repo, "--keep", "3", "--apply")
+        self.assertEqual(rc, 1)
+        self.assertIn("live progress 保持不变", err)
+        archive = next((repo / ".planning/_archive").glob("progress-*.md"))
+        first = archive.read_text(encoding="utf-8")
+        self.assertEqual(first.count("源文件归档前 sha256："), 1)
+
+        rc, out, err = self._run(repo, "--keep", "3", "--apply")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("已写入", out)
+        second = archive.read_text(encoding="utf-8")
+        self.assertEqual(first, second)  # 同一批重试不重复追加
+        self.assertEqual(second.count("源文件归档前 sha256："), 1)
+        live = self._progress(repo)
+        self.assertEqual(len(ps._entry_blocks(live.splitlines())[0]), 3)
+        body = second.split("\n\n", 1)[1]
+        self.assertEqual(len(ps._entry_blocks(body.splitlines())[0]), 3)
 
     def test_default_keep_is_10(self):
         repo = self._repo(numbered_entries(15))

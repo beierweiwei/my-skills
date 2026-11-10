@@ -732,8 +732,11 @@ class Guard:
             return
         detail = " / ".join(line.strip() for line in output.splitlines() if line.strip())
         if code == 0:
-            self.log(f"交接前 progress 已归档（rotate --apply --keep {ROTATE_KEEP}）："
-                     f"{detail or 'ok'}")
+            if "无需轮转" in output:
+                self.log(f"交接前 progress 无需轮转（零写入）：{detail or 'ok'}")
+            else:
+                self.log(f"交接前 progress 已归档（rotate --apply --keep {ROTATE_KEEP}）："
+                         f"{detail or 'ok'}")
         else:
             self.log(f"交接前 progress rotate 失败（退出码 {code}，继续交接）：{detail}")
 
@@ -793,8 +796,11 @@ class Guard:
         portfolio = load_config(self.root)["portfolioDir"]
         message = (
             f"交接接手：原总舵 {self.helm} 的 ctx 已达 {ctx_k}k/1M（{pct:.0%}）。\n"
-            f"先读 {portfolio}/task_plan.md、findings.md、progress.md（含 progress 尾部），"
-            "再读各流 plan 的 Next Step / Status。\n"
+            "按「交接读取范围（硬）」读取：派生看板（docs/进度追踪.md）+ "
+            "`python3 scripts/plan-status.py --handover` 摘要 + "
+            f"活跃流 plan 的 Next Step/Status（grep）+ {portfolio}/feedback.md 待复盘条目（grep）"
+            "+ `<crew-dir>/guard.handoff`。\n"
+            "禁整读 progress/task_plan/findings/历史流 plan/共识；单文件 >20KB 不整读。\n"
             "完成接手首报（当前进度/在跑 agent/待办/下一步），首报前不接新活；"
             "首报后 guard 会确认并关闭旧舵 pane 与旧 tab。"
         )
@@ -1008,6 +1014,8 @@ class Guard:
             return
         if code != 0:
             self.log(f"plan-status --write 退出码 {code}：{output}")
+        elif "建议交接时 --rotate" in output:
+            self.log(f"plan-status --write 体量告警：{output}")
 
     def _freshness_note(self) -> str:
         try:
