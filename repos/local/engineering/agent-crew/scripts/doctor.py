@@ -48,7 +48,7 @@ AGENTS_BUDGET_NEXT = (
     "按 `agents-md-slimming` 剧本（技能层 `templates/playbooks/agents-md-slimming.md`）"
     "做只读诊断，方案经确认后再改 AGENTS"
 )
-# H2/H3 上下文预算（2.2.13，非阻断 warn；样本：本仓 firstmate 覆盖层 13,011B、
+# H2/H3 上下文预算（非阻断 warn；样本：本仓 firstmate 覆盖层 13,011B、
 # 组合产物 21,640B、AGENTS 14,677B、CONTEXT 2,069B、交接必读 35,470B）：
 #   覆盖层 >8KB 或组合产物 >20KB → 提示外移业务规则到项目文档；
 #   角色组合 + AGENTS + CONTEXT + 交接必读估算 >60KB → 提示先摘要/清理交接必读。
