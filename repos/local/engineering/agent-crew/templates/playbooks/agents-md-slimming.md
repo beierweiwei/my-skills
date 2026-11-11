@@ -47,7 +47,7 @@
 
 ### Phase 6: 实施后验证与证据
 - owner: builder
-- [ ] 实施流（单独授权）完成后跑 `doctor --only agents.block,docs.pointers`（或项目配置的等价校验）
+- [ ] 实施流（单独授权）完成后逐项执行 `doctor --only agents.block`、`doctor --only docs.pointers`（doctor 不支持逗号分隔多项；或项目配置的等价校验）
 - [ ] 块外 diff 只含方案内条目；`grep` 确认无重复正文、无断链指针、反向引用编号仍有效
 - [ ] 复算 `wc -l -c` 与分节占比，与方案预计值对账；前后字节/行数/占比与命令输出落盘为证据
 - [ ] 未授权实施时留痕跳过：`- [x] 实施后验证（跳过：方案交付即退出，改动未授权）`

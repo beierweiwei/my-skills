@@ -52,11 +52,9 @@ SKILL_POINTER_MARKERS = (
     "references/plan-discipline.md", "SKILL.md",
 )
 SKILL_ROOT_ANCHORS = (".planning/orchestration.json", "skillRoot")
-ABS_SKILL_POINTER_RE = re.compile(
-    r"(?:^|[\s`'\"「『（(])(?:/|~/|[A-Za-z]:[\\/])[^\s`'\"」』）)]*(?:"
-    r"references/crew-(?:rules|acceptance)\.md|references/plan-discipline\.md|"
-    r"references/orchestration-guide\.md|references/herdr-cheatsheet\.md|"
-    r"SKILL\.md|CHANGELOG\.md|templates/playbooks)"
+# 绝对路径形态（家目录/盘符/任意 / 开头路径；URL 的 // 与 :// 不会命中）
+ABS_PATH_RE = re.compile(
+    r"(?:^|[\s`'\"「『（(])(?:~/|/|[A-Za-z]:[\\/])[^\s`'\"」』）)]+"
 )
 # 与 crew-guard.py 的 DEFAULT_BLOCKED_{REPEAT,GRACE}_MINUTES 对齐；缺省参与 effective 比较
 GUARD_BLOCKED_REPEAT_DEFAULT = 15
@@ -271,23 +269,30 @@ def agents_block_pointer_problem(
 ) -> str | None:
     """AGENTS 受管块技能指针判定（agents.block / docs.pointers 共用，避免两处漂移）。
 
-    - 绝对指针：必须指向当前 skillRoot（配置原值或解析值），否则 stale；
-    - 描述性指针：不依赖 skillRoot，但必须含技能根锚点，缺失时 stale；
+    - 描述性块（含全部技能根锚点）：只用技能根相对名；出现任何绝对路径即 stale
+      （即使恰为当前 skillRoot，也不应写进描述性块，保证换机可移植）。
+    - 遗留绝对指针块（无完整锚点）：必须指向当前 skillRoot（配置原值或解析值），
+      否则 stale；裸技能根绝对路径同样可检出。
     - 块内无技能指针：不判定。
     """
     if not any(name in body for name in SKILL_POINTER_MARKERS):
         return None
+    anchors_present = all(anchor in body for anchor in SKILL_ROOT_ANCHORS)
+    has_abs_path = bool(ABS_PATH_RE.search(body))
+    if has_abs_path and anchors_present:
+        return ("块内为描述性指针却出现绝对路径（stale）；"
+                "描述性块应只用技能根相对名")
     accepted = {str(skill_root)} if skill_root else set()
     if isinstance(raw_root, str) and raw_root.strip():
         accepted.add(raw_root.strip().rstrip("/"))
-    if any(item in body for item in accepted):
-        return None
-    if ABS_SKILL_POINTER_RE.search(body):
+    if has_abs_path:
+        if any(item in body for item in accepted):
+            return None
         return "块内指针未指向当前 skillRoot（stale）"
-    if any(anchor not in body for anchor in SKILL_ROOT_ANCHORS):
-        return ("块内缺少技能根锚点（" + " / ".join(SKILL_ROOT_ANCHORS)
-                + "）（stale）")
-    return None
+    if anchors_present:
+        return None
+    return ("块内缺少技能根锚点（" + " / ".join(SKILL_ROOT_ANCHORS)
+            + "）（stale）")
 
 
 @dataclass
@@ -702,9 +707,17 @@ class Doctor:
         return Result("agents.block", "pass", f"块体 {line_count} 行；blockSha256 一致")
 
     def check_agents_budget(self) -> Result:
-        text = read_text(self.root / "AGENTS.md")
-        if text is None:
+        path = self.root / "AGENTS.md"
+        try:
+            # S1：按磁盘字节口径读取（不用 read_text 的 universal newlines），
+            # 保证 total_bytes / block_bytes / owned_bytes 与磁盘一致（含 CRLF）。
+            text = path.read_bytes().decode("utf-8")
+        except FileNotFoundError:
             return Result("agents.budget", "skip", "AGENTS.md 不存在（由 agents.markers 负责）")
+        except OSError as exc:
+            return Result("agents.budget", "skip", f"AGENTS.md 不可读：{exc}")
+        except UnicodeDecodeError as exc:
+            return Result("agents.budget", "skip", f"AGENTS.md 非 UTF-8：{exc}")
         info = marker_info(text)
         if len(info["starts"]) != 1 or len(info["ends"]) != 1:
             return Result("agents.budget", "skip",
@@ -712,11 +725,9 @@ class Doctor:
         total_bytes = len(text.encode("utf-8"))
         total_lines = len(text.splitlines())
         start, end = info["starts"][0], info["ends"][0]
-        # 与「标记之间原始切片」等价：每行含换行，另加首行前的换行
-        block_bytes = 1 + sum(
-            len(line.encode("utf-8")) + 1
-            for line in info["lines"][start + 1:end]
-        )
+        # 保留行尾（CRLF 时每行 2B），与标记之间的磁盘原始切片逐字节一致
+        lines = text.splitlines(keepends=True)
+        block_bytes = len("".join(lines[start:end])[len(MARK_START):].encode("utf-8"))
         owned_bytes = total_bytes - block_bytes
         owned_ratio = owned_bytes / total_bytes if total_bytes else 0.0
         triggers: list[str] = []
@@ -724,7 +735,9 @@ class Doctor:
             triggers.append(f"全文 >{AGENTS_BUDGET_MAX_BYTES} 字节")
         if total_lines > AGENTS_BUDGET_MAX_LINES:
             triggers.append(f"全文 >{AGENTS_BUDGET_MAX_LINES} 行")
-        if owned_ratio > AGENTS_BUDGET_OWNED_RATIO and total_bytes > AGENTS_BUDGET_OWNED_MIN_BYTES:
+        # 整数比较避免浮点误差：恰 65.0% 不应命中（要求严格大于）
+        if (owned_bytes * 100 > total_bytes * int(AGENTS_BUDGET_OWNED_RATIO * 100)
+                and total_bytes > AGENTS_BUDGET_OWNED_MIN_BYTES):
             triggers.append(
                 f"项目自有段 >{AGENTS_BUDGET_OWNED_RATIO:.0%} 且全文 "
                 f">{AGENTS_BUDGET_OWNED_MIN_BYTES} 字节")

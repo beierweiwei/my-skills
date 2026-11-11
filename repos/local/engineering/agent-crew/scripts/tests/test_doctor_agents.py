@@ -71,6 +71,36 @@ class DoctorAgentsTest(unittest.TestCase):
         self.assertEqual(1, rc, report)
         self.assertIn("stale", self.fx.item(report, "docs.pointers")["detail"])
 
+    def test_descriptive_block_rejects_bare_absolute_skill_root(self):
+        # S2：描述性块（含锚点）出现任何绝对路径 → stale，即使恰为当前 skillRoot
+        baseline = [
+            "## 协作编排",
+            "- 技能根：`.planning/orchestration.json` 的 `skillRoot`。",
+            "- 规则：`references/crew-rules.md`（D1–D6）。",
+        ]
+        cases = (
+            ("old-home", "`/home/x/skills/agent-crew`"),
+            ("current-root", f"`{self.fx.skill}`"),
+        )
+        for name, path in cases:
+            with self.subTest(case=name):
+                self.fx.write_agents(block="\n".join(baseline + [f"- 旧技能根：{path}"]))
+                self.fx.write_manifest()
+                rc, report = self.fx.doctor_json("--only", "agents.block")
+                self.assertEqual(1, rc, report)
+                self.assertIn("绝对路径", self.fx.item(report, "agents.block")["detail"])
+                rc, report = self.fx.doctor_json("--only", "docs.pointers")
+                self.assertEqual(1, rc, report)
+                self.assertIn("stale", self.fx.item(report, "docs.pointers")["detail"])
+
+        # 纯相对名描述性块仍 pass
+        self.fx.write_agents(block="\n".join(baseline))
+        self.fx.write_manifest()
+        for item_id in ("agents.block", "docs.pointers"):
+            rc, report = self.fx.doctor_json("--only", item_id)
+            self.assertEqual(0, rc, (item_id, report))
+            self.assertEqual("pass", self.fx.item(report, item_id)["status"], item_id)
+
     def test_unresolved_token_in_role_fails_pointers(self):
         path = self.fx.role_path("qoder", "builder")
         path.write_text(path.read_text(encoding="utf-8") + "\n{{doc_req}}\n", encoding="utf-8")
@@ -112,24 +142,26 @@ class DoctorAgentsBudgetTest(unittest.TestCase):
         self.fx = ProjectFixture(Path(self._tmp.name))
 
     def write_budget_agents(self, total_bytes: int, total_lines: int,
-                            block_bytes: int) -> None:
-        """构造精确 总字节/行数/受管块字节 的 AGENTS.md 并同步 manifest。"""
-        block_head = "## 协作编排\n"
-        filler = block_bytes - 2 - len(block_head.encode("utf-8"))
+                            block_bytes: int, newline: str = "\n") -> None:
+        """构造精确 总字节/行数/受管块字节 的 AGENTS.md（按磁盘字节）并同步 manifest。"""
+        nl = newline
+        block_head = "## 协作编排" + nl
+        filler = block_bytes - 2 * len(nl) - len(block_head.encode("utf-8"))
         self.assertGreaterEqual(filler, 0)
         block = block_head + "b" * filler
-        suffix = "\n" + MARK_START + "\n" + block + "\n" + MARK_END + "\n"
-        fixed = "# AGENTS\n\n" + suffix
+        suffix = nl + MARK_START + nl + block + nl + MARK_END + nl
+        head = "# AGENTS" + nl + nl
+        fixed = head + suffix
         pad_bytes = total_bytes - len(fixed.encode("utf-8"))
         pad_lines = total_lines - len(fixed.splitlines())
         self.assertGreater(pad_lines, 0)
         base, rem = divmod(pad_bytes, pad_lines)
-        self.assertGreaterEqual(base, 1)
+        self.assertGreaterEqual(base, len(nl))
         pad = "".join(
-            "x" * (base - 1 + (1 if index < rem else 0)) + "\n"
+            "x" * (base - len(nl) + (1 if index < rem else 0)) + nl
             for index in range(pad_lines)
         )
-        text = fixed[: len("# AGENTS\n\n")] + pad + suffix
+        text = head + pad + suffix
         self.assertEqual(total_bytes, len(text.encode("utf-8")))
         self.assertEqual(total_lines, len(text.splitlines()))
         self.assertEqual(
@@ -137,7 +169,7 @@ class DoctorAgentsBudgetTest(unittest.TestCase):
             len(text[text.index(MARK_START) + len(MARK_START):text.index(MARK_END)]
                 .encode("utf-8")),
         )
-        (self.fx.root / "AGENTS.md").write_text(text, encoding="utf-8")
+        (self.fx.root / "AGENTS.md").write_bytes(text.encode("utf-8"))
         self.fx.write_manifest()
 
     def budget(self) -> tuple[int, dict]:
@@ -152,6 +184,18 @@ class DoctorAgentsBudgetTest(unittest.TestCase):
         self.assertEqual("pass", item["status"])
         for value in ("14621", "149", "5633", "61.5%"):
             self.assertIn(value, item["detail"])
+
+    def test_crlf_uses_disk_byte_accounting(self):
+        # S1：磁盘 20,000B / 块 7,000B / 自有段 13,000B（恰 65.0%）→ pass；
+        # 旧实现按 read_text 折算 LF 会把自有段算成 65.31% 误报 warn。
+        self.write_budget_agents(20000, 149, 7000, newline="\r\n")
+        rc, report = self.budget()
+        self.assertEqual(0, rc, report)
+        item = self.fx.item(report, "agents.budget")
+        self.assertEqual("pass", item["status"], item["detail"])
+        self.assertIn("20000", item["detail"])
+        self.assertIn("7000", item["detail"])
+        self.assertIn("65.0%", item["detail"])
 
     def test_bytes_and_lines_warn_with_boundary(self):
         cases = (
