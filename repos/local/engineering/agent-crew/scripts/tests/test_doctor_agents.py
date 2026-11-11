@@ -103,5 +103,119 @@ class DoctorAgentsTest(unittest.TestCase):
         self.assertIn("project-ext", item["detail"])
 
 
+class DoctorAgentsBudgetTest(unittest.TestCase):
+    """agents.budget：体量非阻断 warn（阈值 20KB / 180 行 / 自有段 65% 且 >16KB）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.fx = ProjectFixture(Path(self._tmp.name))
+
+    def write_budget_agents(self, total_bytes: int, total_lines: int,
+                            block_bytes: int) -> None:
+        """构造精确 总字节/行数/受管块字节 的 AGENTS.md 并同步 manifest。"""
+        block_head = "## 协作编排\n"
+        filler = block_bytes - 2 - len(block_head.encode("utf-8"))
+        self.assertGreaterEqual(filler, 0)
+        block = block_head + "b" * filler
+        suffix = "\n" + MARK_START + "\n" + block + "\n" + MARK_END + "\n"
+        fixed = "# AGENTS\n\n" + suffix
+        pad_bytes = total_bytes - len(fixed.encode("utf-8"))
+        pad_lines = total_lines - len(fixed.splitlines())
+        self.assertGreater(pad_lines, 0)
+        base, rem = divmod(pad_bytes, pad_lines)
+        self.assertGreaterEqual(base, 1)
+        pad = "".join(
+            "x" * (base - 1 + (1 if index < rem else 0)) + "\n"
+            for index in range(pad_lines)
+        )
+        text = fixed[: len("# AGENTS\n\n")] + pad + suffix
+        self.assertEqual(total_bytes, len(text.encode("utf-8")))
+        self.assertEqual(total_lines, len(text.splitlines()))
+        self.assertEqual(
+            block_bytes,
+            len(text[text.index(MARK_START) + len(MARK_START):text.index(MARK_END)]
+                .encode("utf-8")),
+        )
+        (self.fx.root / "AGENTS.md").write_text(text, encoding="utf-8")
+        self.fx.write_manifest()
+
+    def budget(self) -> tuple[int, dict]:
+        return self.fx.doctor_json("--only", "agents.budget")
+
+    def test_repo_scale_passes(self):
+        # 本仓实测量级：14,621B / 149 行 / 受管块 5,633B / 自有段 61.5%
+        self.write_budget_agents(14621, 149, 5633)
+        rc, report = self.budget()
+        self.assertEqual(0, rc, report)
+        item = self.fx.item(report, "agents.budget")
+        self.assertEqual("pass", item["status"])
+        for value in ("14621", "149", "5633", "61.5%"):
+            self.assertIn(value, item["detail"])
+
+    def test_bytes_and_lines_warn_with_boundary(self):
+        cases = (
+            ("bytes-20480", 20480, 149, 10000, "pass"),
+            ("bytes-20481", 20481, 149, 10000, "warn"),
+            ("lines-180", 4000, 180, 300, "pass"),
+            ("lines-181", 4000, 181, 300, "warn"),
+        )
+        for name, total_bytes, total_lines, owned_bytes, expected in cases:
+            with self.subTest(case=name):
+                self.fx = ProjectFixture(Path(self._tmp.name) / name)
+                self.write_budget_agents(total_bytes, total_lines,
+                                         total_bytes - owned_bytes)
+                rc, report = self.budget()
+                item = self.fx.item(report, "agents.budget")
+                self.assertEqual(expected, item["status"], item["detail"])
+                self.assertEqual(0, rc, report)
+                if expected == "warn":
+                    self.assertIn("agents-md-slimming", item["next"])
+                    self.assertIn("templates/playbooks/agents-md-slimming.md",
+                                  item["next"])
+
+    def test_owned_ratio_warn_with_boundary(self):
+        cases = (
+            ("ratio-under", 20000, 12999, "pass"),   # 64.995%
+            ("ratio-equal", 20000, 13000, "pass"),   # 恰 65%，要求 >65%
+            ("ratio-over", 20000, 13001, "warn"),    # 65.005%
+            ("small-bytes", 16384, 16000, "pass"),   # 占比高但全文未超 16KB
+            ("over-16kb", 16385, 16001, "warn"),
+        )
+        for name, total_bytes, owned_bytes, expected in cases:
+            with self.subTest(case=name):
+                self.fx = ProjectFixture(Path(self._tmp.name) / name)
+                self.write_budget_agents(total_bytes, 149,
+                                         total_bytes - owned_bytes)
+                rc, report = self.budget()
+                item = self.fx.item(report, "agents.budget")
+                self.assertEqual(expected, item["status"], item["detail"])
+                self.assertEqual(0, rc, report)
+                if expected == "warn":
+                    self.assertIn("项目自有段 >65%", item["detail"])
+
+    def test_warn_keeps_non_strict_rc_and_strict_semantics(self):
+        self.write_budget_agents(20481, 149, 10481)
+        self.fx.commit()
+        rc, report = self.fx.doctor_json()
+        item = self.fx.item(report, "agents.budget")
+        self.assertEqual("warn", item["status"])
+        self.assertIn("agents.budget", [row["id"] for row in report["items"]])
+        self.assertNotEqual(1, rc, report)
+        proc = self.fx.doctor("--only", "agents.budget", "--strict", "--json")
+        self.assertEqual(1, proc.returncode, proc.stdout + proc.stderr)
+
+    def test_missing_file_or_markers_skips(self):
+        (self.fx.root / "AGENTS.md").unlink()
+        rc, report = self.budget()
+        self.assertEqual(0, rc, report)
+        self.assertEqual("skip", self.fx.item(report, "agents.budget")["status"])
+
+        (self.fx.root / "AGENTS.md").write_text("# AGENTS\n\n无标记。\n", encoding="utf-8")
+        rc, report = self.budget()
+        self.assertEqual(0, rc, report)
+        self.assertEqual("skip", self.fx.item(report, "agents.budget")["status"])
+
+
 if __name__ == "__main__":
     unittest.main()

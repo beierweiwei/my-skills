@@ -33,6 +33,16 @@ MARK_START = "<!-- agent-crew:orchestration:start -->"
 MARK_END = "<!-- agent-crew:orchestration:end -->"
 BLOCK_LINE_LIMIT = 150
 RESIDUAL_TOKEN_RE = re.compile(r"\{\{[^{}\n]+\}\}")
+# AGENTS 体量非阻断阈值（2.2.12，样本见 evidence/agents-budget-warn.md）：
+# 本仓 14,621B/149 行/自有段 61.5% 不告警；CASE 25,227B/178 行/76.5% 告警。
+AGENTS_BUDGET_MAX_BYTES = 20 * 1024
+AGENTS_BUDGET_MAX_LINES = 180
+AGENTS_BUDGET_OWNED_RATIO = 0.65
+AGENTS_BUDGET_OWNED_MIN_BYTES = 16 * 1024
+AGENTS_BUDGET_NEXT = (
+    "按 `agents-md-slimming` 剧本（技能层 `templates/playbooks/agents-md-slimming.md`）"
+    "做只读诊断，方案经确认后再改 AGENTS"
+)
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 COPY_BASENAMES = ("crew-rules.md", "crew-acceptance.md",
@@ -690,6 +700,48 @@ class Doctor:
             return Result("agents.block", "warn", "块体合法，但 manifest 未登记 block hash",
                           next="init --refresh-block --confirm")
         return Result("agents.block", "pass", f"块体 {line_count} 行；blockSha256 一致")
+
+    def check_agents_budget(self) -> Result:
+        text = read_text(self.root / "AGENTS.md")
+        if text is None:
+            return Result("agents.budget", "skip", "AGENTS.md 不存在（由 agents.markers 负责）")
+        info = marker_info(text)
+        if len(info["starts"]) != 1 or len(info["ends"]) != 1:
+            return Result("agents.budget", "skip",
+                          "AGENTS.md 无受管标记或标记非法（由 agents.markers/blocks 负责）")
+        total_bytes = len(text.encode("utf-8"))
+        total_lines = len(text.splitlines())
+        start, end = info["starts"][0], info["ends"][0]
+        # 与「标记之间原始切片」等价：每行含换行，另加首行前的换行
+        block_bytes = 1 + sum(
+            len(line.encode("utf-8")) + 1
+            for line in info["lines"][start + 1:end]
+        )
+        owned_bytes = total_bytes - block_bytes
+        owned_ratio = owned_bytes / total_bytes if total_bytes else 0.0
+        triggers: list[str] = []
+        if total_bytes > AGENTS_BUDGET_MAX_BYTES:
+            triggers.append(f"全文 >{AGENTS_BUDGET_MAX_BYTES} 字节")
+        if total_lines > AGENTS_BUDGET_MAX_LINES:
+            triggers.append(f"全文 >{AGENTS_BUDGET_MAX_LINES} 行")
+        if owned_ratio > AGENTS_BUDGET_OWNED_RATIO and total_bytes > AGENTS_BUDGET_OWNED_MIN_BYTES:
+            triggers.append(
+                f"项目自有段 >{AGENTS_BUDGET_OWNED_RATIO:.0%} 且全文 "
+                f">{AGENTS_BUDGET_OWNED_MIN_BYTES} 字节")
+        detail = (
+            f"全文 {total_bytes} 字节 / {total_lines} 行；受管块 {block_bytes} 字节；"
+            f"项目自有段 {owned_bytes} 字节（{owned_ratio:.1%}）；"
+            f"阈值：>{AGENTS_BUDGET_MAX_BYTES} 字节 或 >{AGENTS_BUDGET_MAX_LINES} 行 或 "
+            f"（自有段 >{AGENTS_BUDGET_OWNED_RATIO:.0%} 且全文 "
+            f">{AGENTS_BUDGET_OWNED_MIN_BYTES} 字节）"
+        )
+        if triggers:
+            return Result("agents.budget", "warn",
+                          detail + "；触发：" + "、".join(triggers),
+                          evidence={"bytes": total_bytes, "lines": total_lines,
+                                    "blockBytes": block_bytes, "ownedRatio": round(owned_ratio, 4)},
+                          next=AGENTS_BUDGET_NEXT)
+        return Result("agents.budget", "pass", detail)
 
     def check_agents_duplicate(self) -> Result:
         text = read_text(self.root / "AGENTS.md")
@@ -1874,7 +1926,7 @@ def _pid_alive(pid: int) -> bool:
 CHECKS = [
     "manifest.schema", "manifest.hash.file", "manifest.hash.block", "manifest.config",
     "manifest.roleStubs", "manifest.orphan",
-    "agents.markers", "agents.block", "agents.duplicate", "agents.pending",
+    "agents.markers", "agents.block", "agents.budget", "agents.duplicate", "agents.pending",
     "docs.duplicate", "docs.pointers", "skill.source", "docs.links",
     "config.schema", "config.paths", "config.identity",
     "role.frontmatter", "role.descriptor", "role.capability", "role.inherit",
@@ -1896,6 +1948,7 @@ METHODS = {
     "manifest.orphan": "check_manifest_orphan",
     "agents.markers": "check_agents_markers",
     "agents.block": "check_agents_block",
+    "agents.budget": "check_agents_budget",
     "agents.duplicate": "check_agents_duplicate",
     "agents.pending": "check_agents_pending",
     "docs.duplicate": "check_docs_duplicate",
