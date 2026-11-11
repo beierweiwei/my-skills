@@ -14,7 +14,7 @@
 | 工位 | crew-rules.md **W1–W5** |
 | 占用与并发 | crew-rules.md **O1–O3、P1–P3** |
 | 收口 | crew-rules.md **F1–F16** |
-| 值守 | crew-rules.md **G1–G5** |
+| 值守 | crew-rules.md **G1–G6** |
 | 状态机与放行条件 | crew-rules.md **S1–S4** |
 | 边界红线 | crew-rules.md **X1–X5** |
 | 逐节点抽验 / 关键交互物自验 / 完成声明 / AOP 六维 | crew-acceptance.md **A1–A4** |
@@ -179,6 +179,14 @@
 - 回收按工位类型与「同资产是否还有下一件」判断，工位处置必须随收口回执一起给出（F4）——没有这一项，就无法判断该不该关。
 - 判定窗口、标签、容量与巡检口径见 W1–W5；巡检工具只做报告与安全关闭，命令用法见 [herdr-cheatsheet.md](herdr-cheatsheet.md)。
 
+### 5.11 发布后重启与可交接检查
+
+- **触发**：技能版本发布/升级后（用户目录刷新、项目 `upgrade`/`init` 之后）。发布不是 push 完就结束，升级后的运行时必须验证确实载入了新代码与新模板。
+- **① 先无锁取证、再启动 guard（新代码）**：guard 是独立长驻进程，升级不会热更新已运行实例。找旧进程并停（记录旧 pid/cmdline）→ **启动长驻实例前，先在无 guard 持锁时跑 `python3 scripts/crew-guard.py --once --json` 取证**（stdout 必须为非空 JSON，空输出不算通过）→ 启动 `python3 scripts/crew-guard.py --helm <当前舵> --interval 120` → 验证 `<crew-dir>/guard.lock` / pid / cmdline、新代码生效探针（如 wake 写 `generated_at:`、`--help` 出现新子命令）；长驻实例持锁时第二实例静默 rc=0、不产生任何输出，**不得作为证据**；任一失败即停，不得报发布完成。
+- **② 长驻角色**：compose 在启动时快照（agent 启动时组合基类与项目角色），升级不会热更新已运行会话——helm 需换舵（新 tab 新舵、首报后关旧）；firstmate 需重建/重派；one-shot worker 下次启动自动取新模板。发布回执必须写明该事实与处置。
+- **③ 可交接性实测**：真实 pane ctx 读取（`herdr pane read <helm pane> --lines 80` 可见 `ctx Nk/1M`）、① 无锁窗口采集的 `python3 scripts/crew-guard.py --once --json`（stdout 为非空 JSON；长驻持锁时静默 rc=0 不算）、继任组合只读校验 `python3 scripts/dispatch.py compose --role helm --json` rc=0；证据落 `.planning/<task>/evidence/release/`。
+- **④ 红线**：上述任一未完成或无证据，不得报发布收口。
+
 ## 6. 三道人工门（为什么不可自批）
 
 三道门各回答一个不同的问题，顺序不能省：
@@ -230,9 +238,9 @@
 ### 7.5 值守与监听机制
 
 - 编排者不能靠前台阻塞等待（`herdr agent prompt --wait` / `agent wait`）过日子——一个 Agent 的长任务会把编排者钉死，其他流全部停摆。
-- 因此采用「guard 常驻轮询 + 一次性人工抽查 + 外置看门狗」：guard 按 G1–G5 的待办/在跑口径判断是否叫醒，正常零输出；人工抽查用监听脚本的边沿模式，不承担自动叫醒；外置定时只检查 guard 进程存活。
+- 因此采用「guard 常驻轮询 + 一次性人工抽查 + 外置看门狗」：guard 按 G1–G6 的待办/在跑口径判断是否叫醒，正常零输出；人工抽查用监听脚本的边沿模式，不承担自动叫醒；外置定时只检查 guard 进程存活。
 - **启动与恢复**：Agent 只经 `dispatch.py start` 启动并写 agent-log（`composedSha256`/`delivery`/`baseRef`）；`doctor.py` 的 `role.delivery` 复核最近一次启动与 compose 报告一致。
-- 叫醒条件、冷却、待办/在跑口径见 G1–G5；命令用法见 [herdr-cheatsheet.md](herdr-cheatsheet.md)。
+- 叫醒条件、冷却、待办/在跑口径见 G1–G6；命令用法见 [herdr-cheatsheet.md](herdr-cheatsheet.md)。
 
 ## 8. 可选远端扩展
 

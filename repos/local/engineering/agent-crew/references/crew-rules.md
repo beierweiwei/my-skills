@@ -15,14 +15,15 @@
 | O | 占用 | O1–O3 |
 | F | 收口 | F1–F16 |
 | P | 并发 | P1–P3 |
-| G | 值守 | G1–G5 |
+| G | 值守 | G1–G6 |
 | S | 状态机 | S1–S4 |
 | X | 边界红线 | X1–X5 |
 
 ## 0. 入口与角色继承（非编号动作）
 
 - **普通技能引用**：通用规则/验收/机制/plan 纪律只在技能源一份；项目 `AGENTS.md` 与角色文件用 `{{skill_root}}`/`{{crew_rules}}`/`{{crew_acceptance}}` 指针引用，`skillRoot` 变化用 `init --refresh-block --confirm` 重渲染块。项目内出现规则/验收副本按 doctor `skill.source` 失败处理。
-- **唯一 dispatcher**：Agent 生命周期与工位变更只走 `python3 scripts/dispatch.py`（compose/start/prompt/close/status/list/tab/pane）；`start-agent.sh`/`start-helm.sh` 只是薄包装。角色文件、项目文档、项目脚本禁止直写 `herdr agent start/prompt/close`、`herdr tab/pane` 变更或 runtime `--agent` 直启；只读 `agent list`/`tab list`/`pane list`/`status` 允许。
+- **唯一 dispatcher**：Agent 生命周期与工位变更只走 `python3 scripts/dispatch.py`（compose/start/prompt/close/notify/status/list/tab/pane）；`start-agent.sh`/`start-helm.sh` 只是薄包装。角色文件、项目文档、项目脚本禁止直写 `herdr agent start/prompt/close`、`herdr tab/pane` 变更或 runtime `--agent` 直启；只读 `agent list`/`tab list`/`pane list`/`status` 允许。
+- **跨项目通知（外部 agent）**：向未托管的兄弟项目 agent 发提示只允许 `python3 scripts/dispatch.py notify --agent <外部名> --message <文本>`——只调 `herdr agent prompt`，不查/不写 dispatch 注册表，不 start/close、不动生命周期；仍禁止直写 `herdr agent prompt`。
 - **角色继承与组合**：角色 = 技能基类（`skillRoot/templates/agents/<runtime>/<role>.md`）+ 项目角色文件（`extends: skill:<role>`、`managed: false`）。dispatch 启动时 base 先、项目后 append-only 组合；frontmatter/权限只取基类；受保护标题冲突、残留 token、项目 frontmatter 权限键一律拒绝；组合结果不写项目发现目录。
 - **安装 / 升级 / 体检**：`init` 只在缺失时生成项目角色 stub，AGENTS 无标记零写入并生成 pending 文件；受管块只经 `--refresh-block --confirm` 重渲染；`upgrade` 只替换受管脚本并保留逐字节回滚；`doctor` 只读，输出 JSON 证据与可执行 `next`。
 - **版本与迁移**：技能版本见 `SKILL.md`/`CHANGELOG.md`；安装版本与配置 `skillVersion` 由 doctor 校验。基类升级只改技能源，下次 dispatch 自动生效，项目角色文件不需改。
@@ -91,6 +92,7 @@
 - **G3 待办口径**：活跃流 plan 中未勾选且未标 ⏸/待 Captain 的 Phase 待办，加 portfolio Backlog 中无阻塞的 T 行；已完成 Phase 的残留待办只记日志，不叫醒。
 - **G4 在跑口径**：只有 working 算在跑；blocked 单独作为「卡住」叫醒理由，叫醒带年龄与重复叫醒——达到 15 分钟未处置再叫醒，达到 blockedGrace（默认 30 分钟）提示「应关闭或升级」，不自动杀 agent；idle/done/unknown 不算在跑。
 - **G5 零输出与边界**：正常零输出；可提示「回执 done 但 plan 未更新」，不代写 plan；外置定时只检查 guard 存活；人工抽查工具不承担自动叫醒。
+- **G6 口头决策落盘**：Captain 口头/会话决策由收到指令的 owner **当轮**写入对应 plan 的 `## Decisions Made` 或 portfolio `progress.md`（含生效口径与时间），并在回复回显「已落盘：<文件>/<条目>」；未落盘不得当作已决执行；交接 digest 必须列「未落盘决策」（无则写「无」）。
 
 ## S 状态机
 

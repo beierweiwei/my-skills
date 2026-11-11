@@ -6,6 +6,9 @@
 叫醒：优先 `herdr agent prompt <helm>`；总舵 pane 处于聚焦时改为写
 <crew-dir>/guard.wake + Herdr 通知。每 5 分钟顺带执行 plan-status.py --write；
 叫醒时执行 plan-status.py --check-fresh 并把结果带进叫醒消息。
+guard.wake 首行 `generated_at: <ISO8601 Z>`（兼容旧格式裸 ISO 首行）；超过 2h
+（7200s）或首行无法解析的遗留 wake 在每轮开始时删除并记 guard.log（fail-safe），
+新鲜文件保留不动；wake 读写异常不中断值守。
 
 待办口径（decisions §1）：
 - 活跃流 plan 中 Phase Status ≠ complete 的未勾选 `[ ]`（排除含 ⏸ / 待 Captain / 留 Captain）；
@@ -99,6 +102,9 @@ DEFAULT_BLOCKED_REPEAT_MINUTES = 15
 DEFAULT_BLOCKED_GRACE_MINUTES = 30
 BLOCKED_MINUTES_MIN = 1
 BLOCKED_MINUTES_MAX = 240
+WAKE_FILE_NAME = "guard.wake"
+DEFAULT_WAKE_TTL_SECONDS = 7200
+WAKE_GENERATED_RE = re.compile(r"^generated_at:\s*(\S+)\s*$")
 
 
 @dataclass(frozen=True)
@@ -114,6 +120,37 @@ class Todo:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def parse_wake_generated_at(text: str) -> datetime | None:
+    """解析 guard.wake 首行生成时间：新格式 `generated_at: <ISO>` 或旧格式裸 ISO。
+
+    缺失、空白或无法解析返回 None（调用方按过期处理，fail-safe 不抛异常）。
+    """
+    lines = text.splitlines()
+    if not lines:
+        return None
+    head = lines[0].strip()
+    match = WAKE_GENERATED_RE.match(head)
+    raw = (match.group(1) if match else head).strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        generated = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if generated.tzinfo is None:
+        generated = generated.replace(tzinfo=timezone.utc)
+    return generated.astimezone(timezone.utc)
+
+
+def wake_expired(generated: datetime | None, now: float) -> bool:
+    """生成时间缺失/不可解析，或距今超过 DEFAULT_WAKE_TTL_SECONDS（2h）视为过期。"""
+    if generated is None:
+        return True
+    return now - generated.timestamp() > DEFAULT_WAKE_TTL_SECONDS
 
 
 def is_probe_agent(agent: dict) -> bool:
@@ -1304,9 +1341,35 @@ class Guard:
 
     def _write_wake_file(self, message: str) -> None:
         atomic_write_text(
-            self.crew_dir / "guard.wake",
-            f"{utc_now()}\n{message}\n",
+            self.crew_dir / WAKE_FILE_NAME,
+            f"generated_at: {utc_now()}\n{message}\n",
         )
+
+    def _consume_stale_wake(self, now: float) -> None:
+        """每轮开始先消费遗留 guard.wake：过期或不可解析则删除并记日志，新鲜保留。"""
+        path = self.crew_dir / WAKE_FILE_NAME
+        try:
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return
+        except UnicodeDecodeError:
+            text = ""  # 编码损坏按不可解析处理（fail-safe 过期）
+        except OSError as exc:
+            self.log(f"guard.wake 读取失败，跳过过期检查：{exc}")
+            return
+        generated = parse_wake_generated_at(text)
+        if not wake_expired(generated, now):
+            return
+        stamp = generated.isoformat().replace("+00:00", "Z") if generated else "无法解析"
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            self.log(f"guard.wake 过期但删除失败：{exc}")
+            return
+        self.log(f"guard.wake 已过期/已忽略（generated_at={stamp}，"
+                 f"阈值 {DEFAULT_WAKE_TTL_SECONDS}s）：已删除")
 
     def _wake(self, message: str, agents: list[dict]) -> str:
         helm_agent = next(
@@ -1341,6 +1404,7 @@ class Guard:
 
     def run_once(self) -> dict:
         now = self.clock()
+        self._consume_stale_wake(now)
         self._periodic_write(now)
 
         try:
@@ -1499,6 +1563,10 @@ cwd 在本仓或 linked worktree（git worktree list --porcelain）内的 agent�
 忽略；cwd 缺失/不可解析时沿用旧口径包含。优先 herdr agent prompt <helm>；总舵 pane
 聚焦时写 <crew-dir>/guard.wake + 通知。叫醒时执行 plan-status.py --check-fresh；
 每 5 分钟顺带执行 plan-status.py --write。正常零 stdout，事件写 <crew-dir>/guard.log。
+
+guard.wake 过期：首行 `generated_at: <ISO8601 Z>`（兼容旧格式裸 ISO 首行）；
+超过 7200s 或首行无法解析的遗留 wake 在每轮开始时删除并记 guard.log（fail-safe），
+新鲜文件保留不动；wake 读写异常不中断值守。
 
 blocked 年龄与重复叫醒：按 agent 身份（name，缺省 pane_id）记录首次 blocked 时间；
 首次叫醒沿用 10 分钟全局冷却；仍 blocked 且距该 agent 上次 blocked 叫醒
