@@ -5,12 +5,13 @@
 
 ### 规则与文档指针（项目不复制正文）
 
-- 通用可执行规则：`{{crew_rules}}`（D 派单 / R 回执与反馈 / W 工位 / O 占用 / F 收口 / P 并发 / G 值守 / S 状态机 / X 红线）。
-- 验收与呈报：`{{crew_acceptance}}`（A1–A5）。
-- 机制与拓扑：`{{skill_root}}/references/orchestration-guide.md`；plan 纪律与看板：`{{skill_root}}/references/plan-discipline.md`；Herdr 命令速查：`{{skill_root}}/references/herdr-cheatsheet.md`。
+- 技能根：agent-crew 技能根＝`.planning/orchestration.json` 的 `skillRoot`（安装位置随机器而异）；本节路径均相对技能根。
+- 通用可执行规则：`references/crew-rules.md`（D 派单 / R 回执与反馈 / W 工位 / O 占用 / F 收口 / P 并发 / G 值守 / S 状态机 / X 红线）。
+- 验收与呈报：`references/crew-acceptance.md`（A1–A5）。
+- 机制与拓扑：`references/orchestration-guide.md`；plan 纪律与看板：`references/plan-discipline.md`；Herdr 命令速查：`references/herdr-cheatsheet.md`。
 - 角色动作：`.qoder/agents/<role>.md`、`.opencode/agent/<role>.md`（项目自有；`extends: skill:<role>` 继承技能基类，启动时 append-only 组合，权限与 frontmatter 只取基类）。
-- 项目事实：本文件标记外、`{{doc_context}}`、topology（默认 `docs/orchestration/topology.md`，以配置为准）、`docs/crew/project-ext/`。
-- 指针形态：AGENTS 与角色文件只用 `{{skill_root}}` 与技能 references 指针；项目内不存放规则/验收/指南副本。
+- 项目事实：本文件标记外、`{{doc_context}}`、topology（默认 `docs/orchestration/topology.md`，以配置为准）、`docs/crew/project-ext/`（默认路径；以配置 `paths.projectExt` 为准）。
+- 指针形态：AGENTS 只用技能根相对名（如上）；角色文件由组合时注入技能根绝对路径；项目内不存放规则/验收/指南副本。
 
 ### 唯一入口（dispatch）
 
@@ -21,7 +22,7 @@
 ### 安装 / 升级 / 体检
 
 - 安装与 bootstrap：`python3 scripts/init.py`（`--check` 只读、`--dry-run` 零写入、`--yes` 应用）；AGENTS 无标记时零写入，生成 `docs/crew/AGENTS-block.pending.md` 并返回 2。
-- 块重渲染：`python3 scripts/init.py --refresh-block --confirm`（只重渲染本节，块外不动；skillRoot 变化后使用）。
+- 块重渲染：`python3 scripts/init.py --refresh-block --confirm`（只重渲染本节，块外不动；技能版本升级后使用，换机/改 skillRoot 无需重渲染）。
 - 受管脚本升级/回滚：`python3 scripts/upgrade.py --diff`、`--apply --confirm`、`--rollback <backup-id>`（只替换受管脚本，逐字节可回滚）。
 - 体检：`python3 scripts/doctor.py --root . --profile release --strict --json`；失败按输出 `next` 处理，不静默放行。
 
@@ -34,13 +35,13 @@
 
 ### 剧本库（playbook 路由）
 
-- 通用剧本：`{{skill_root}}/templates/playbooks/`（随技能分发，不复制进项目）；项目层 `.planning/playbooks/`，同名项目层覆盖技能层；两层都无匹配不硬套。
+- 通用剧本：`templates/playbooks/`（相对技能根，随技能分发，不复制进项目）；项目层 `.planning/playbooks/`，同名项目层覆盖技能层；两层都无匹配不硬套。
 - 大副派活按任务类型选剧本，步骤逐字铺进该流 task_plan 的 `## Phases`；不执行的步骤留痕 `- [x] <步骤>（跳过：<原因>）`；剧本名与来源层记入流 plan 的 Decisions。
-- 校验：`python3 scripts/plan-status.py --playbooks .planning/playbooks`；目录与契约见 `{{skill_root}}/templates/playbooks/README.md`。
+- 校验：`python3 scripts/plan-status.py --playbooks .planning/playbooks`；目录与契约见 `templates/playbooks/README.md`。
 
 ### 收口与验证原则
 
-- F6–F12 为收口验证与委派原则（真实证据、可验证单元、断言行为、沉淀杠杆、数字可解释、上下文预算、不空等人工）；摘要不复述正文，定义见 `{{crew_rules}}`。
+- F6–F12 为收口验证与委派原则（真实证据、可验证单元、断言行为、沉淀杠杆、数字可解释、上下文预算、不空等人工）；摘要不复述正文，定义见 `references/crew-rules.md`。
 
 ### 决策与门禁
 
@@ -53,7 +54,7 @@
 
 {{red_lines}}
 
-- 三道人工门（单需求需求门、全局需求基线门、验收门）不可由 Agent 自批；验收门必须持有 `{{doc_accept}}`，按 `{{crew_acceptance}}` A1–A5 抽验。
+- 三道人工门（单需求需求门、全局需求基线门、验收门）不可由 Agent 自批；验收门必须持有 `{{doc_accept}}`，按 `references/crew-acceptance.md` A1–A5 抽验。
 
 ### 数据安全
 
@@ -62,7 +63,7 @@
 
 ### 版本与反馈
 
-- 技能版本见 `{{skill_root}}/SKILL.md` 与 `{{skill_root}}/CHANGELOG.md`；安装版本记录在 `docs/crew/manifest.json`，`doctor.py` 校验一致。
+- 技能版本见技能根 `SKILL.md` 与 `CHANGELOG.md`；安装版本记录在 `docs/crew/manifest.json`，`doctor.py` 校验一致。
 - 流程与提示词问题记入 `{{portfolio_dir}}/feedback.md`（场景/问题/影响/建议/状态）。
 - 流程反馈格式：写入流程反馈表并预填「预判去向」（R5）；复盘报告落 `{{portfolio_dir}}/retro-<YYYYMMDD>.md`，待复盘未清零=复盘未完成（表结构与保留规则见 plan-discipline §5.3）。
 - 跨项目认知由总舵/大副当场 inone 推送（归因角色名）；船员只报不推；不写任何本地 auto-memory。

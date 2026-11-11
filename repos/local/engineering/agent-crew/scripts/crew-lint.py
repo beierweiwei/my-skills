@@ -9,8 +9,11 @@
   2. rule-ref  模板/角色里引用的 D/R/W/O/F/P/G/S/X 与 A 编号必须在
                references/crew-rules.md / crew-acceptance.md 中有定义；
                区间（如 D2–D6、A1–A5）逐号校验，含端点与中间号。
-  3. pointer   模板中禁止裸写 references/crew-rules.md / crew-acceptance.md，
-               必须使用 {{crew_rules}} / {{crew_acceptance}} token。
+  3. pointer   角色模板（templates/agents/**）禁止裸写 references/crew-rules.md /
+               crew-acceptance.md，必须使用 {{crew_rules}} / {{crew_acceptance}} token；
+               AGENTS 受管块模板相反：只写技能根相对名，禁止
+               {{skill_root}} / {{crew_rules}} / {{crew_acceptance}} 等绝对路径 token，
+               且必须含技能根锚点 .planning/orchestration.json + skillRoot（防回退）。
   4. duplicate 跨文档按归一化整行比对，≥30 字的重复行报出；
                排除标题、表格分隔、代码块（含围栏与围栏内内容）。
                角色文件之间共用同构骨架（qoder/opencode 镜像与公共段落）不互比；
@@ -70,6 +73,9 @@ RANGE_RE = re.compile(
 )
 SINGLE_RE = re.compile(r"(?<![A-Za-z0-9])([ADRWOFPGSX])(\d+)(?:\.(\d+))?(?![A-Za-z0-9])")
 BARE_POINTER_RE = re.compile(r"references/crew-(?:rules|acceptance)\.md")
+AGENTS_TEMPLATE = "templates/AGENTS-编排节.md"
+AGENTS_ABS_TOKEN_RE = re.compile(r"\{\{(?:skill_root|crew_rules|crew_acceptance)\}\}")
+SKILL_ROOT_ANCHORS = (".planning/orchestration.json", "skillRoot")
 BOLD_ID_RE = re.compile(r"^\s*(?:[-*+]\s+)?\*\*([DRWOFPGSX]\d+(?:\.\d+)?)\s", re.MULTILINE)
 A_HEADING_RE = re.compile(r"^#{1,6}\s+(A\d+(?:\.\d+)?)\s", re.MULTILINE)
 A_BOLD_RE = re.compile(r"^\s*(?:[-*+]\s+)?\*\*(A\d+(?:\.\d+)?)\s", re.MULTILINE)
@@ -184,16 +190,43 @@ def check_pointers(root: Path, issues: list[tuple[str, int, str, str]]) -> None:
         path = root / rel
         if not path.is_file():
             continue
-        for lineno, line in enumerate(read_text(path).splitlines(), 1):
-            if BARE_POINTER_RE.search(line):
-                issues.append(
-                    (
-                        rel,
-                        lineno,
-                        "pointer",
-                        "bare references path; use {{crew_rules}} / {{crew_acceptance}}",
+        text = read_text(path)
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if is_role(rel):
+                if BARE_POINTER_RE.search(line):
+                    issues.append(
+                        (
+                            rel,
+                            lineno,
+                            "pointer",
+                            "bare references path in role template; "
+                            "use {{crew_rules}} / {{crew_acceptance}}",
+                        )
                     )
-                )
+            elif rel == AGENTS_TEMPLATE:
+                match = AGENTS_ABS_TOKEN_RE.search(line)
+                if match:
+                    issues.append(
+                        (
+                            rel,
+                            lineno,
+                            "pointer",
+                            f"absolute skill token {match.group(0)} in AGENTS block; "
+                            "use skill-root-relative names",
+                        )
+                    )
+        if rel == AGENTS_TEMPLATE:
+            for anchor in SKILL_ROOT_ANCHORS:
+                if anchor not in text:
+                    issues.append(
+                        (
+                            rel,
+                            1,
+                            "pointer",
+                            f"missing skill root anchor {anchor}; keep "
+                            ".planning/orchestration.json + skillRoot in AGENTS block",
+                        )
+                    )
 
 
 def normalize_line(line: str) -> str:

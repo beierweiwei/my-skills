@@ -48,6 +48,29 @@ class InitV2Test(unittest.TestCase):
     def run_init(self, *extra: str) -> tuple[int, str]:
         return self.run_init_at(self.root, *extra)
 
+    def test_default_config_and_template_redlines_are_generic(self):
+        # G10/G12：默认红线与模板同步，去掉平台专属项；Captain 决策保留通用 8 项
+        template = json.loads(
+            (init_v2.SKILL_DIR / "templates/project.config.json").read_text(encoding="utf-8"))
+        self.assertEqual(init_v2.DEFAULT_CONFIG["redLines"], template["redLines"])
+        self.assertEqual(2, len(template["redLines"]))
+        self.assertFalse(any("平台通用能力分层" in item for item in template["redLines"]))
+        self.assertEqual([
+            "合并/推送/worktree 清理",
+            "花钱采购",
+            "客户数据与对接人",
+            "法律合规与风险确认",
+            "主数据/架构口径",
+            "范围与验收口径变更",
+            "三道人工门签认",
+            "验收效果最终确认",
+        ], template["captainDecisions"])
+
+        self.run_init("--yes")
+        cfg = json.loads(
+            (self.root / ".planning/orchestration.json").read_text(encoding="utf-8"))
+        self.assertEqual(template["redLines"], cfg["redLines"])
+
     def test_existing_config_values_preserved_version_stamped(self):
         self.assertEqual(self.run_init("--yes")[0], 0)
         cfg_path = self.root / ".planning/orchestration.json"
@@ -142,8 +165,17 @@ class InitV2Test(unittest.TestCase):
         code, out = self.run_init("--refresh-block", "--confirm")
         self.assertEqual(0, code, out)
         text = (self.root / "AGENTS.md").read_text(encoding="utf-8")
-        self.assertIn(".qoder/skills/agent-crew", text)
-        self.assertNotIn(str(Path(init_v2.SKILL_DIR).resolve()), text)
+        block = text.split(init_v2.MARK_START, 1)[1].split(init_v2.MARK_END, 1)[0]
+        # 描述性块：0 处 skillRoot 路径，含锚点与全部相对名
+        self.assertNotIn(".qoder/skills/agent-crew", block)
+        self.assertNotIn(str(Path(init_v2.SKILL_DIR).resolve()), block)
+        self.assertIn(".planning/orchestration.json", block)
+        self.assertIn("skillRoot", block)
+        for rel in ("references/crew-rules.md", "references/crew-acceptance.md",
+                    "references/orchestration-guide.md", "references/plan-discipline.md",
+                    "references/herdr-cheatsheet.md", "templates/playbooks/",
+                    "templates/playbooks/README.md", "SKILL.md", "CHANGELOG.md"):
+            self.assertIn(rel, block)
         for check in ("agents.block", "docs.pointers"):
             proc = subprocess.run(
                 [sys.executable, str(self.root / "scripts/doctor.py"), "--root",
@@ -151,6 +183,22 @@ class InitV2Test(unittest.TestCase):
                 capture_output=True, text=True,
             )
             self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+
+    def test_skill_root_change_without_refresh_not_stale(self):
+        self.assertEqual(self.run_init("--yes")[0], 0)
+        cfg_path = self.root / ".planning/orchestration.json"
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        cfg["skillRoot"] = ".qoder/skills/agent-crew"
+        cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n",
+                            encoding="utf-8")
+        for check in ("agents.block", "docs.pointers"):
+            proc = subprocess.run(
+                [sys.executable, str(self.root / "scripts/doctor.py"), "--root",
+                 str(self.root), "--only", check, "--json"],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+            self.assertNotIn("stale", proc.stdout)
 
     def test_install_log_fields_and_result(self):
         self.run_init("--yes")

@@ -33,10 +33,33 @@ MARK_START = "<!-- agent-crew:orchestration:start -->"
 MARK_END = "<!-- agent-crew:orchestration:end -->"
 BLOCK_LINE_LIMIT = 150
 RESIDUAL_TOKEN_RE = re.compile(r"\{\{[^{}\n]+\}\}")
+# AGENTS 体量非阻断阈值（2.2.12，样本见 evidence/agents-budget-warn.md）：
+# 本仓 14,621B/149 行/自有段 61.5% 不告警；大型项目 25,227B/178 行/76.5% 告警。
+AGENTS_BUDGET_MAX_BYTES = 20 * 1024
+AGENTS_BUDGET_MAX_LINES = 180
+AGENTS_BUDGET_OWNED_RATIO = 0.65
+AGENTS_BUDGET_OWNED_MIN_BYTES = 16 * 1024
+AGENTS_BUDGET_NEXT = (
+    "按 `agents-md-slimming` 剧本（技能层 `templates/playbooks/agents-md-slimming.md`）"
+    "做只读诊断，方案经确认后再改 AGENTS"
+)
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 COPY_BASENAMES = ("crew-rules.md", "crew-acceptance.md",
                   "orchestration-guide.md", "plan-discipline.md")
+# docs.duplicate 扫描清单：AGENTS.md、配置 topology/projectExt、角色文件，以及
+# docs/**/*.md 中文件名匹配 编排|orchestration|协作|agents（大小写不敏感）的编排文档。
+ORCH_DOC_NAME_RE = re.compile(r"(编排|orchestration|协作|agents)", re.IGNORECASE)
+SKILL_POINTER_MARKERS = (
+    "references/crew-rules.md", "references/crew-acceptance.md",
+    "references/plan-discipline.md", "SKILL.md",
+)
+DEFAULT_PROJECT_EXT = "docs/crew/project-ext"
+SKILL_ROOT_ANCHORS = (".planning/orchestration.json", "skillRoot")
+# 绝对路径形态（家目录/盘符/任意 / 开头路径；URL 的 // 与 :// 不会命中）
+ABS_PATH_RE = re.compile(
+    r"(?:^|[\s`'\"「『（(])(?:~/|/|[A-Za-z]:[\\/])[^\s`'\"」』）)]+"
+)
 # 与 crew-guard.py 的 DEFAULT_BLOCKED_{REPEAT,GRACE}_MINUTES 对齐；缺省参与 effective 比较
 GUARD_BLOCKED_REPEAT_DEFAULT = 15
 GUARD_BLOCKED_GRACE_DEFAULT = 30
@@ -243,6 +266,37 @@ def block_body(text: str) -> tuple[str | None, list[str]]:
     while normalized and not normalized[-1]:
         normalized.pop()
     return "\n".join(normalized) + "\n", []
+
+
+def agents_block_pointer_problem(
+    body: str, skill_root: Path | None, raw_root: object
+) -> str | None:
+    """AGENTS 受管块技能指针判定（agents.block / docs.pointers 共用，避免两处漂移）。
+
+    - 描述性块（含全部技能根锚点）：只用技能根相对名；出现任何绝对路径即 stale
+      （即使恰为当前 skillRoot，也不应写进描述性块，保证换机可移植）。
+    - 遗留绝对指针块（无完整锚点）：必须指向当前 skillRoot（配置原值或解析值），
+      否则 stale；裸技能根绝对路径同样可检出。
+    - 块内无技能指针：不判定。
+    """
+    if not any(name in body for name in SKILL_POINTER_MARKERS):
+        return None
+    anchors_present = all(anchor in body for anchor in SKILL_ROOT_ANCHORS)
+    has_abs_path = bool(ABS_PATH_RE.search(body))
+    if has_abs_path and anchors_present:
+        return ("块内为描述性指针却出现绝对路径（stale）；"
+                "描述性块应只用技能根相对名")
+    accepted = {str(skill_root)} if skill_root else set()
+    if isinstance(raw_root, str) and raw_root.strip():
+        accepted.add(raw_root.strip().rstrip("/"))
+    if has_abs_path:
+        if any(item in body for item in accepted):
+            return None
+        return "块内指针未指向当前 skillRoot（stale）"
+    if anchors_present:
+        return None
+    return ("块内缺少技能根锚点（" + " / ".join(SKILL_ROOT_ANCHORS)
+            + "）（stale）")
 
 
 @dataclass
@@ -637,18 +691,11 @@ class Doctor:
         tokens = sorted(set(RESIDUAL_TOKEN_RE.findall(body)))
         if tokens:
             problems.append(f"块内未解析 token：{tokens}")
-        skill_root = self.skill_root()
-        pointer_like = any(name in body for name in (
-            "references/crew-rules.md", "references/crew-acceptance.md",
-            "references/plan-discipline.md", "SKILL.md",
-        ))
         config = self.config() or {}
-        raw_root = config.get("skillRoot")
-        accepted = {str(skill_root)} if skill_root else set()
-        if isinstance(raw_root, str) and raw_root.strip():
-            accepted.add(raw_root.strip().rstrip("/"))
-        if pointer_like and skill_root and not any(item in body for item in accepted):
-            problems.append("块内指针未指向当前 skillRoot（stale）")
+        pointer_problem = agents_block_pointer_problem(
+            body, self.skill_root(), config.get("skillRoot"))
+        if pointer_problem:
+            problems.append(pointer_problem)
         stored, _ = self._manifest_block_hash()
         actual = sha256_bytes(body.encode("utf-8"))
         if stored and not same_hash(stored, actual):
@@ -662,6 +709,56 @@ class Doctor:
             return Result("agents.block", "warn", "块体合法，但 manifest 未登记 block hash",
                           next="init --refresh-block --confirm")
         return Result("agents.block", "pass", f"块体 {line_count} 行；blockSha256 一致")
+
+    def check_agents_budget(self) -> Result:
+        path = self.root / "AGENTS.md"
+        try:
+            # S1：按磁盘字节口径读取（不用 read_text 的 universal newlines），
+            # 保证 total_bytes / block_bytes / owned_bytes 与磁盘一致（含 CRLF）。
+            text = path.read_bytes().decode("utf-8")
+        except FileNotFoundError:
+            return Result("agents.budget", "skip", "AGENTS.md 不存在（由 agents.markers 负责）")
+        except OSError as exc:
+            return Result("agents.budget", "skip", f"AGENTS.md 不可读：{exc}")
+        except UnicodeDecodeError as exc:
+            return Result("agents.budget", "skip", f"AGENTS.md 非 UTF-8：{exc}")
+        info = marker_info(text)
+        if len(info["starts"]) != 1 or len(info["ends"]) != 1:
+            return Result("agents.budget", "skip",
+                          "AGENTS.md 无受管标记或标记非法（由 agents.markers/blocks 负责）")
+        total_bytes = len(text.encode("utf-8"))
+        total_lines = len(text.splitlines())
+        start, end = info["starts"][0], info["ends"][0]
+        # 保留行尾（CRLF 时每行 2B），与标记之间的磁盘原始切片逐字节一致
+        lines = text.splitlines(keepends=True)
+        block_bytes = len("".join(lines[start:end])[len(MARK_START):].encode("utf-8"))
+        owned_bytes = total_bytes - block_bytes
+        owned_ratio = owned_bytes / total_bytes if total_bytes else 0.0
+        triggers: list[str] = []
+        if total_bytes > AGENTS_BUDGET_MAX_BYTES:
+            triggers.append(f"全文 >{AGENTS_BUDGET_MAX_BYTES} 字节")
+        if total_lines > AGENTS_BUDGET_MAX_LINES:
+            triggers.append(f"全文 >{AGENTS_BUDGET_MAX_LINES} 行")
+        # 整数比较避免浮点误差：恰 65.0% 不应命中（要求严格大于）
+        if (owned_bytes * 100 > total_bytes * int(AGENTS_BUDGET_OWNED_RATIO * 100)
+                and total_bytes > AGENTS_BUDGET_OWNED_MIN_BYTES):
+            triggers.append(
+                f"项目自有段 >{AGENTS_BUDGET_OWNED_RATIO:.0%} 且全文 "
+                f">{AGENTS_BUDGET_OWNED_MIN_BYTES} 字节")
+        detail = (
+            f"全文 {total_bytes} 字节 / {total_lines} 行；受管块 {block_bytes} 字节；"
+            f"项目自有段 {owned_bytes} 字节（{owned_ratio:.1%}）；"
+            f"阈值：>{AGENTS_BUDGET_MAX_BYTES} 字节 或 >{AGENTS_BUDGET_MAX_LINES} 行 或 "
+            f"（自有段 >{AGENTS_BUDGET_OWNED_RATIO:.0%} 且全文 "
+            f">{AGENTS_BUDGET_OWNED_MIN_BYTES} 字节）"
+        )
+        if triggers:
+            return Result("agents.budget", "warn",
+                          detail + "；触发：" + "、".join(triggers),
+                          evidence={"bytes": total_bytes, "lines": total_lines,
+                                    "blockBytes": block_bytes, "ownedRatio": round(owned_ratio, 4)},
+                          next=AGENTS_BUDGET_NEXT)
+        return Result("agents.budget", "pass", detail)
 
     def check_agents_duplicate(self) -> Result:
         text = read_text(self.root / "AGENTS.md")
@@ -709,17 +806,25 @@ class Doctor:
         agents_text = read_text(agents) if agents.is_file() else None
         if agents_text:
             body, _ = block_body(agents_text)
-            skill_root = self.skill_root()
-            pointer_like = body and any(name in body for name in (
-                "references/crew-rules.md", "references/crew-acceptance.md",
-                "references/plan-discipline.md", "SKILL.md",
-            ))
-            raw_root = config.get("skillRoot")
-            accepted = {str(skill_root)} if skill_root else set()
-            if isinstance(raw_root, str) and raw_root.strip():
-                accepted.add(raw_root.strip().rstrip("/"))
-            if pointer_like and skill_root and not any(item in body for item in accepted):
-                problems.append("AGENTS.md 块内指针未指向当前 skillRoot（stale）")
+            pointer_problem = agents_block_pointer_problem(
+                body or "", self.skill_root(), config.get("skillRoot"))
+            if pointer_problem:
+                problems.append("AGENTS.md " + pointer_problem)
+        # project-ext 以配置 paths.projectExt 为唯一真源：目录必须存在（init 负责创建）；
+        # 受管块由模板渲染，自定义 projectExt 时块内默认字面量不算断链。
+        hooks = config.get("hooks") if isinstance(config.get("hooks"), dict) else {}
+        paths = hooks.get("paths") if isinstance(hooks.get("paths"), dict) else {}
+        project_ext = str(paths.get("projectExt") or DEFAULT_PROJECT_EXT).strip().rstrip("/")
+        if not (self.root / project_ext).is_dir():
+            problems.append(f"paths.projectExt 目录不存在：{project_ext}/")
+        # 角色文件正文由项目自维护：引用配置路径或默认 project-ext 路径都要求目录存在
+        ext_tokens = sorted({f"{project_ext}/", f"{DEFAULT_PROJECT_EXT}/"})
+        for entry in self.role_entries():
+            text = read_text(entry["path"]) or ""
+            rel = entry["path"].relative_to(self.root).as_posix()
+            for token in ext_tokens:
+                if token in text and not (self.root / token).is_dir():
+                    problems.append(f"{rel} 正文引用 {token}，但目录不存在")
         role_ext = ((config.get("hooks") or {}).get("roleExt")
                     if isinstance(config.get("hooks"), dict) else None)
         if isinstance(role_ext, dict):
@@ -731,9 +836,15 @@ class Doctor:
                 if not (self.root / str(rel)).is_file():
                     problems.append(f"roleExt 文件不存在：{rel}")
         if problems:
-            next_step = "init --refresh-block --confirm" if any("stale" in item for item in problems) else ""
+            next_steps: list[str] = []
+            if any("stale" in item for item in problems):
+                next_steps.append("init --refresh-block --confirm")
+            if any("正文引用" in item for item in problems):
+                next_steps.append("修正指针或运行 python3 scripts/init.py --yes")
+            elif any("目录不存在" in item for item in problems):
+                next_steps.append("python3 scripts/init.py --yes")
             return Result("docs.pointers", "fail", "；".join(problems[:20]),
-                          evidence={"count": len(problems)}, next=next_step)
+                          evidence={"count": len(problems)}, next="；".join(next_steps))
         return Result("docs.pointers", "pass", f"扫描 {len(files)} 个项目文件，无残留 token/断链")
 
     def check_docs_duplicate(self) -> Result:
@@ -750,6 +861,11 @@ class Doctor:
         if ext_dir and (self.root / str(ext_dir)).is_dir():
             files.extend(sorted((self.root / str(ext_dir)).glob("*.md")))
         files.extend(entry["path"] for entry in self.role_entries())
+        docs_dir = self.root / "docs"
+        if docs_dir.is_dir():
+            for path in sorted(docs_dir.rglob("*.md")):
+                if ORCH_DOC_NAME_RE.search(path.name) and path not in files:
+                    files.append(path)
         occurrences: dict[str, list[str]] = {}
         for path in files:
             rel = path.relative_to(self.root).as_posix()
@@ -1853,7 +1969,7 @@ def _pid_alive(pid: int) -> bool:
 CHECKS = [
     "manifest.schema", "manifest.hash.file", "manifest.hash.block", "manifest.config",
     "manifest.roleStubs", "manifest.orphan",
-    "agents.markers", "agents.block", "agents.duplicate", "agents.pending",
+    "agents.markers", "agents.block", "agents.budget", "agents.duplicate", "agents.pending",
     "docs.duplicate", "docs.pointers", "skill.source", "docs.links",
     "config.schema", "config.paths", "config.identity",
     "role.frontmatter", "role.descriptor", "role.capability", "role.inherit",
@@ -1875,6 +1991,7 @@ METHODS = {
     "manifest.orphan": "check_manifest_orphan",
     "agents.markers": "check_agents_markers",
     "agents.block": "check_agents_block",
+    "agents.budget": "check_agents_budget",
     "agents.duplicate": "check_agents_duplicate",
     "agents.pending": "check_agents_pending",
     "docs.duplicate": "check_docs_duplicate",

@@ -2,8 +2,8 @@
 """plan-status.py 交接瘦身用例（2.2.7 工单 01 A/B）。
 
 覆盖：
-A. --handover：≤40 行、区块齐全（Goal/Next Step/活跃流/待 Captain/最近 3 条 progress/
-   最近 3 条完成/证据入口/看板新鲜）、只读尾部、零写入、空仓降级、超量截断仍 ≤40。
+A. --handover：≤40 行、区块齐全（Goal/Next Step/活跃流/待 Captain/顶部最新 3 条 progress/
+   最近 3 条完成/证据入口/看板新鲜）、只读头部、零写入、空仓降级、超量截断仍 ≤40。
 B. --rotate：默认 dry-run 零写入；--apply 保留最近 N 条 + 尾部非条目区块、归档头字段、
    指针、守恒、幂等、flock 冲突 rc=2、rename 失败 live 不变且临时文件清理、N<1 rc=1。
 C. --write：progress ≥40960 字节或 ≥100 条时 stderr 告警「建议交接时 --rotate」，
@@ -150,14 +150,16 @@ class HandoverTest(_TmpRepoTest):
         # 待 Captain（C 行）与普通 T 行不混入
         self.assertIn("C01", out)
         self.assertNotIn("T01", out)
-        # 最近 3 条 progress：按块取尾部，续行并入条目行，旧条目不出现
+        # 最近 3 条 progress：取 `## 自动驾驶里程` 顶部最新 3 条（progress 倒序），
+        # 续行并入条目行，尾部旧条目不出现
         recent = out.split("## 最近 progress", 1)[1].split("## 最近完成", 1)[0]
+        self.assertIn("条目 001", recent)
+        self.assertIn("条目 002", recent)
         self.assertIn("条目 003", recent)
-        self.assertIn("续行三甲", recent)
-        self.assertIn("条目 005", recent)
-        self.assertNotIn("条目 001", recent)
-        self.assertNotIn("条目 002", recent)
+        self.assertNotIn("条目 004", recent)
+        self.assertNotIn("条目 005", recent)
         joined = next(l for l in recent.splitlines() if "条目 003" in l)
+        self.assertIn("续行三甲", recent)
         self.assertIn("续行三乙", joined)  # 续行碎片不单独成行
         # 最近 3 条完成（节内前 3 条，第 4 条不出现；标题口径「最近 3 条」）
         self.assertIn("## 最近完成（最近 3 条）", out)
@@ -208,22 +210,23 @@ class HandoverTest(_TmpRepoTest):
         self.assertIn("过期", out)  # 看板不存在
         self.assertLessEqual(len(out.splitlines()), ps.HANDOVER_MAX_LINES)
 
-    def test_reads_progress_tail_only(self):
+    def test_reads_progress_head_only(self):
         entries = numbered_entries(300, extra="·" * 100)
-        entries[0] = ("2026-11-01", "最早条目-只读尾部标记-EARLY")
+        entries[0] = ("2026-11-01", "最早条目-只读头部标记-EARLY")
         entries[-1] = ("2026-11-28", "最新条目-LATEST")
         repo = self._repo(progress_body(entries))
         self.assertGreater((repo / ".planning/portfolio/progress.md").stat().st_size,
                            ps.PROGRESS_TAIL_BYTES)
         rc, out, _err = self._run(repo)
         self.assertEqual(rc, 0)
-        self.assertIn("最新条目-LATEST", out)
-        self.assertNotIn("EARLY", out)
+        # 顶部条目读得到；尾部条目不在最近 3 条内
+        self.assertIn("EARLY", out)
+        self.assertNotIn("LATEST", out)
         self.assertLessEqual(len(out.splitlines()), ps.HANDOVER_MAX_LINES)
 
-    def test_recent_progress_window_expands_for_huge_last_entry(self):
+    def test_recent_progress_window_expands_for_huge_first_entry(self):
         entries = numbered_entries(4)
-        entries[-1] = ("2026-11-04", "条目 004 超长" + "长" * 20000)
+        entries[0] = ("2026-11-01", "条目 001 超长" + "长" * 20000)
         repo = self._repo(progress_body(entries))
         self.assertGreater((repo / ".planning/portfolio/progress.md").stat().st_size,
                            ps.PROGRESS_TAIL_BYTES)
@@ -231,9 +234,43 @@ class HandoverTest(_TmpRepoTest):
         self.assertEqual(rc, 0)
         self.assertLessEqual(len(out.splitlines()), ps.HANDOVER_MAX_LINES)
         recent = out.split("## 最近 progress", 1)[1].split("## 最近完成", 1)[0]
-        for needle in ("条目 002", "条目 003", "条目 004"):
+        for needle in ("条目 001", "条目 002", "条目 003"):
             self.assertIn(needle, recent)
-        self.assertNotIn("条目 001", recent)
+        self.assertNotIn("条目 004", recent)
+
+    def test_recent_progress_window_expands_for_cross_boundary_continuation(self):
+        # S3：头部恰 3 条、第 3 条续行跨 16KB 窗口边界 → 扩容重读，续行尾部不丢
+        entries = numbered_entries(2)
+        entries.append(("2026-11-03", "条目 003 跨边界\n  " + "续" * 6000 + "续行尾-TAIL-MARK"))
+        repo = self._repo(progress_body(entries))
+        self.assertGreater((repo / ".planning/portfolio/progress.md").stat().st_size,
+                           ps.PROGRESS_TAIL_BYTES)
+        rc, out, _err = self._run(repo)
+        self.assertEqual(rc, 0)
+        self.assertLessEqual(len(out.splitlines()), ps.HANDOVER_MAX_LINES)
+        recent = out.split("## 最近 progress", 1)[1].split("## 最近完成", 1)[0]
+        for needle in ("条目 001", "条目 002", "条目 003", "续行尾-TAIL-MARK"):
+            self.assertIn(needle, recent)
+
+    def test_fallback_top_entries_stop_at_heading(self):
+        # 无 `## 自动驾驶里程` 节：按日期前缀全文件兜底取顶部 3 条；
+        # 兜底遇下一个 `## ` 标题停止，后续 digest 日期行不计入
+        progress = (
+            "# Progress\n\n"
+            "- 2026-11-01 兜底甲\n  续行甲\n"
+            "- 2026-11-02 兜底乙\n"
+            "- 2026-11-03 兜底丙\n"
+            "- 2026-11-04 兜底丁\n"
+            "\n## 交接 digest\n\n- 2026-12-31 DIGEST-DATE\n"
+        )
+        repo = self._repo(progress)
+        rc, out, _err = self._run(repo)
+        self.assertEqual(rc, 0)
+        recent = out.split("## 最近 progress", 1)[1].split("## 最近完成", 1)[0]
+        for needle in ("兜底甲", "兜底乙", "兜底丙", "续行甲"):
+            self.assertIn(needle, recent)
+        self.assertNotIn("兜底丁", recent)
+        self.assertNotIn("DIGEST-DATE", recent)
 
     def test_digest_date_line_in_tail_not_counted_as_progress(self):
         entries = numbered_entries(100, extra="·" * 200)
@@ -245,7 +282,7 @@ class HandoverTest(_TmpRepoTest):
         rc, out, _err = self._run(repo)
         self.assertEqual(rc, 0)
         recent = out.split("## 最近 progress", 1)[1].split("## 最近完成", 1)[0]
-        self.assertIn("条目 100", recent)
+        self.assertIn("条目 001", recent)
         self.assertNotIn("DIGEST-DATE", recent)
         self.assertNotIn("DIGEST-DATE", out)
         out_s, err_s = io.StringIO(), io.StringIO()

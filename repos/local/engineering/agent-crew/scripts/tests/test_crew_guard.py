@@ -992,6 +992,7 @@ class LockAndOutputTest(GuardTestBase):
             "blockedGraceMinutes",
             "R6",
             "不自动关闭",
+            "rework",
         ):
             self.assertIn(token, text)
 
@@ -2402,6 +2403,96 @@ class PlanStatusArgsTest(GuardTestBase):
         argv = run.call_args[0][0]
         self.assertEqual(["--write"], argv[2:3])
         self.assertEqual("--root", argv[3])
+
+
+class ReworkReminderTest(GuardTestBase):
+    """T24/FB-020：同一 task 回执 ≥3 的非阻断提醒（不叫醒、不改 plan、不删回执）。"""
+
+    def write_receipts(self, task: str | None, count: int, prefix: str = "r") -> None:
+        for index in range(count):
+            data = {"receipt_id": f"{prefix}{index}"}
+            if task is not None:
+                data["task"] = task
+            write_file(self.crew / "inbox" / f"{prefix}{index}.json",
+                       json.dumps(data, ensure_ascii=False))
+
+    def rework_logs(self) -> list[str]:
+        return [log for log in self.logs if "返工提醒" in log]
+
+    def test_two_receipts_do_not_remind(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.write_receipts("T22", 2)
+        result = self.make_guard().run_once()
+        self.assertEqual([], result["rework"])
+        self.assertEqual([], self.rework_logs())
+        self.assertEqual([], self.prompt_calls)
+
+    def test_three_receipts_remind_once_without_wake(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.write_receipts("T22", 3)
+        self.write_receipts("T23", 1, prefix="other")
+        guard = self.make_guard()
+        result = guard.run_once()
+        self.assertEqual([{"task": "T22", "receipts": 3}], result["rework"])
+        self.assertEqual([], self.prompt_calls)
+        self.assertFalse(result["woke"])
+        logs = self.rework_logs()
+        self.assertEqual(1, len(logs), logs)
+        self.assertIn("task=T22", logs[0])
+        self.assertIn("回执 3 条", logs[0])
+        self.assertIn("rework-reset", logs[0])
+        self.assertIn("需人签", logs[0])
+
+        # 同一进程下一轮：JSON 仍报告，但日志不重复
+        result = guard.run_once()
+        self.assertEqual([{"task": "T22", "receipts": 3}], result["rework"])
+        self.assertEqual(1, len(self.rework_logs()))
+
+    def test_invalid_json_and_missing_task_ignored(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.write_receipts("T22", 2)
+        write_file(self.crew / "inbox" / "broken.json", "{not json")
+        self.write_receipts(None, 3, prefix="notask")
+        result = self.make_guard().run_once()
+        self.assertEqual([], result["rework"])
+
+    def test_duplicate_receipt_id_counted_once(self):
+        # S4：按 receipt_id 去重（R3），重复投递/复制不得触发返工提醒
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        for index in range(3):
+            write_file(self.crew / "inbox" / f"dup{index}.json",
+                       json.dumps({"receipt_id": "SAME-ID", "task": "T-X"}))
+        result = self.make_guard().run_once()
+        self.assertEqual([], result["rework"])
+        self.assertEqual([], self.rework_logs())
+
+    def test_missing_receipt_id_falls_back_to_filename(self):
+        # S4：receipt_id 缺失时回退文件名去重
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        for index in range(3):
+            write_file(self.crew / "inbox" / f"noid{index}.json",
+                       json.dumps({"task": "T-X"}))
+        result = self.make_guard().run_once()
+        self.assertEqual([{"task": "T-X", "receipts": 3}], result["rework"])
+
+    def test_once_json_reports_rework_and_keeps_receipts(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.write_receipts("T22", 3)
+        before = sorted(p.name for p in (self.crew / "inbox").iterdir())
+        with mock.patch.object(
+            cg, "herdr_agents", return_value=[{"name": "w", "agent_status": "idle"}]
+        ), mock.patch.object(
+            cg, "run_plan_status", return_value=(0, "看板新鲜")
+        ), mock.patch.object(cg, "herdr_prompt"), mock.patch.object(cg, "herdr_notify"):
+            code, out, err = self.run_main(
+                ["--once", "--json", "--root", str(self.root),
+                 "--crew-dir", str(self.crew), "--helm", "helm-1"]
+            )
+        self.assertEqual(0, code, err)
+        payload = json.loads(out)
+        self.assertEqual([{"task": "T22", "receipts": 3}], payload["rework"])
+        self.assertEqual(before,
+                         sorted(p.name for p in (self.crew / "inbox").iterdir()))
 
 
 if __name__ == "__main__":

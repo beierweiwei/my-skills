@@ -241,7 +241,7 @@ class DoctorRuntimeTest(unittest.TestCase):
     def test_role_runtime_direct_ignores_unscoped_docs(self):
         for rel, command in (
             ("docs/编排系统.md", "herdr agent start foo"),
-            ("docs/业务落地方案/需求0/需求.md", "herdr tab create foo"),
+            ("docs/某方案/需求0/需求.md", "herdr tab create foo"),
             ("docs/crew/只读示例.md", "herdr agent list"),
         ):
             path = self.fx.root / rel

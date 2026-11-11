@@ -95,7 +95,7 @@ HANDOVER_MAX_STREAMS = 8
 HANDOVER_MAX_CAPTAIN = 8
 HANDOVER_RECENT = 3
 PROGRESS_TAIL_BYTES = 16384
-PROGRESS_RECENT_WINDOWS = (PROGRESS_TAIL_BYTES, 65536, None)  # 尾窗不足 3 条时逐级扩大
+PROGRESS_RECENT_WINDOWS = (PROGRESS_TAIL_BYTES, 65536, None)  # 头窗不足 3 条时逐级扩大
 PROGRESS_SECTION = "自动驾驶里程"
 PROGRESS_ENTRY_RE = re.compile(r"^- \d{4}-\d{2}-\d{2}")
 PROGRESS_WARN_BYTES = 40960
@@ -489,16 +489,14 @@ def _entry_blocks(lines: list[str], *, fallback_stops_at_heading: bool = False
     return blocks, not has_section
 
 
-def _read_tail(path: Path, max_bytes: int = PROGRESS_TAIL_BYTES) -> str:
-    """只读文件尾部 max_bytes（大文件禁止整读）；start>0 时丢弃首个不完整行。"""
+def _read_head(path: Path, max_bytes: int = PROGRESS_TAIL_BYTES) -> str:
+    """只读文件头部 max_bytes（大文件禁止整读）；截断处丢弃最后一个不完整行。"""
     with open(path, "rb") as fh:
-        fh.seek(0, 2)
-        start = max(0, fh.tell() - max_bytes)
-        fh.seek(start)
-        data = fh.read()
-    if start > 0:
-        newline = data.find(b"\n")
-        data = data[newline + 1:] if newline >= 0 else b""
+        data = fh.read(max_bytes)
+    if len(data) < max_bytes:
+        return data.decode("utf-8", errors="replace")
+    newline = data.rfind(b"\n")
+    data = data[:newline + 1] if newline >= 0 else b""
     return data.decode("utf-8", errors="replace")
 
 
@@ -507,8 +505,9 @@ def _one_line(lines: list[str]) -> str:
 
 
 def _recent_progress(path: Path, count: int = HANDOVER_RECENT) -> list[str]:
-    """最近 count 个 progress 条目块，每块压成一行（续行并入条目行，不输出碎片）。
-    尾部 16KB 内条目块不足 count（如最后一条超长）时，扩到 64KB 再退全文。"""
+    """`## 自动驾驶里程` 节顶部最新 count 个条目块（progress 倒序，最新在顶部），
+    每块压成一行（续行并入条目行，不输出碎片）。头部 16KB 内条目块不足 count
+    （如首条超长/多条续行）时，扩到 64KB 再退全文，保证顶部条目读得到。"""
     if not path.is_file():
         return ["无（progress 缺失）"]
     lines: list[str] = []
@@ -517,13 +516,19 @@ def _recent_progress(path: Path, count: int = HANDOVER_RECENT) -> list[str]:
         if window is None:
             lines = path.read_text(encoding="utf-8").splitlines()
         else:
-            lines = _read_tail(path, window).splitlines()
+            lines = _read_head(path, window).splitlines()
         blocks, _fallback = _entry_blocks(lines, fallback_stops_at_heading=True)
         if len(blocks) >= count:
-            break
-    picked = blocks[-count:] if count > 0 else []
-    out = [" ".join(part.strip() for part in lines[s:e] if part.strip()) for s, e in picked]
-    return list(reversed(out)) or ["无"]
+            # 第 count 条续行触及窗口末尾时先扩容重读，避免续行被静默截断
+            truncated = (count > 0 and window is not None
+                         and blocks[count - 1][1] >= len(lines)
+                         and path.stat().st_size > window)
+            if not truncated:
+                break
+    picked = blocks[:count] if count > 0 else []
+    out = [" ".join(part.strip() for part in lines[s:e] if part.strip())
+           for s, e in picked]
+    return out or ["无"]
 
 
 def _fresh_state(root: Path, cfg: dict, plans: list[Plan]) -> str:
@@ -583,7 +588,7 @@ def handover(root: Path, cfg: dict, plans: list[Plan]) -> int:
     out += ["## Next Step", _one_line(portfolio.sections.get("Next Step", [])) if portfolio else "—"]
     out += ["## 活跃流"] + (active or ["- 无"])
     out += ["## 待 Captain"] + (captain or ["无"])
-    out += ["## 最近 progress（尾 3 条）"] + _recent_progress(_progress_path(root, cfg))
+    out += ["## 最近 progress（顶部最新 3 条）"] + _recent_progress(_progress_path(root, cfg))
     out += ["## 最近完成（最近 3 条）"] + (recent_done[:HANDOVER_RECENT] or ["—"])
     out += [
         "## 证据入口",

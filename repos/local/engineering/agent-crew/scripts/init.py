@@ -51,7 +51,7 @@ TEMPLATES = SKILL_DIR / "templates"
 MARK_START = "<!-- agent-crew:orchestration:start -->"
 MARK_END = "<!-- agent-crew:orchestration:end -->"
 MARK_PREFIX = "<!-- agent-crew:orchestration:"
-SKILL_VERSION_FALLBACK = "2.2.11"
+SKILL_VERSION_FALLBACK = "2.2.12"
 
 CONFIG_REL = Path(".planning/orchestration.json")
 MANIFEST_REL = Path("docs/crew/manifest.json")
@@ -141,7 +141,6 @@ DEFAULT_CONFIG: dict = {
         "验收效果最终确认",
     ],
     "redLines": [
-        "业务实现与平台通用能力分层（业务代码不进平台，能力以外部服务承接）",
         "原始数据不全量读取，只读必要列/行",
         "真实数据验收，模拟/夹具只用于开发测试，不伪造证据",
     ],
@@ -1291,6 +1290,12 @@ def _generate_skeletons(root: Path, templates: Path, cfg: dict, ctx: dict) -> di
     if playbooks_readme.exists():
         products[Path(".planning/playbooks/README.md")] = apply_template(
             playbooks_readme.read_text(encoding="utf-8"), ctx)
+    project_ext_rel = Path(str((cfg.get("hooks") or {}).get("paths", {}).get("projectExt")
+                              or "docs/crew/project-ext"))
+    project_ext_tpl = templates / "project" / "project-ext.md"
+    if project_ext_tpl.exists():
+        products[project_ext_rel / "project-ext.md"] = apply_template(
+            project_ext_tpl.read_text(encoding="utf-8"), ctx)
     return products
 
 

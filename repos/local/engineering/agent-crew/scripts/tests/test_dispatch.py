@@ -747,7 +747,8 @@ class DispatchTest(unittest.TestCase):
 
 
 class NotifyCommandTest(unittest.TestCase):
-    """FB-012：notify 只 herdr agent prompt，不查/不写注册表，不碰 pane/tab。"""
+    """T22/FB-012/FB-015：notify 只 herdr agent prompt，不查/不写注册表，不碰 pane/tab；
+    --workspace+--role 按角色命名约定与代际解析当前活跃 agent。"""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -756,9 +757,12 @@ class NotifyCommandTest(unittest.TestCase):
         self.root.mkdir()
         subprocess.run(["git", "init", "-q", str(self.root)], check=True)
         self.calls: list[list[str]] = []
+        self.agents: list[dict] = []
 
     def fake_herdr(self, argv: list[str]) -> str:
         self.calls.append(list(argv))
+        if argv[:3] == ["herdr", "agent", "list"]:
+            return json.dumps({"result": {"agents": self.agents}})
         return ""
 
     def dispatch_main(self, *args: str) -> tuple[int, str]:
@@ -775,21 +779,30 @@ class NotifyCommandTest(unittest.TestCase):
         return [json.loads(line) for line in
                 path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
+    def prompt_calls(self) -> list[list[str]]:
+        return [call for call in self.calls if call[:3] == ["herdr", "agent", "prompt"]]
+
     def test_unregistered_agent_notified_via_herdr_prompt_only(self):
         registry = dispatch_mod.registry_path(self.root)
         self.assertFalse(registry.exists())
         code, out = self.dispatch_main(
-            "notify", "--agent", "case-helm", "--message", "2.2.11 已发布", "--json")
+            "notify", "--agent", "case-agent", "--message", "2.2.11 已发布", "--json")
         self.assertEqual(0, code)
         self.assertEqual(
-            [["herdr", "agent", "prompt", "case-helm", "2.2.11 已发布"]], self.calls)
+            [["herdr", "agent", "prompt", "case-agent",
+              "2.2.11 已发布\n" + dispatch_mod.RECEIPT_LINE]], self.calls)
         self.assertFalse(registry.exists())
         row = self.agent_log()[-1]
         self.assertEqual("notify", row["action"])
-        self.assertEqual("case-helm", row["agent"])
+        self.assertEqual("case-agent", row["agent"])
+        self.assertEqual("case-agent", row["target"])
+        self.assertEqual("literal", row["delivery"])
+        self.assertTrue(row["receipt_required"])
         self.assertEqual("ok", row["result"])
         self.assertIn("ts", row)
-        self.assertEqual({"agent": "case-helm", "result": "ok"}, json.loads(out))
+        self.assertEqual(
+            {"agent": "case-agent", "target": "case-agent", "delivery": "literal",
+             "receipt_required": True, "result": "ok"}, json.loads(out))
 
     def test_existing_registry_is_left_untouched(self):
         registry = dispatch_mod.registry_path(self.root)
@@ -799,18 +812,164 @@ class NotifyCommandTest(unittest.TestCase):
             encoding="utf-8")
         before = registry.read_bytes()
         code, _ = self.dispatch_main(
-            "notify", "--agent", "case-helm", "--message", "ping")
+            "notify", "--agent", "case-agent", "--message", "ping", "--no-require-receipt")
         self.assertEqual(0, code)
         self.assertEqual(before, registry.read_bytes())
         self.assertEqual(
-            [["herdr", "agent", "prompt", "case-helm", "ping"]], self.calls)
+            [["herdr", "agent", "prompt", "case-agent", "ping"]], self.calls)
 
     def test_cli_description_lists_notify(self):
         parser = dispatch_mod.build_parser()
         self.assertIn(
             "compose/start/prompt/close/notify/status/list/tab/pane",
             parser.description)
+        notify_parser = parser._subparsers._group_actions[0].choices["notify"]
+        help_text = notify_parser.format_help()
         self.assertIn("notify", parser.format_help())
+        self.assertIn("--workspace", help_text)
+        self.assertIn("--no-require-receipt", help_text)
+        self.assertIn("helm 按代际解析", help_text)
+        self.assertIn("其他角色要求唯一匹配", help_text)
+        self.assertIn("多实例用", help_text)
+
+    def test_receipt_line_default_and_opt_out(self):
+        code, _ = self.dispatch_main(
+            "notify", "--agent", "case-agent", "--message", "默认", "--json")
+        self.assertEqual(0, code)
+        self.assertEqual("默认\n" + dispatch_mod.RECEIPT_LINE,
+                         self.calls[-1][-1])
+
+        code, _ = self.dispatch_main(
+            "notify", "--agent", "case-agent", "--message", "关闭",
+            "--no-require-receipt", "--json")
+        self.assertEqual(0, code)
+        self.assertEqual("关闭", self.calls[-1][-1])
+        self.assertFalse(self.agent_log()[-1]["receipt_required"])
+
+    def test_workspace_role_picks_latest_active_generation(self):
+        self.agents = [
+            {"name": "helm-x-2", "workspace_id": "w1", "agent_status": "done"},
+            {"name": "helm-x-3", "workspace_id": "w1", "agent_status": "idle"},
+            {"name": "worker", "workspace_id": "w1", "agent_status": "working"},
+        ]
+        code, out = self.dispatch_main(
+            "notify", "--workspace", "w1", "--role", "helm",
+            "--message", "请接管", "--no-require-receipt", "--json")
+        self.assertEqual(0, code)
+        self.assertEqual(
+            [["herdr", "agent", "list"],
+             ["herdr", "agent", "prompt", "helm-x-3", "请接管"]], self.calls)
+        payload = json.loads(out)
+        self.assertEqual("resolved", payload["delivery"])
+        self.assertEqual("helm-x-3", payload["target"])
+        row = self.agent_log()[-1]
+        self.assertEqual("resolved", row["delivery"])
+        self.assertEqual("helm-x-3", row["target"])
+        self.assertEqual("helm", row["role"])
+
+    def test_other_workspace_agents_excluded(self):
+        self.agents = [
+            {"name": "proj-helm-9", "workspace_id": "w2", "agent_status": "idle"},
+            {"name": "proj-helm-4", "workspace_id": "w1", "agent_status": "idle"},
+        ]
+        code, _ = self.dispatch_main(
+            "notify", "--workspace", "w1", "--role", "helm",
+            "--message", "hi", "--no-require-receipt", "--json")
+        self.assertEqual(0, code)
+        self.assertEqual([["herdr", "agent", "prompt", "proj-helm-4", "hi"]],
+                         self.prompt_calls())
+
+    def test_latest_generation_done_fails_without_prompt(self):
+        self.agents = [
+            {"name": "helm-x-3", "workspace_id": "w1", "agent_status": "unknown"},
+            {"name": "helm-x-2", "workspace_id": "w1", "agent_status": "idle"},
+        ]
+        code, _ = self.dispatch_main(
+            "notify", "--workspace", "w1", "--role", "helm",
+            "--message", "hi", "--no-require-receipt", "--json")
+        self.assertEqual(1, code)
+        self.assertEqual([], self.prompt_calls())
+        self.assertEqual([], self.agent_log())
+
+    def test_no_candidates_fails(self):
+        self.agents = [
+            {"name": "worker", "workspace_id": "w1", "agent_status": "idle"}]
+        code, _ = self.dispatch_main(
+            "notify", "--workspace", "w1", "--role", "helm",
+            "--message", "hi", "--no-require-receipt", "--json")
+        self.assertEqual(1, code)
+        self.assertEqual([], self.prompt_calls())
+
+    def test_helm_with_multiple_workspaces_requires_explicit_workspace(self):
+        self.agents = [
+            {"name": "helm-a-1", "workspace_id": "w1", "agent_status": "idle"},
+            {"name": "helm-b-1", "workspace_id": "w2", "agent_status": "idle"},
+        ]
+        code, _ = self.dispatch_main(
+            "notify", "--role", "helm", "--message", "hi", "--json")
+        self.assertEqual(1, code)
+        self.assertEqual([], self.prompt_calls())
+
+    def test_workspace_without_role_rejected(self):
+        code, _ = self.dispatch_main(
+            "notify", "--workspace", "w1", "--message", "hi", "--json")
+        self.assertEqual(1, code)
+        self.assertEqual([], self.calls)
+
+    def test_non_helm_multiple_instances_rejected(self):
+        # S1：非 helm 角色不做代际挑选；同 workspace 多匹配 → rc=1 列候选
+        self.agents = [
+            {"name": "req2-main-firstmate-3", "workspace_id": "wQ", "agent_status": "working"},
+            {"name": "skill-pilot-firstmate", "workspace_id": "wQ", "agent_status": "working"},
+        ]
+        code, _ = self.dispatch_main(
+            "notify", "--workspace", "wQ", "--role", "firstmate",
+            "--message", "hi", "--no-require-receipt")
+        self.assertEqual(1, code)
+        self.assertEqual([], self.prompt_calls())
+        with self.assertRaises(dispatch_mod.DispatchError) as ctx:
+            dispatch_mod.resolve_notify_target(self.agents, "wQ", "firstmate")
+        message = str(ctx.exception)
+        self.assertIn("req2-main-firstmate-3", message)
+        self.assertIn("skill-pilot-firstmate", message)
+        self.assertIn("--agent", message)
+
+    def test_non_helm_unique_match_resolves(self):
+        self.agents = [
+            {"name": "req2-main-firstmate-3", "workspace_id": "wQ", "agent_status": "working"},
+            {"name": "skill-pilot-firstmate", "workspace_id": "w1", "agent_status": "working"},
+        ]
+        code, _ = self.dispatch_main(
+            "notify", "--workspace", "wQ", "--role", "firstmate",
+            "--message", "hi", "--no-require-receipt")
+        self.assertEqual(0, code)
+        self.assertEqual(
+            [["herdr", "agent", "prompt", "req2-main-firstmate-3", "hi"]],
+            self.prompt_calls())
+
+    def test_latest_generation_blocked_rejected(self):
+        # S2：最新代际 blocked → rc=1，herdr prompt 不调用
+        self.agents = [
+            {"name": "helm-x-4", "workspace_id": "w1", "agent_status": "blocked"},
+        ]
+        code, _ = self.dispatch_main(
+            "notify", "--workspace", "w1", "--role", "helm",
+            "--message", "hi", "--no-require-receipt")
+        self.assertEqual(1, code)
+        self.assertEqual([], self.prompt_calls())
+        with self.assertRaises(dispatch_mod.DispatchError) as ctx:
+            dispatch_mod.resolve_notify_target(self.agents, "w1", "helm")
+        self.assertIn("blocked", str(ctx.exception))
+        self.assertIn("herdr 会拒绝投递", str(ctx.exception))
+
+    def test_receipt_line_not_duplicated(self):
+        # S6：消息已以回执行结尾时不重复追加
+        code, _ = self.dispatch_main(
+            "notify", "--agent", "case-agent",
+            "--message", "已处理\n" + dispatch_mod.RECEIPT_LINE, "--json")
+        self.assertEqual(0, code)
+        sent = self.calls[-1][-1]
+        self.assertEqual(1, sent.count(dispatch_mod.RECEIPT_LINE))
 
 
 if __name__ == "__main__":
