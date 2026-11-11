@@ -98,6 +98,29 @@ class InitV21Test(unittest.TestCase):
             self.assertIn(key, cfg)
         self.assertTrue((self.root / "docs/orchestration/topology.md").is_file())
 
+    def test_project_ext_dir_and_doc_created(self):
+        # FB-018：首次安装创建 docs/crew/project-ext/ 并渲染说明文件
+        code, _ = self.run_init("--yes")
+        self.assertEqual(code, 0)
+        doc = self.root / "docs/crew/project-ext/project-ext.md"
+        self.assertTrue(doc.is_file())
+        text = doc.read_text(encoding="utf-8")
+        self.assertIn("项目角色扩展片段", text)
+        self.assertNotIn("{{skill_root}}", text)
+        self.assertEqual(self.doctor("docs.pointers").returncode, 0)
+
+    def test_project_ext_existing_content_not_overwritten(self):
+        ext_dir = self.root / "docs/crew/project-ext"
+        ext_dir.mkdir(parents=True)
+        (ext_dir / "builder.md").write_text("# 项目自有扩展\n", encoding="utf-8")
+        (ext_dir / "project-ext.md").write_text("# 项目自有说明\n", encoding="utf-8")
+        code, _ = self.run_init("--yes")
+        self.assertEqual(code, 0)
+        self.assertEqual("# 项目自有扩展\n",
+                         (ext_dir / "builder.md").read_text(encoding="utf-8"))
+        self.assertEqual("# 项目自有说明\n",
+                         (ext_dir / "project-ext.md").read_text(encoding="utf-8"))
+
     def test_second_run_idempotent_except_install_log(self):
         self.assertEqual(self.run_init("--yes")[0], 0)
         before = snapshot(self.root, exclude=("docs/crew/install-log.jsonl",))

@@ -16,7 +16,7 @@ guard.wake 首行 `generated_at: <ISO8601 Z>`（兼容旧格式裸 ISO 首行）
 - 已完成 Phase 的残留 `[ ]` 只记日志，不叫醒。
 在跑口径：Herdr agent_status == working，排除总舵自身与 Captain*；blocked 单独叫醒。
 cwd 隔离：只统计 cwd 在本仓或 `git worktree list --porcelain` 列出的 linked worktree
-内的 agent；外部项目（如 CASE）不参与 running/blocked/快速叫醒。cwd 缺失或不可解析时
+内的 agent；外部项目（其他仓）不参与 running/blocked/快速叫醒。cwd 缺失或不可解析时
 沿用旧口径包含（无法确认归属时不改变既有行为）。
 快速叫醒：上一轮有 working、本轮全部转 idle 且有待办时立即叫醒（仍受 10 分钟冷却）。
 blocked 年龄与重复叫醒：按 agent 身份（name，缺省 pane_id）记录首次 blocked 时间；
@@ -36,6 +36,9 @@ guard 不自动关闭/杀 agent；agent 不再 blocked 或消失即清除年龄�
 继续监控继任总舵，不因 done 永久短路。交接启动前先执行
 `plan-status.py --rotate --apply --keep ROTATE_KEEP`（默认 10）归档 progress；
 rotate 失败或异常只写 guard.log 告警，继续原交接流程（不阻断、不回落 split）。
+回执返工提醒：每轮扫描 <crew-dir>/inbox/*.json 中带 `task` 的回执并分组，
+同一 task ≥3 条时写一行 guard.log「返工提醒」（同一进程每 task 只记一次）；
+不叫醒、不改 plan、不阻断、不删回执；--once --json 输出 `rework` 数组。
 
 用法：
   python3 scripts/crew-guard.py                 # 每 120s 一轮
@@ -105,6 +108,8 @@ BLOCKED_MINUTES_MAX = 240
 WAKE_FILE_NAME = "guard.wake"
 DEFAULT_WAKE_TTL_SECONDS = 7200
 WAKE_GENERATED_RE = re.compile(r"^generated_at:\s*(\S+)\s*$")
+# 同一 task 回执达到该数量时写一条非阻断「返工提醒」（不叫醒、不改 plan、不删回执）
+REWORK_RECEIPT_THRESHOLD = 3
 
 
 @dataclass(frozen=True)
@@ -679,6 +684,7 @@ class Guard:
     handoff_failed_noted: bool = field(default=False, init=False)
     handoff_wait_rounds: int = field(default=0, init=False)
     handoff_close_rounds: int = field(default=0, init=False)
+    rework_logged: set[str] = field(default_factory=set, init=False)
     project_roots: set[Path] | None = None
     roots_cache: set[Path] | None = field(default=None, init=False)
 
@@ -696,6 +702,44 @@ class Guard:
 
     def _read_handoff(self) -> dict[str, str]:
         return read_handoff_state(self.crew_dir)
+
+    def _scan_rework(self) -> list[dict]:
+        """统计 <crew-dir>/inbox/*.json 的回执 task；同一 task ≥3 条写一次提醒。
+        回执按 receipt_id 去重（缺失回退文件名，R3）；只读回执，不叫醒、不改 plan、
+        不删文件；同一 guard 进程内每个 task 只记一次日志。"""
+        counts: dict[str, int] = {}
+        seen: set[str] = set()
+        try:
+            paths = sorted((self.crew_dir / "inbox").glob("*.json"))
+        except OSError:
+            paths = []
+        for path in paths:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            receipt_id = data.get("receipt_id")
+            receipt_key = (receipt_id.strip()
+                           if isinstance(receipt_id, str) and receipt_id.strip() else path.name)
+            if receipt_key in seen:
+                continue
+            seen.add(receipt_key)
+            task = data.get("task")
+            if isinstance(task, str) and task.strip():
+                task_key = task.strip()
+                counts[task_key] = counts.get(task_key, 0) + 1
+        rework = [{"task": task, "receipts": count}
+                  for task, count in sorted(counts.items())
+                  if count >= REWORK_RECEIPT_THRESHOLD]
+        for row in rework:
+            if row["task"] in self.rework_logged:
+                continue
+            self.rework_logged.add(row["task"])
+            self.log(f"返工提醒：task={row['task']} 回执 {row['receipts']} 条，"
+                     "建议评估是否触发 rework-reset（需人签）")
+        return rework
 
     def _write_handoff(self, **updates: object) -> None:
         fields = self._read_handoff()
@@ -1404,6 +1448,7 @@ class Guard:
 
     def run_once(self) -> dict:
         now = self.clock()
+        rework = self._scan_rework()
         self._consume_stale_wake(now)
         self._periodic_write(now)
 
@@ -1411,7 +1456,7 @@ class Guard:
             agents = self.list_agents()
         except Exception as exc:  # noqa: BLE001 - Herdr 故障时不误判“无在跑”
             self.log(f"herdr agent list 失败：{type(exc).__name__}: {exc}")
-            return {"error": str(exc), "woke": False}
+            return {"error": str(exc), "woke": False, "rework": rework}
 
         workers = [
             agent for agent in agents
@@ -1470,6 +1515,7 @@ class Guard:
             "woke": False,
             "reason": reason,
             "planPath": plan_path,
+            "rework": rework,
             "workers": [
                 {"name": str(agent.get("name") or ""),
                  "status": str(agent.get("agent_status") or "")}
@@ -1610,7 +1656,8 @@ done(result=failed) 不自动重试，人工删除或改写 <crew-dir>/guard.han
     parser.add_argument("--interval", type=int, default=120, help="轮询秒数（默认 120）")
     parser.add_argument("--once", action="store_true", help="只跑一轮（测试/人工抽查）")
     parser.add_argument("--json", action="store_true",
-                        help="配合 --once 输出 JSON（crewDir/planPath/pending/workers/wake/handoff）")
+                        help="配合 --once 输出 JSON"
+                             "（crewDir/planPath/pending/workers/wake/handoff/rework）")
     return parser
 
 
@@ -1649,6 +1696,7 @@ def main(argv: list[str] | None = None) -> int:
                     "workers": result.get("workers", []),
                     "wake": bool(result.get("woke")),
                     "handoff": result.get("handoff", {}),
+                    "rework": result.get("rework", []),
                 }
                 print(json.dumps(payload, ensure_ascii=False))
             return 0

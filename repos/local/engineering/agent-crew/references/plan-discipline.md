@@ -97,7 +97,7 @@
 
 ## 5. plan 归档与写法规约（Captain 2026-11-04）
 
-> 出处：CASE 仓流程审计 `process-review.md` §5 第三步（4 条硬规则）与归档设计稿 `audit.md` §3/§5；适用于所有 plan owner（portfolio＝总舵，各流＝对应 owner）。
+> 出处：某客户仓流程审计 `process-review.md` §5 第三步（4 条硬规则）与归档设计稿 `audit.md` §3/§5；适用于所有 plan owner（portfolio＝总舵，各流＝对应 owner）。
 
 ### 5.1 四条硬规则
 

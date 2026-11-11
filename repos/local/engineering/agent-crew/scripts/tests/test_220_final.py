@@ -175,11 +175,11 @@ class BugRegressionTest(unittest.TestCase):
 
 class VersionTest(unittest.TestCase):
     def test_version_matches_in_three_places(self):
-        self.assertIn("version: 2.2.11", read(SKILL_MD))
-        self.assertIn("v2.2.11", read(SKILL_MD))
-        self.assertIn('SKILL_VERSION_FALLBACK = "2.2.11"', read(INIT))
-        self.assertIn("## 2.2.11", read(CHANGELOG))
-        self.assertIn('"2.2.11"', read(TEST_CREW_LINT))
+        self.assertIn("version: 2.2.12", read(SKILL_MD))
+        self.assertIn("v2.2.12", read(SKILL_MD))
+        self.assertIn('SKILL_VERSION_FALLBACK = "2.2.12"', read(INIT))
+        self.assertIn("## 2.2.12", read(CHANGELOG))
+        self.assertIn('"2.2.12"', read(TEST_CREW_LINT))
 
 
 class BoundaryTest(unittest.TestCase):

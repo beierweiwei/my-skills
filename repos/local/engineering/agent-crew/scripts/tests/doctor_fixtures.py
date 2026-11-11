@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """doctor 测试夹具：临时 skill 源 + 项目仓 + manifest/AGENTS/角色/agent-log。
 
-只用于单测；不触碰 CASE，不写真实项目。
+只用于单测；不触碰真实项目，不写真实项目。
 """
 
 from __future__ import annotations

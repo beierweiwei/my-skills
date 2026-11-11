@@ -10,7 +10,7 @@
 - 验收与呈报：`references/crew-acceptance.md`（A1–A5）。
 - 机制与拓扑：`references/orchestration-guide.md`；plan 纪律与看板：`references/plan-discipline.md`；Herdr 命令速查：`references/herdr-cheatsheet.md`。
 - 角色动作：`.qoder/agents/<role>.md`、`.opencode/agent/<role>.md`（项目自有；`extends: skill:<role>` 继承技能基类，启动时 append-only 组合，权限与 frontmatter 只取基类）。
-- 项目事实：本文件标记外、`{{doc_context}}`、topology（默认 `docs/orchestration/topology.md`，以配置为准）、`docs/crew/project-ext/`。
+- 项目事实：本文件标记外、`{{doc_context}}`、topology（默认 `docs/orchestration/topology.md`，以配置为准）、`docs/crew/project-ext/`（默认路径；以配置 `paths.projectExt` 为准）。
 - 指针形态：AGENTS 只用技能根相对名（如上）；角色文件由组合时注入技能根绝对路径；项目内不存放规则/验收/指南副本。
 
 ### 唯一入口（dispatch）

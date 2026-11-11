@@ -48,6 +48,29 @@ class InitV2Test(unittest.TestCase):
     def run_init(self, *extra: str) -> tuple[int, str]:
         return self.run_init_at(self.root, *extra)
 
+    def test_default_config_and_template_redlines_are_generic(self):
+        # G10/G12：默认红线与模板同步，去掉平台专属项；Captain 决策保留通用 8 项
+        template = json.loads(
+            (init_v2.SKILL_DIR / "templates/project.config.json").read_text(encoding="utf-8"))
+        self.assertEqual(init_v2.DEFAULT_CONFIG["redLines"], template["redLines"])
+        self.assertEqual(2, len(template["redLines"]))
+        self.assertFalse(any("平台通用能力分层" in item for item in template["redLines"]))
+        self.assertEqual([
+            "合并/推送/worktree 清理",
+            "花钱采购",
+            "客户数据与对接人",
+            "法律合规与风险确认",
+            "主数据/架构口径",
+            "范围与验收口径变更",
+            "三道人工门签认",
+            "验收效果最终确认",
+        ], template["captainDecisions"])
+
+        self.run_init("--yes")
+        cfg = json.loads(
+            (self.root / ".planning/orchestration.json").read_text(encoding="utf-8"))
+        self.assertEqual(template["redLines"], cfg["redLines"])
+
     def test_existing_config_values_preserved_version_stamped(self):
         self.assertEqual(self.run_init("--yes")[0], 0)
         cfg_path = self.root / ".planning/orchestration.json"

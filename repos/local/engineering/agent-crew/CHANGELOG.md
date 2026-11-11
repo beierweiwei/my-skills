@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.2.12 — 2026-11-11
+
+2.2.12 小修（T22/T24/T25 + 流程缺口 FB-017–FB-022）与发布。
+
+### 新增
+
+- **T22/FB-015 跨项目通知代际**：`dispatch.py notify` 新增 `--workspace` + `--role`，按 herdr `agent list` 解析该 workspace 内当前最新代际的活跃 helm；目标不唯一/最新代际不可用/无候选时 rc≠0 并给可执行提示，消息自动要求回执；`--agent` 旧用法兼容。`crew-rules.md` 通信段补充代际解析与回执要求。
+- **T22/FB-016 交接摘要取顶部最新 3 条**：`plan-status.py --handover` 的「最近 progress」改取 `## 自动驾驶里程` 节顶部最新 3 条（progress 倒序），条目续行合并，不再取文件尾。
+- **T24/FB-020 返工重置**：新增技能层剧本 `templates/playbooks/rework-reset.md`（停手→根因归类→先补验收→重开需求门→对抗审查/arena→切片→验收门，含退出条件）；`templates/playbooks/README.md` 登记；两 runtime firstmate 选板加「同一功能 ≥3 轮返工」触发；`crew-guard.py` 对同一 task/fix 回执 ≥3 做非阻断提醒（日志 + `--once --json` 的 `rework` 字段，不叫醒、不阻断、不改 plan），重置动作仍需人签。
+- **T25/FB-021 说人话模板**：qoder/opencode 的 helm/firstmate 四份模板面向 Captain 用业务语言三句（结论/进展/需要你），证据路径改「你问再给」；副舵→总舵回执＝首句人话结论 + 技术明细；加正反例与发送前自检。
+- **FB-017 doctor 编排文档重复检查**：`docs.duplicate` 覆盖 docs 下与 AGENTS 同级的编排类文档，扫描清单在代码中明确，无关 docs 不误报。
+- **FB-018 project-ext 指针闭环**：`init.py` 生成 `docs/crew/project-ext/` 目录与说明文件；`doctor.py` 以配置 `paths.projectExt` 为真源做指针存在性检查（含受管块与角色文件），缺失 fail 并给可执行 next。
+- **FB-019/FB-022 firstmate 写权与完成状态**：两 firstmate 模板明确 portfolio 三文件由总舵写、本舵只写流 plan/progress 与证据；完成状态只在证据落盘后写，预写即假完成，收口必核证据文件存在。
+
+### 修复
+
+- **互检修复**：`notify --role` 仅对 helm 做代际解析（多实例角色歧义走 `--agent`）、最新代际 blocked 时拒绝发送、回执要求幂等；`handover` 顶部条目续行跨窗口正确合并；`crew-guard` 回执提醒按 `receipt_id` 去重并补 `--help` 说明。
+- **G1–G12 清理**：默认配置与文档中的客户仓库名、扫码示例、CASE 路径夹具、CASE 平台专属红线清除或泛化；`swap-to-v2.sh` 客户名清零；测试防回退。
+- **project-landing-init 平台名泛化**（my-skills 同批）：`SempClaw`/`SempFlow` 示例改为通用表述。
+
+### 测试
+
+- 新增 `test_2212_patch.py`（模板/剧本/规则 grep 防回退断言）；`test_dispatch.py`、`test_plan_status_handover_rotate.py`、`test_crew_guard.py`、`test_doctor_agents.py`、`test_init*.py` 补 notify 代际/handover 顶部/提醒阈值/docs.duplicate/project-ext 用例。
+- 全量 pytest 0 fail（≥ 2.2.11 基线 672 passed + 184 subtests；本批 714 passed + 225 subtests）；`crew-lint`（含 `--purity`）、技能源与本仓 `plan-status --lint`/`--playbooks` 绿。
+- 版本 2.2.12：`SKILL.md` frontmatter 与标题、`init.py` fallback、`test_crew_lint.py`、`test_220_final.py`、`test_224_retro.py`、`test_225_patch.py` 版本断言同步。
+
+> 注记：历史条目中的 CASE/扫码示例为历史记录保留原文；自 2.2.12 起新文本已按 G2/G6 泛化。
+
 ## 2.2.11 — 2026-11-11
 
 T21 复盘批次（FB-009–FB-014）与发布。

@@ -132,6 +132,92 @@ class DoctorAgentsTest(unittest.TestCase):
         self.assertEqual("fail", item["status"])
         self.assertIn("project-ext", item["detail"])
 
+    def test_docs_duplicate_scans_orchestration_docs(self):
+        # FB-017：docs 下文件名含 编排|orchestration|协作|agents 的文档纳入扫描
+        line = "- 这是一条长度超过三十个字符的编排规则句，用来验证 docs 编排文档重复检测。"
+        self.fx.write_agents(block="## 协作编排\n" + line)
+        doc = self.fx.root / "docs/编排系统.md"
+        doc.write_text("# 编排系统\n\n" + line + "\n", encoding="utf-8")
+        rc, report = self.fx.doctor_json("--only", "docs.duplicate")
+        self.assertEqual(1, rc, report)
+        item = self.fx.item(report, "docs.duplicate")
+        self.assertEqual("fail", item["status"])
+        self.assertIn("docs/编排系统.md", item["detail"])
+
+        # 大小写不敏感的 orchestration 文件名同样命中（详情按出现顺序列出前两处）
+        path = self.fx.root / "docs/ORCHESTRATION-notes.md"
+        path.write_text("# 说明\n\n" + line + "\n", encoding="utf-8")
+        rc, report = self.fx.doctor_json("--only", "docs.duplicate")
+        self.assertEqual(1, rc, report)
+        self.assertIn("docs/ORCHESTRATION-notes.md",
+                      self.fx.item(report, "docs.duplicate")["detail"])
+
+    def test_docs_duplicate_ignores_unrelated_docs(self):
+        line = "- 这是一条长度超过三十个字符的编排规则句，无关文档不应参与重复检测。"
+        self.fx.write_agents(block="## 协作编排\n" + line)
+        doc = self.fx.root / "docs/业务说明.md"
+        doc.write_text("# 业务说明\n\n" + line + "\n", encoding="utf-8")
+        rc, report = self.fx.doctor_json("--only", "docs.duplicate")
+        self.assertEqual(0, rc, report)
+        self.assertEqual("pass", self.fx.item(report, "docs.duplicate")["status"])
+
+    def test_docs_pointers_project_ext_missing_fails_and_restores(self):
+        # FB-018：受管块出现 project-ext 指针且目录不存在 → fail + 可执行 next
+        block = "\n".join([
+            "## 协作编排",
+            "- 项目事实：`CONTEXT.md`、topology、`docs/crew/project-ext/`。",
+            f"- 规则：`{self.fx.skill}/references/crew-rules.md`（D1–D6）。",
+        ])
+        self.fx.write_agents(block=block)
+        self.fx.write_manifest()
+        shutil.rmtree(self.fx.root / "docs/crew/project-ext")
+        rc, report = self.fx.doctor_json("--only", "docs.pointers")
+        self.assertEqual(1, rc, report)
+        item = self.fx.item(report, "docs.pointers")
+        self.assertEqual("fail", item["status"])
+        self.assertIn("docs/crew/project-ext", item["detail"])
+        self.assertIn("不存在", item["detail"])
+        self.assertIn("python3 scripts/init.py --yes", item["next"])
+
+        (self.fx.root / "docs/crew/project-ext").mkdir(parents=True)
+        rc, report = self.fx.doctor_json("--only", "docs.pointers")
+        self.assertEqual(0, rc, report)
+        self.assertEqual("pass", self.fx.item(report, "docs.pointers")["status"])
+
+    def test_docs_pointers_custom_project_ext_passes_with_default_literal(self):
+        # B1 复现 1：自定义 projectExt 存在时，受管块模板默认字面量不假红
+        self.fx.config["hooks"]["paths"]["projectExt"] = "docs/crew/ext"
+        self.fx.write_config()
+        self.fx.write_manifest()
+        shutil.rmtree(self.fx.root / "docs/crew/project-ext")
+        (self.fx.root / "docs/crew/ext").mkdir(parents=True)
+        self.fx.write_agents(block="\n".join([
+            "## 协作编排",
+            f"- 规则：`{self.fx.skill}/references/crew-rules.md`（D1–D6）。",
+            "- 项目事实：`CONTEXT.md`、topology、`docs/crew/project-ext/`。",
+        ]))
+        rc, report = self.fx.doctor_json("--only", "docs.pointers")
+        self.assertEqual(0, rc, report)
+        self.assertEqual("pass", self.fx.item(report, "docs.pointers")["status"])
+
+    def test_docs_pointers_role_file_broken_project_ext_pointer_fails(self):
+        # B1 复现 2：角色文件正文引用不存在的 project-ext 路径 → fail，detail 指文件与路径
+        self.fx.config["hooks"]["paths"]["projectExt"] = "docs/crew/ext"
+        self.fx.write_config()
+        self.fx.write_manifest()
+        (self.fx.root / "docs/crew/ext").mkdir(parents=True)
+        shutil.rmtree(self.fx.root / "docs/crew/project-ext")
+        role = self.fx.role_path("qoder", "builder")
+        role.write_text(role.read_text(encoding="utf-8")
+                        + "\n项目扩展见 `docs/crew/project-ext/`。\n", encoding="utf-8")
+        rc, report = self.fx.doctor_json("--only", "docs.pointers")
+        self.assertEqual(1, rc, report)
+        item = self.fx.item(report, "docs.pointers")
+        self.assertEqual("fail", item["status"])
+        self.assertIn(".qoder/agents/builder.md", item["detail"])
+        self.assertIn("docs/crew/project-ext/", item["detail"])
+        self.assertIn("python3 scripts/init.py --yes", item["next"])
+
 
 class DoctorAgentsBudgetTest(unittest.TestCase):
     """agents.budget：体量非阻断 warn（阈值 20KB / 180 行 / 自有段 65% 且 >16KB）。"""

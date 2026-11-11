@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# agent-crew CASE 替换包（v1 → v2）：默认先备份受管产物，再调用 v2 init.py --force 替换。
+# agent-crew 替换包（v1 → v2）：默认先备份受管产物，再调用 v2 init.py --force 替换。
 # 只覆盖受管路径；项目内非受管文件不删除、不覆盖。失败自动回滚（可用 --no-auto-rollback 关闭）。
 set -euo pipefail
 

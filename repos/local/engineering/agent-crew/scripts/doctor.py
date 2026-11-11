@@ -34,7 +34,7 @@ MARK_END = "<!-- agent-crew:orchestration:end -->"
 BLOCK_LINE_LIMIT = 150
 RESIDUAL_TOKEN_RE = re.compile(r"\{\{[^{}\n]+\}\}")
 # AGENTS 体量非阻断阈值（2.2.12，样本见 evidence/agents-budget-warn.md）：
-# 本仓 14,621B/149 行/自有段 61.5% 不告警；CASE 25,227B/178 行/76.5% 告警。
+# 本仓 14,621B/149 行/自有段 61.5% 不告警；大型项目 25,227B/178 行/76.5% 告警。
 AGENTS_BUDGET_MAX_BYTES = 20 * 1024
 AGENTS_BUDGET_MAX_LINES = 180
 AGENTS_BUDGET_OWNED_RATIO = 0.65
@@ -47,10 +47,14 @@ HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 COPY_BASENAMES = ("crew-rules.md", "crew-acceptance.md",
                   "orchestration-guide.md", "plan-discipline.md")
+# docs.duplicate 扫描清单：AGENTS.md、配置 topology/projectExt、角色文件，以及
+# docs/**/*.md 中文件名匹配 编排|orchestration|协作|agents（大小写不敏感）的编排文档。
+ORCH_DOC_NAME_RE = re.compile(r"(编排|orchestration|协作|agents)", re.IGNORECASE)
 SKILL_POINTER_MARKERS = (
     "references/crew-rules.md", "references/crew-acceptance.md",
     "references/plan-discipline.md", "SKILL.md",
 )
+DEFAULT_PROJECT_EXT = "docs/crew/project-ext"
 SKILL_ROOT_ANCHORS = (".planning/orchestration.json", "skillRoot")
 # 绝对路径形态（家目录/盘符/任意 / 开头路径；URL 的 // 与 :// 不会命中）
 ABS_PATH_RE = re.compile(
@@ -806,6 +810,21 @@ class Doctor:
                 body or "", self.skill_root(), config.get("skillRoot"))
             if pointer_problem:
                 problems.append("AGENTS.md " + pointer_problem)
+        # project-ext 以配置 paths.projectExt 为唯一真源：目录必须存在（init 负责创建）；
+        # 受管块由模板渲染，自定义 projectExt 时块内默认字面量不算断链。
+        hooks = config.get("hooks") if isinstance(config.get("hooks"), dict) else {}
+        paths = hooks.get("paths") if isinstance(hooks.get("paths"), dict) else {}
+        project_ext = str(paths.get("projectExt") or DEFAULT_PROJECT_EXT).strip().rstrip("/")
+        if not (self.root / project_ext).is_dir():
+            problems.append(f"paths.projectExt 目录不存在：{project_ext}/")
+        # 角色文件正文由项目自维护：引用配置路径或默认 project-ext 路径都要求目录存在
+        ext_tokens = sorted({f"{project_ext}/", f"{DEFAULT_PROJECT_EXT}/"})
+        for entry in self.role_entries():
+            text = read_text(entry["path"]) or ""
+            rel = entry["path"].relative_to(self.root).as_posix()
+            for token in ext_tokens:
+                if token in text and not (self.root / token).is_dir():
+                    problems.append(f"{rel} 正文引用 {token}，但目录不存在")
         role_ext = ((config.get("hooks") or {}).get("roleExt")
                     if isinstance(config.get("hooks"), dict) else None)
         if isinstance(role_ext, dict):
@@ -817,9 +836,15 @@ class Doctor:
                 if not (self.root / str(rel)).is_file():
                     problems.append(f"roleExt 文件不存在：{rel}")
         if problems:
-            next_step = "init --refresh-block --confirm" if any("stale" in item for item in problems) else ""
+            next_steps: list[str] = []
+            if any("stale" in item for item in problems):
+                next_steps.append("init --refresh-block --confirm")
+            if any("正文引用" in item for item in problems):
+                next_steps.append("修正指针或运行 python3 scripts/init.py --yes")
+            elif any("目录不存在" in item for item in problems):
+                next_steps.append("python3 scripts/init.py --yes")
             return Result("docs.pointers", "fail", "；".join(problems[:20]),
-                          evidence={"count": len(problems)}, next=next_step)
+                          evidence={"count": len(problems)}, next="；".join(next_steps))
         return Result("docs.pointers", "pass", f"扫描 {len(files)} 个项目文件，无残留 token/断链")
 
     def check_docs_duplicate(self) -> Result:
@@ -836,6 +861,11 @@ class Doctor:
         if ext_dir and (self.root / str(ext_dir)).is_dir():
             files.extend(sorted((self.root / str(ext_dir)).glob("*.md")))
         files.extend(entry["path"] for entry in self.role_entries())
+        docs_dir = self.root / "docs"
+        if docs_dir.is_dir():
+            for path in sorted(docs_dir.rglob("*.md")):
+                if ORCH_DOC_NAME_RE.search(path.name) and path not in files:
+                    files.append(path)
         occurrences: dict[str, list[str]] = {}
         for path in files:
             rel = path.relative_to(self.root).as_posix()

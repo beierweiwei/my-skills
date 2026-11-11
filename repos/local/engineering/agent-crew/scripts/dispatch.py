@@ -8,7 +8,8 @@
            运行时使用 init/upgrade 安装的组合基础代理
            （Qoder `crew-<role>` / opencode `crew-<role>`）→ agent-log。
   prompt / notify / close / status / list / tab / pane  生命周期与工位操作（写 agent-log）。
-  notify   跨项目通知：只 `herdr agent prompt`，不查/不写 dispatch 注册表，不动生命周期。
+  notify   跨项目通知：只 `herdr agent prompt`，不查/不写 dispatch 注册表，不动生命周期；
+           `--workspace + --role` 按 workspace 与角色约定解析当前活跃代际，`--agent` 直发。
 
 继承组合规则：
 - 角色 = 技能基类（<skillRoot>/templates/agents/<runtime>/<role>.md）+ 项目角色文件；
@@ -840,6 +841,90 @@ def herdr_agent_names() -> list[str]:
             if isinstance(agent, dict) and isinstance(agent.get("name"), str)]
 
 
+RECEIPT_LINE = "请完成处置后回执到发送方 inbox（R2），并注明 receipt_id。"
+GENERATION_RE = re.compile(r"-(\d+)$")
+
+
+def herdr_agents() -> list[dict]:
+    output = run_herdr(["herdr", "agent", "list"])
+    try:
+        data = json.loads(output)
+    except ValueError as exc:
+        raise DispatchError(f"herdr agent list 输出非 JSON：{exc}", 3) from exc
+    result = data.get("result") if isinstance(data, dict) else None
+    agents = result.get("agents") if isinstance(result, dict) else None
+    if not isinstance(agents, list):
+        return []
+    return [agent for agent in agents if isinstance(agent, dict)]
+
+
+def role_name_matches(name: str, role: str) -> bool:
+    """角色命名约定：helm 名称含 helm；firstmate 含 firstmate 或以 -firstmate 结尾；
+    其他角色等于 <role> 或以 -<role> 结尾（均大小写不敏感）。"""
+    lowered, role_l = name.lower(), role.lower()
+    if role_l == "helm":
+        return "helm" in lowered
+    if role_l == "firstmate":
+        return lowered.endswith("-firstmate") or "firstmate" in lowered
+    return lowered == role_l or lowered.endswith(f"-{role_l}")
+
+
+def generation_of(name: str) -> int:
+    """名称尾部 `-<整数>` 为代际；无数字后缀视为第 1 代。"""
+    match = GENERATION_RE.search(name)
+    return int(match.group(1)) if match else 1
+
+
+def resolve_notify_target(agents: list[dict], workspace: str | None, role: str) -> str:
+    """按 workspace + role 选当前活跃 helm/角色，返回 agent 名。
+
+    helm 按名称尾部数字取最新代际（最新代际须唯一）；其他角色要求唯一匹配，多实例
+    并存时用 --agent 显式指定。目标 agent_status 为 done/unknown/blocked 时 rc=1 拒绝。
+    """
+    candidates = [agent for agent in agents
+                  if isinstance(agent.get("name"), str)
+                  and role_name_matches(agent["name"], role)]
+    workspaces = {str(agent.get("workspace_id") or "") for agent in candidates}
+    if workspace:
+        candidates = [agent for agent in candidates
+                      if str(agent.get("workspace_id") or "") == workspace]
+    elif len(workspaces) > 1:
+        raise DispatchError(
+            f"检测到多个 workspace 的 {role} 候选"
+            f"（{', '.join(sorted(w or '?' for w in workspaces))}）；请用 --workspace 显式指定",
+            1)
+    if not candidates:
+        scope = f"workspace={workspace} " if workspace else ""
+        raise DispatchError(
+            f"未找到匹配 {scope}role={role} 的 agent；用 herdr agent list 核实命名与活跃状态", 1)
+    if role.lower() == "helm":
+        latest_gen = max(generation_of(agent["name"]) for agent in candidates)
+        latest = [agent for agent in candidates if generation_of(agent["name"]) == latest_gen]
+        if len(latest) > 1:
+            names = ", ".join(agent["name"] for agent in latest)
+            raise DispatchError(
+                f"最新代际（第 {latest_gen} 代）不唯一：{names}；"
+                "用 herdr agent list 核实后清理重复 agent", 1)
+        target = latest[0]
+    else:
+        if len(candidates) > 1:
+            names = ", ".join(agent["name"] for agent in candidates)
+            raise DispatchError(
+                f"workspace={workspace or '?'} 匹配到多个 {role} agent：{names}；"
+                "多流并存请用 --agent <名> 指定", 1)
+        target = candidates[0]
+    status = str(target.get("agent_status") or "")
+    if status == "blocked":
+        raise DispatchError(
+            f"目标处于 blocked（{target['name']}，agent_status=blocked），"
+            "herdr 会拒绝投递；先处置 blocked 或改用 --agent", 1)
+    if status in ("done", "unknown"):
+        raise DispatchError(
+            f"最新代际已结束（{target['name']}，agent_status={status}）；"
+            "请先确认当前活跃 helm / 用 herdr agent list 核实", 1)
+    return target["name"]
+
+
 def extract_pane_id(data: object, keys: tuple[str, ...] = ("pane_id", "paneId")) -> str | None:
     if isinstance(data, dict):
         for key in keys:
@@ -1229,17 +1314,47 @@ def cmd_prompt(args: argparse.Namespace, root: Path) -> int:
 
 def cmd_notify(args: argparse.Namespace, root: Path) -> int:
     """跨项目通知：只 herdr agent prompt，不查/不写注册表，不 start/close/碰 pane/tab。"""
-    run_herdr(["herdr", "agent", "prompt", args.agent, args.message])
-    append_log(root, {
+    receipt_required = not args.no_require_receipt
+    message = args.message
+    if receipt_required and not message.rstrip("\n").endswith(RECEIPT_LINE):
+        message = message.rstrip("\n") + "\n" + RECEIPT_LINE
+    if args.agent:
+        if args.workspace or args.role:
+            raise DispatchError("--agent 与 --workspace/--role 不能同时使用", 1)
+        target, delivery = args.agent, "literal"
+    else:
+        if not args.role:
+            raise DispatchError("--workspace/--role 解析模式必须提供 --role", 1)
+        target = resolve_notify_target(herdr_agents(), args.workspace, args.role)
+        delivery = "resolved"
+    run_herdr(["herdr", "agent", "prompt", target, message])
+    row = {
         "ts": utc_now(),
         "action": "notify",
-        "agent": args.agent,
+        "agent": target,
+        "target": target,
+        "delivery": delivery,
+        "receipt_required": receipt_required,
         "result": "ok",
-    })
+    }
+    if args.role:
+        row["role"] = args.role
+    append_log(root, row)
+    payload = {
+        "agent": target,
+        "target": target,
+        "delivery": delivery,
+        "receipt_required": receipt_required,
+        "result": "ok",
+    }
+    if args.role:
+        payload["role"] = args.role
+    if args.workspace:
+        payload["workspace"] = args.workspace
     if args.json:
-        print_json({"agent": args.agent, "result": "ok"})
+        print_json(payload)
     else:
-        print(f"已通知：{args.agent}")
+        print(f"已通知：{target}")
     return 0
 
 
@@ -1445,9 +1560,16 @@ def build_parser() -> argparse.ArgumentParser:
     prompt_p.set_defaults(func=cmd_prompt)
 
     notify_p = sub.add_parser(
-        "notify", help="跨项目通知：只 herdr agent prompt，不查/不写注册表")
-    notify_p.add_argument("--agent", required=True)
+        "notify",
+        help="跨项目通知：只 herdr agent prompt；--workspace+--role 解析活跃代际，--agent 直发")
+    notify_p.add_argument("--agent", help="外部 agent 名（旧用法，直发）")
+    notify_p.add_argument("--workspace", help="workspace_id（与 --role 同用）")
+    notify_p.add_argument("--role",
+                          help="角色名（与 --workspace 同用）；helm 按代际解析，"
+                               "其他角色要求唯一匹配，多实例用 --agent")
     notify_p.add_argument("--message", required=True)
+    notify_p.add_argument("--no-require-receipt", action="store_true",
+                          help="不自动追加回执要求行")
     notify_p.add_argument("--json", action="store_true")
     notify_p.set_defaults(func=cmd_notify)
 

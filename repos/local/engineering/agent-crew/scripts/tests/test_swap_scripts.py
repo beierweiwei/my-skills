@@ -8,7 +8,7 @@
 ④ rollback 逐字节恢复受管文件（sha256 比对），新建文件只报告不删除；
 ⑤ init 失败自动回滚（--no-auto-rollback 保留现场）；备份被篡改时拒绝恢复；
 ⑥ 两脚本 --help 自解释。
-全部 fixture 建在 tmp 目录，绝不触碰 CASE 仓。
+全部 fixture 建在 tmp 目录，绝不触碰真实项目仓。
 """
 
 from __future__ import annotations
