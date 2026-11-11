@@ -5,7 +5,7 @@
 ## 适用与退出条件
 
 - 适用：技能版本发布/升级——版本号与 CHANGELOG、全量测试与静态检查、同步与 push、用户目录刷新、项目 upgrade/init/doctor、升级后重启与可交接检查、安装后验证技能交付门与发布后维护循环。
-- 退出：五处版本一致且检查全绿；同步与 push 完成；用户目录与项目安装均为新版本；升级后 guard 重启验证通过、长驻角色处置与可交接性实测留证；收口回执发出；发布后维护循环结论（clean/changed/blocked）已落盘并写入发布回执。
+- 退出：五处版本一致且检查全绿；同步与 push 完成；用户目录与项目安装均为新版本；升级后 guard 重启验证通过、guard 存在核验（`python3 scripts/doctor.py --only runtime.guard` pass 且 detail 带 pid）通过、长驻角色处置与可交接性实测留证；收口回执发出；发布后维护循环结论（clean/changed/blocked）已落盘并写入发布回执。
 
 ## Phases
 
@@ -47,6 +47,7 @@
 ### Phase 6: 升级后重启与可交接检查
 - owner: firstmate
 - [ ] ① 先无锁取证、再启动 guard：记录旧进程 pid/cmdline 并停止 → 在无 guard 持锁时跑 `python3 scripts/crew-guard.py --once --json`（stdout 必须为非空 JSON，落 `evidence/release/guard-once.json`）→ 启动长驻 `python3 scripts/crew-guard.py --helm <当前舵> --interval 120` → 验证 `<crew-dir>/guard.lock` / pid / cmdline 与新代码生效探针（wake 写 `generated_at:` 或 `--help` 新子命令）；长驻实例持锁时第二实例静默 rc=0、不产生输出，不得作为证据；任一失败即停，不得报发布完成
+- [ ] **必核 guard 存在（①判据）**：`python3 scripts/doctor.py --only runtime.guard`——status=pass 且 detail 带 pid 才算通过；warn/fail 按输出 `next` 启动 `python3 scripts/crew-guard.py --helm <当前舵> --interval 120` 后复跑；未通过不得报发布收口（输出并入 `guard-restart.txt`）
 - [ ] ② 长驻角色处置：compose 在启动时快照，升级不热更新已运行会话——helm 换舵（新 tab 新舵、首报后关旧）、firstmate 重建/重派、one-shot worker 下次启动自动取新模板；处置写入发布回执
 - [ ] ③ 可交接性实测：`herdr pane read <helm pane> --lines 80` 可见 `ctx Nk/1M`、① 无锁窗口采集的 `--once --json` 非空 JSON、`python3 scripts/dispatch.py compose --role helm --json` rc=0
 - [ ] **验证技能交付门（安装后，由 builder/runner 执行）**：项目升级/安装完成后必须重跑，并以新证据为准——行为/脚本改动真实驱动项目验证技能（`<skills>/verify-<app>/` 占位，项目层安装、不随技能分发）对应 feature；规则/模板/提示词文本改动以 grep/lint/schema 测试为主证据 + 安装后 1 个 smoke feature 为辅证。回执写明 feature 名、命令、退出码、证据路径，对应关系不可省；证据落 `.planning/<task>/evidence/release/verify-skill.txt`，清理夹具后 `test -f` 复查证据仍在；项目无验证技能时先按 create-verification-skill 生成并自证跑通一个 feature（外部工程技能，需环境已安装；未安装则暂停该交付门并 ⏸ 上抛 Captain 记录缺口，不得跳过或用人肉清单替代）
@@ -64,7 +65,7 @@
 
 ### Phase 8: 收口回执
 - owner: firstmate
-- [ ] 按 R2 写回执：版本/commit/push/用户目录/init/doctor/guard 新 pid/长驻角色处置/工位处置
+- [ ] 按 R2 写回执：版本/commit/push/用户目录/init/doctor/guard 新 pid/guard 存在核验（`doctor --only runtime.guard` 结果）/长驻角色处置/工位处置
 - [ ] 更新 plan 的 Status 与 Next Step，刷新看板（`python3 scripts/plan-status.py --write`）；交接前 `--check-fresh`
 - [ ] 回执包含 Phase 6 验证技能交付门证据（feature 名/命令/退出码/证据路径）与 Phase 7 维护 outcome（clean/changed/blocked）；两项缺失不得报发布收口
 - **Status:** pending

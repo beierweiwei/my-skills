@@ -182,10 +182,10 @@
 ### 5.11 发布后重启与可交接检查
 
 - **触发**：技能版本发布/升级后（用户目录刷新、项目 `upgrade`/`init` 之后）。发布不是 push 完就结束，升级后的运行时必须验证确实载入了新代码与新模板。
-- **① 先无锁取证、再启动 guard（新代码）**：guard 是独立长驻进程，升级不会热更新已运行实例。找旧进程并停（记录旧 pid/cmdline）→ **启动长驻实例前，先在无 guard 持锁时跑 `python3 scripts/crew-guard.py --once --json` 取证**（stdout 必须为非空 JSON，空输出不算通过）→ 启动 `python3 scripts/crew-guard.py --helm <当前舵> --interval 120` → 验证 `<crew-dir>/guard.lock` / pid / cmdline、新代码生效探针（如 wake 写 `generated_at:`、`--help` 出现新子命令）；长驻实例持锁时第二实例静默 rc=0、不产生任何输出，**不得作为证据**；任一失败即停，不得报发布完成。
+- **① 先无锁取证、再启动 guard（新代码）**：guard 是独立长驻进程，升级不会热更新已运行实例。找旧进程并停（记录旧 pid/cmdline）→ **启动长驻实例前，先在无 guard 持锁时跑 `python3 scripts/crew-guard.py --once --json` 取证**（stdout 必须为非空 JSON，空输出不算通过）→ 启动 `python3 scripts/crew-guard.py --helm <当前舵> --interval 120` → **必核 guard 存在**：跑 `python3 scripts/doctor.py --only runtime.guard`，status=pass 且 detail 带 pid 才算通过，warn/fail 按输出 `next` 重启后再核 → 验证 `<crew-dir>/guard.lock` / pid / cmdline、新代码生效探针（如 wake 写 `generated_at:`、`--help` 出现新子命令）；长驻实例持锁时第二实例静默 rc=0、不产生任何输出，**不得作为证据**；任一失败即停，不得报发布完成。
 - **② 长驻角色**：compose 在启动时快照（agent 启动时组合基类与项目角色），升级不会热更新已运行会话——helm 需换舵（新 tab 新舵、首报后关旧）；firstmate 需重建/重派；one-shot worker 下次启动自动取新模板。发布回执必须写明该事实与处置。
 - **③ 可交接性实测**：真实 pane ctx 读取（`herdr pane read <helm pane> --lines 80` 可见 `ctx Nk/1M`）、① 无锁窗口采集的 `python3 scripts/crew-guard.py --once --json`（stdout 为非空 JSON；长驻持锁时静默 rc=0 不算）、继任组合只读校验 `python3 scripts/dispatch.py compose --role helm --json` rc=0；证据落 `.planning/<task>/evidence/release/`。
-- **④ 红线**：上述任一未完成或无证据，不得报发布收口。
+- **④ 红线**：上述任一未完成或无证据、或未核 guard 存在（`python3 scripts/doctor.py --only runtime.guard` 非 pass 或 detail 无 pid），不得报发布收口。
 
 ## 6. 三道人工门（为什么不可自批）
 

@@ -11,6 +11,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -97,6 +98,20 @@ class InitV21Test(unittest.TestCase):
         for key in ("projectId", "skillRoot", "skillVersion", "roles", "hooks"):
             self.assertIn(key, cfg)
         self.assertTrue((self.root / "docs/orchestration/topology.md").is_file())
+
+    def test_apply_prints_guard_hint_when_absent(self):
+        code, out = self.run_init("--yes")
+        self.assertEqual(code, 0, out)
+        self.assertIn("提示：未检测到值守 guard", out)
+        self.assertIn("crew-guard.py", out)
+
+    def test_apply_guard_hint_silent_when_alive(self):
+        crew = self.crew()
+        crew.mkdir(parents=True, exist_ok=True)
+        (crew / "guard.lock").write_text(f"{os.getpid()}\n", encoding="utf-8")
+        code, out = self.run_init("--yes")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("提示：未检测到值守 guard", out)
 
     def test_project_ext_dir_and_doc_created(self):
         # FB-018：首次安装创建 docs/crew/project-ext/ 并渲染说明文件

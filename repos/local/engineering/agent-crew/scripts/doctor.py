@@ -29,6 +29,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from crew_paths import CrewPathsError, crew_dir  # noqa: E402
 import dispatch as dispatch_lib  # noqa: E402
 
+try:  # T33 覆盖集与 upgrade 同口径（init 顶层无副作用）；init 缺失时按不可判定跳过
+    import init as init_lib  # noqa: E402
+except Exception:  # noqa: BLE001
+    init_lib = None  # type: ignore[assignment]
+
 MARK_START = "<!-- agent-crew:orchestration:start -->"
 MARK_END = "<!-- agent-crew:orchestration:end -->"
 BLOCK_LINE_LIMIT = 150
@@ -158,6 +163,12 @@ def read_text(path: Path) -> str | None:
         return path.read_text(encoding="utf-8")
     except OSError:
         return None
+
+
+def names_preview(names: list[str], limit: int = 5) -> str:
+    """列表预览：最多 limit 项，超出以省略号收尾（detail 保留可读性）。"""
+    preview = "、".join(names[:limit])
+    return preview + ("…" if len(names) > limit else "")
 
 
 def resolve_under(root: Path, value: str) -> Path:
@@ -1857,22 +1868,8 @@ class Doctor:
                 # 只有「读成功且内容为空」才是空闲 flock 目标，读失败/非普通文件仍按 stale 处理
                 idle_occupancy = True
                 continue
-            text = text or ""
-            try:
-                data = json.loads(text)
-            except (ValueError, TypeError):
-                data = None
-            if isinstance(data, dict):
-                try:
-                    pid = int(data.get("pid"))
-                except (ValueError, TypeError):
-                    pid = None
-            else:
-                # guard.lock 等纯文本锁：首行/首列写 pid
-                try:
-                    pid = int(text.strip().split()[0])
-                except (ValueError, IndexError):
-                    pid = None
+            # guard.lock 等纯文本锁：首行/首列写 pid；JSON 对象锁取 pid 字段
+            pid = _lock_text_pid(text or "")
             if lock.name == "guard.lock":
                 # guard 常驻持锁：活 pid 属正常，不算活锁 fail
                 if pid is not None and pid > 0 and _pid_alive(pid):
@@ -1899,6 +1896,42 @@ class Doctor:
         if idle_occupancy:
             return Result("runtime.lock", "pass", "无活跃锁（occupancy.lock 为空闲锁文件）")
         return Result("runtime.lock", "pass", "无活跃锁")
+
+    def check_runtime_guard(self) -> Result:
+        """值守 guard 存在性（FB-028）：区分「从未启动」与「已停止」。
+
+        与 runtime.lock 独立：无锁项目不该因未启用值守改变既有基线，
+        但长期无值守必须能被 doctor 与 init/upgrade 提示发现。
+        """
+        crew = self.crew()
+        if crew is None:
+            return Result("runtime.guard", "env", self._crew_error)
+        next_step = f"启动：{self._guard_start_command()}"
+        lock = crew / "guard.lock"
+        text = read_text(lock)
+        if text is None:
+            detail = "guard.lock 缺失" if not lock.exists() else "guard.lock 无法读取"
+            return Result("runtime.guard", "warn",
+                          f"值守 guard 未运行（{detail}）；自动叫醒不会发生",
+                          next=next_step)
+        pid = _lock_text_pid(text)
+        if pid is None:
+            return Result("runtime.guard", "warn",
+                          "值守 guard 未运行（guard.lock 无法识别 pid）；自动叫醒不会发生",
+                          next=next_step)
+        if pid > 0 and _pid_alive(pid):
+            return Result("runtime.guard", "pass", f"值守 guard 运行中（pid={pid}）")
+        return Result("runtime.guard", "warn",
+                      f"值守 guard 未运行（pid={pid} 不活）；自动叫醒不会发生",
+                      next=next_step)
+
+    def _guard_start_command(self) -> str:
+        config = self.config() or {}
+        helm = config.get("helm") if isinstance(config, dict) else None
+        name = helm.get("agentName") if isinstance(helm, dict) else None
+        text = str(name).strip() if isinstance(name, str) else ""
+        return (f"python3 scripts/crew-guard.py --helm {text or '<当前舵>'} "
+                "--interval 120")
 
     def check_runtime_worktree(self) -> Result:
         rc, stdout, _ = self._run_cli(["git", "-C", str(self.root), "status", "--porcelain"])
@@ -2075,6 +2108,65 @@ class Doctor:
         return Result("install.version", "pass",
                       f"config/源/manifest 版本一致：{config_version}")
 
+    def check_install_scripts_source(self) -> Result:
+        """受管脚本与安装源一致（T33 假绿防护）。
+
+        覆盖集=当前 init.SCRIPT_MANIFEST（与 upgrade 同口径）：源缺失、项目缺失、
+        两侧不一致均 warn；全部存在且一致才 pass；不可判定（缺 manifest/源）skip。
+        """
+        manifest = self.manifest()
+        if manifest is None:
+            return Result("install.scripts_source", "skip", "未安装（缺 manifest），跳过")
+        source = self.source_root()
+        if source is None or not source.is_dir():
+            return Result("install.scripts_source", "skip",
+                          f"技能源不可用（source={source}），跳过")
+        if init_lib is None:
+            return Result("install.scripts_source", "skip",
+                          "缺少 init.py，无法确定受管脚本清单，跳过")
+        source_missing: list[str] = []
+        project_missing: list[str] = []
+        mismatches: list[str] = []
+        compared = 0
+        for name in init_lib.SCRIPT_MANIFEST:
+            rel = Path("scripts") / name
+            origin = source / rel
+            if not origin.is_file():
+                source_missing.append(rel.as_posix())
+                continue
+            project = self.root / rel
+            if not project.is_file():
+                project_missing.append(rel.as_posix())
+                continue
+            compared += 1
+            try:
+                # 与 manifest 同口径（sha256_text_file：CRLF 归一化 + 补尾换行）
+                if sha256_text_file(project) != sha256_text_file(origin):
+                    mismatches.append(rel.as_posix())
+            except (OSError, UnicodeDecodeError) as exc:
+                mismatches.append(f"{rel.as_posix()}（读取失败：{exc}）")
+        problems: list[str] = []
+        if source_missing:
+            problems.append(
+                f"源缺失 {len(source_missing)} 项：{names_preview(source_missing)}")
+        if project_missing:
+            problems.append(
+                f"项目缺失 {len(project_missing)} 项：{names_preview(project_missing)}")
+        if mismatches:
+            problems.append(
+                f"{len(mismatches)}/{compared} 个受管脚本与安装源不一致："
+                f"{names_preview(mismatches)}")
+        if problems:
+            return Result(
+                "install.scripts_source", "warn", "；".join(problems),
+                evidence={"compared": compared, "sourceMissing": source_missing,
+                          "projectMissing": project_missing,
+                          "mismatches": mismatches},
+                next=("运行 python3 scripts/upgrade.py --apply --confirm 后再核；"
+                      "源不完整时先修复技能源安装"))
+        return Result("install.scripts_source", "pass",
+                      f"受管脚本与安装源一致（核对 {compared} 项）")
+
     def check_upgrade_scripts(self) -> Result:
         crew = self.crew()
         if crew is None:
@@ -2202,6 +2294,23 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _lock_text_pid(text: str) -> int | None:
+    """锁文件 pid 解析：JSON 对象取 pid 字段，否则取首行首列；失败返回 None。"""
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        data = None
+    if isinstance(data, dict):
+        try:
+            return int(data.get("pid"))
+        except (ValueError, TypeError):
+            return None
+    try:
+        return int(text.strip().split()[0])
+    except (ValueError, IndexError):
+        return None
+
+
 CHECKS = [
     "manifest.schema", "manifest.hash.file", "manifest.hash.block", "manifest.config",
     "manifest.roleStubs", "manifest.orphan",
@@ -2215,9 +2324,10 @@ CHECKS = [
     "role.names",
     "role.discovery.qoder", "role.discovery.opencode", "role.runtime-direct",
     "role.orphan",
-    "runtime.dir", "runtime.state", "runtime.names", "runtime.lock", "runtime.worktree",
+    "runtime.dir", "runtime.state", "runtime.names", "runtime.lock", "runtime.guard",
+    "runtime.worktree",
     "hooks.schema", "hooks.gates", "hooks.scripts",
-    "install.log", "install.version", "upgrade.scripts",
+    "install.log", "install.version", "install.scripts_source", "upgrade.scripts",
     "skill.purity", "skill.lint",
     "playbooks.library",
 ]
@@ -2260,12 +2370,14 @@ METHODS = {
     "runtime.state": "check_runtime_state",
     "runtime.names": "check_runtime_names",
     "runtime.lock": "check_runtime_lock",
+    "runtime.guard": "check_runtime_guard",
     "runtime.worktree": "check_runtime_worktree",
     "hooks.schema": "check_hooks_schema",
     "hooks.gates": "check_hooks_gates",
     "hooks.scripts": "check_hooks_scripts",
     "install.log": "check_install_log",
     "install.version": "check_install_version",
+    "install.scripts_source": "check_install_scripts_source",
     "upgrade.scripts": "check_upgrade_scripts",
     "skill.purity": "check_skill_purity",
     "skill.lint": "check_skill_lint",

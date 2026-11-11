@@ -148,6 +148,55 @@ class DoctorRuntimeTest(unittest.TestCase):
         self.assertEqual("warn", item["status"], item)
         self.assertIn("occupancy.lock", item["detail"])
 
+    def test_runtime_guard_missing_warn_with_start_command(self):
+        rc, report = self.fx.doctor_json("--only", "runtime.guard")
+        self.assertEqual(0, rc, report)
+        item = self.fx.item(report, "runtime.guard")
+        self.assertEqual("warn", item["status"], item)
+        self.assertIn("guard.lock 缺失", item["detail"])
+        self.assertIn("crew-guard.py", item["next"])
+        self.assertIn("--helm <当前舵>", item["next"])
+
+    def test_runtime_guard_strict_turns_warn_into_rc1(self):
+        rc, report = self.fx.doctor_json("--only", "runtime.guard", "--strict")
+        self.assertEqual(1, rc, report)
+        self.assertEqual("warn", self.fx.item(report, "runtime.guard")["status"])
+
+    def test_runtime_guard_alive_pid_pass(self):
+        lock_dir = self.fx.root / ".git/crew"
+        lock_dir.mkdir(parents=True)
+        (lock_dir / "guard.lock").write_text(f"{os.getpid()}\n", encoding="utf-8")
+        rc, report = self.fx.doctor_json("--only", "runtime.guard")
+        self.assertEqual(0, rc, report)
+        item = self.fx.item(report, "runtime.guard")
+        self.assertEqual("pass", item["status"], item)
+        self.assertIn(f"pid={os.getpid()}", item["detail"])
+
+    def test_runtime_guard_dead_and_unparsed_pid_warn(self):
+        lock_dir = self.fx.root / ".git/crew"
+        lock_dir.mkdir(parents=True)
+        guard = lock_dir / "guard.lock"
+        guard.write_text(f"{1 << 30}\n", encoding="utf-8")
+        rc, report = self.fx.doctor_json("--only", "runtime.guard")
+        self.assertEqual(0, rc, report)
+        item = self.fx.item(report, "runtime.guard")
+        self.assertEqual("warn", item["status"], item)
+        self.assertIn(f"pid={1 << 30} 不活", item["detail"])
+
+        guard.write_text("", encoding="utf-8")
+        rc, report = self.fx.doctor_json("--only", "runtime.guard")
+        self.assertEqual(0, rc, report)
+        item = self.fx.item(report, "runtime.guard")
+        self.assertEqual("warn", item["status"], item)
+        self.assertIn("无法识别 pid", item["detail"])
+
+    def test_runtime_guard_uses_configured_helm_name(self):
+        self.fx.config["helm"] = {"agentName": "helm-demo"}
+        self.fx.write_config()
+        rc, report = self.fx.doctor_json("--only", "runtime.guard")
+        self.assertEqual(0, rc, report)
+        self.assertIn("--helm helm-demo", self.fx.item(report, "runtime.guard")["next"])
+
     def test_runtime_worktree_clean_pass_dirty_fail(self):
         self.fx.commit()
         rc, report = self.fx.doctor_json("--only", "runtime.worktree")

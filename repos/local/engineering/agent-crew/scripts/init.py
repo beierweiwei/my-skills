@@ -569,6 +569,61 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+GUARD_START_HINT = (
+    "提示：未检测到值守 guard（guard.lock 缺失或 pid 不活）；自动叫醒不会发生。"
+    "启动：python3 scripts/crew-guard.py --helm {helm} --interval 120"
+)
+
+
+def _lock_text_pid(text: str) -> int | None:
+    """锁文件 pid 解析（与 doctor runtime.lock/runtime.guard 同口径）。"""
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        data = None
+    if isinstance(data, dict):
+        try:
+            return int(data.get("pid"))
+        except (ValueError, TypeError):
+            return None
+    try:
+        return int(text.strip().split()[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def _helm_display_name(root: Path) -> str:
+    try:
+        config = json.loads((root / CONFIG_REL).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "<当前舵>"
+    helm = config.get("helm") if isinstance(config, dict) else None
+    name = helm.get("agentName") if isinstance(helm, dict) else None
+    text = str(name).strip() if isinstance(name, str) else ""
+    return text or "<当前舵>"
+
+
+def guard_absent_hint(root: Path) -> str | None:
+    """值守不在跑时返回提示行（FB-028）；存活/未安装/非 git 返回 None。"""
+    if read_manifest(root) is None or not (root / CONFIG_REL).is_file():
+        return None
+    try:
+        crew = crew_dir(root)
+    except CrewPathsError:
+        return None
+    if crew == root.expanduser().resolve() / ".crew":
+        return None  # 非 git 回落目录：静默
+    try:
+        text = (crew / "guard.lock").read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    if text:
+        pid = _lock_text_pid(text)
+        if pid is not None and pid > 0 and _pid_alive(pid):
+            return None
+    return GUARD_START_HINT.format(helm=_helm_display_name(root))
+
+
 def acquire_owner(root: Path) -> Path | None:
     """整个 init/refresh 期间的并发属主（pid 文件）；存活则拒绝，崩溃遗留可回收。"""
     crew = _crew_dir(root)
@@ -847,6 +902,30 @@ def script_source(name: str, source_dir: Path | None = None) -> Path:
     return (source_dir or SKILL_DIR) / "scripts" / name
 
 
+def script_source_mismatches(root: Path, source_dir: Path) -> list[str]:
+    """受管脚本磁盘内容与安装源不一致的相对路径（T33 假绿防护）。
+
+    只比较两侧都存在的受管脚本：项目缺失（init 会新建）或源缺失（不可判定）
+    不计入；upgrade 复制后复核复用本函数。比较口径与 manifest 一致（sha256_text：
+    CRLF 归一化 + 补尾换行），仅换行差异不误报；任一侧读/解码失败跳过。
+    """
+    mismatches: list[str] = []
+    for name in SCRIPT_MANIFEST:
+        rel = Path("scripts") / name
+        project = root / rel
+        source = (source_dir or SKILL_DIR) / rel
+        if not project.is_file() or not source.is_file():
+            continue
+        try:
+            project_text = project.read_text(encoding="utf-8")
+            source_text = source.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if sha256_text(project_text) != sha256_text(source_text):
+            mismatches.append(rel.as_posix())
+    return mismatches
+
+
 def render_agents_section(templates: Path, ctx: dict) -> str:
     path = templates / "AGENTS-编排节.md"
     if not path.exists():
@@ -996,6 +1075,23 @@ def refresh_block(root: Path, templates: Path, skill_version: str, confirm: bool
         for line in list(diff)[:80]:
             print(line)
         return 2
+    # T33 假绿防护：旧脚本 + 新技能源时拒绝改 manifest 版本（写入前判定）
+    source_mismatches = script_source_mismatches(root, resolve_source(root))
+    manifest_version = str(manifest.get("skillVersion") or "")
+    if source_mismatches and manifest_version != skill_version:
+        print(
+            "错误：refresh-block 拒绝写入：受管脚本与安装源不一致"
+            f"（{len(source_mismatches)} 项，如 {'、'.join(source_mismatches[:3])}）；"
+            f"manifest 版本 {manifest_version}→{skill_version}。"
+            "请先运行 python3 scripts/upgrade.py --apply --confirm，再重跑 --refresh-block。"
+            "本次零写入。",
+            file=sys.stderr,
+        )
+        return 1
+    if source_mismatches:
+        print("[警告] 受管脚本与安装源存在本地差异"
+              f"（{len(source_mismatches)} 项，如 {'、'.join(source_mismatches[:3])}）；"
+              "请确认是否需要 upgrade 对齐")
     try:
         with init_lock(root):
             current = agents_path.read_text(encoding="utf-8")
@@ -1069,11 +1165,20 @@ def run_check(root: Path, templates: Path, skill_version: str) -> int:
     if manifest is None:
         print(f"未安装：缺少 {MANIFEST_REL.as_posix()}")
         return 2
+    source_dir = resolve_source(root)
+    source_mismatches = script_source_mismatches(root, source_dir)
+    manifest_version = str(manifest.get("skillVersion") or "")
     problems: list[str] = []
     stale: list[str] = []
     modified: list[str] = []
     pending_state = False
     ok = 0
+    if manifest_version != skill_version and source_mismatches:
+        problems.append(
+            "受管脚本与安装源不一致"
+            f"（{len(source_mismatches)} 项，如 {'、'.join(source_mismatches[:3])}）；"
+            f"manifest 版本 {manifest_version}→{skill_version}；"
+            "请先运行 python3 scripts/upgrade.py --apply --confirm，再重跑 init")
 
     def check_file_entry(entry: dict) -> None:
         nonlocal ok
@@ -1129,6 +1234,11 @@ def run_check(root: Path, templates: Path, skill_version: str) -> int:
     if config_version != skill_version:
         stale.append(f"{CONFIG_REL.as_posix()}#skillVersion({config_version}→{skill_version})")
     hints: list[str] = []
+    if source_mismatches and manifest_version == skill_version:
+        hints.append(
+            "受管脚本与安装源存在本地差异"
+            f"（{len(source_mismatches)} 项，如 {'、'.join(source_mismatches[:3])}）；"
+            "请确认是否需要 upgrade 对齐")
     skill_root_raw = config_on_disk.get("skillRoot")
     if isinstance(skill_root_raw, str) and skill_root_raw.strip():
         try:
@@ -1183,8 +1293,7 @@ def run_check(root: Path, templates: Path, skill_version: str) -> int:
             ok += 1
     try:
         cfg, _ = load_config(root, templates)
-        cfg = prepare_config(root, cfg, None, skill_version,
-                             source_dir=resolve_source(root))
+        cfg = prepare_config(root, cfg, None, skill_version, source_dir=source_dir)
         copies = forbidden_copies(root, str(cfg.get("skillRoot") or ""))
         if copies:
             problems.append("项目内出现规则/技能源副本：" + ", ".join(copies))
@@ -1200,6 +1309,9 @@ def run_check(root: Path, templates: Path, skill_version: str) -> int:
         print(f"[风险提示] {hint}")
     print(f"检查结果：{ok} 项一致，{len(set(problems))} 项失败，"
           f"{len(set(stale))} 项过期，{len(set(modified))} 项项目修改。")
+    hint = guard_absent_hint(root)
+    if hint:
+        print(hint)
     # 优先级：真实校验问题 > AGENTS pending > 仅漂移 > 一致。
     if problems:
         return 1
@@ -1366,6 +1478,27 @@ def _run_apply_locked(root: Path, source_dir: Path, templates: Path, skill_versi
 
     # --force 拒绝项目自有漂移（AGENTS 块 / 项目角色）
     manifest_before = read_manifest(root)
+    # T33 假绿防护：旧脚本 + 新技能源时拒绝把 manifest 打成新版本（写入前判定）
+    source_mismatches = script_source_mismatches(root, source_dir)
+    if manifest_before is not None:
+        manifest_version = str(manifest_before.get("skillVersion") or "")
+        if source_mismatches and manifest_version != skill_version:
+            message = (
+                "受管脚本与安装源不一致"
+                f"（{len(source_mismatches)} 项，如 {'、'.join(source_mismatches[:3])}）；"
+                f"manifest 版本 {manifest_version}→{skill_version}。"
+                "请先运行 python3 scripts/upgrade.py --apply --confirm，再重跑 init"
+            )
+            if dry_run:
+                report.warnings.append(message)
+            else:
+                print(f"错误：{message}。本次零写入。", file=sys.stderr)
+                return 1
+        elif source_mismatches:
+            report.warnings.append(
+                "受管脚本与安装源存在本地差异"
+                f"（{len(source_mismatches)} 项，如 {'、'.join(source_mismatches[:3])}）；"
+                "请确认是否需要 upgrade 对齐")
     known_stubs = {
         str(stub.get("path")): str(stub.get("sha256") or "").removeprefix("sha256:")
         for stub in (manifest_before or {}).get("roleStubs", [])
@@ -1579,6 +1712,9 @@ def _run_apply_locked(root: Path, source_dir: Path, templates: Path, skill_versi
         print("\n冲突清单（默认不覆盖）：")
         for item in report.conflicts:
             print(f"  - {item.target.as_posix()}（{item.note}）")
+    hint = guard_absent_hint(root)
+    if hint:
+        print(hint)
     if pending:
         print(f"\nAGENTS.md 无标记：已生成 {PENDING_REL.as_posix()}，AGENTS.md 未写入；"
               "插入块后重跑 init。")
