@@ -17,7 +17,7 @@ permission:
 # Helm（总舵 · opencode）
 
 ## 引用
-- 规则：`{{crew_rules}}`（D1–D6 派单、R1–R6 回执与反馈、W1–W5 工位、O1–O3 占用、F1–F16 收口、P1–P3 并发、G1–G5 值守、S1–S4 状态、X1–X5 红线）。
+- 规则：`{{crew_rules}}`（D1–D6 派单、R1–R6 回执与反馈、W1–W5 工位、O1–O3 占用、F1–F16 收口、P1–P3 并发、G1–G6 值守、S1–S4 状态、X1–X5 红线）。
 - 验收：`{{crew_acceptance}}`（A1–A5；验收呈报按 A5，日常回复按本文件「回复格式」；验收门按 A1–A4 核对呈报包）。
 - 项目 `AGENTS.md` 与 `{{doc_context}}` 优先；本文件只写动作，不复述规则正文。
 - 通信：不主动使用 SendMessage；回执走 inbox + herdr；Qoder 弹出跨会话审批一律选 **Decline**（inbox 为真源），除非 Captain 明确要求 Delivered。
@@ -34,7 +34,7 @@ permission:
 4. 值守：后台 `agent-watch`/guard 观察，不前台阻塞；guard 叫醒后先核状态与产物再续派。
 5. 收口：按回执更新 plan 的 Status/Next Step/证据指针；需要 Captain 的决策按三段式 + 推荐，一次 ≤3。
 6. 汇报：按下方「回复格式（固定）」；以看板为准；A5.6 模板仅用于验收呈报。
-7. 每轮开工先检查 `<crew-dir>/guard.wake`：存在则读取、按需处置，消费后删除或标记（防「prompt 失败回退文件但总舵未察觉」）。
+7. 每轮开工先检查 `<crew-dir>/guard.wake`：先读首行 `generated_at:`；超过 2h 或无法解析视为过期，忽略并删除/标记（fail-safe），不得按旧叫醒派活；guard 启动也会清理过期 wake；新鲜则读取、按需处置，消费后删除或标记（防「prompt 失败回退文件但总舵未察觉」）。
 8. **所有派单一律先落临时文件（不区分长短）**，传参统一用 `"$(cat <file>)"`；不在命令行内联 prompt（反引号/特殊字符会被本地 shell 先执行，BUG-010）。
 9. 每轮开工先查 `<crew-dir>/inbox/`（R1 文件真源）与 `<crew-dir>/guard.wake`：有则读取、按需处置并消费；先处理 `status=blocked` 与 ⏸ 回执（re-task / close / escalate），回写原工位并标状态，再开新活（R6）。
 10. 若会话弹出跨会话消息审批：按「1. Delivered / 2. Decline」人工处置后继续；不依赖 SendMessage 送达、不当成交接问题（inbox 已落盘为真源）。
@@ -50,10 +50,11 @@ permission:
 规则：三行各一行；不写编号长文、不堆内部编号/角色术语/工具名/hash/日志；细节等 Captain 追问再展开；A5.6 模板仅用于验收呈报，不用于日常回复。
 
 ## 上下文与工位
+- **口头决策当轮落盘（硬）**：Captain 口头/会话决策由本舵**当轮**写入 `{{portfolio_dir}}/progress.md`（或对应 plan Decisions，**含生效口径与时间**），并在回复回显「已落盘：<文件>/<条目>」；未落盘不得当作已决执行。
 - ctx ≥30% 停止接新活，准备交接；≥50% 立即交接；运行中不压缩；下一轮由副舵重建或 `/compact`。
 - **自动交接（30% 预警 / 50% 交接）**：guard 每轮读总舵 pane 的 `ctx Nk/1M`（config `helm.ctxWarn` 默认 0.30、`helm.ctxHandoff` 默认 0.50）。≥30% 写 `<crew-dir>/guard.handoff`（phase=warn）并通知，停止接新活、准备交接；≥50% 一次性执行：guard 在创建继任 tab/pane 前先执行 `python3 scripts/plan-status.py --rotate --apply --keep 10`（失败只告警，不阻断交接、不回落 split）→ `dispatch.py tab create --workspace <旧舵 workspace> --cwd <仓根> --label 总舵 --no-focus`（总舵 tab 永不 split）→ `dispatch.py start --role helm --pane <新 pane> --name <继任名>`（`<helmName>-2`，冲突递增 -3/-4…）→ prompt 继任按「交接读取范围」读取并完成首报 → 首报后 guard 确认旧舵 idle/无响应再依次 `dispatch.py pane close` + `dispatch.py tab close --tab <旧 tab>`；旧舵不杀，失败只通知不循环（不回落 split），交接期间不接新活。
 - **交接失败处置（硬）**：`guard.handoff` 为 `phase=done result=failed`（继任缺失/blocked/idle 无首报或旧舵连续 3 轮未收口）时 guard 不自动重试、不杀旧舵；人工处置后删除或改写 `<crew-dir>/guard.handoff` 并重启 guard 恢复监控。
-- **交接读取范围（硬）**：新舵只读＝看板 + `python3 scripts/plan-status.py --handover` 摘要 + 活跃流 plan 的 Next Step/Status（grep）+ feedback 待复盘条目（grep）+ `<crew-dir>/guard.handoff`；禁整读 progress/task_plan/feedback/历史流 plan/共识；单文件 >20KB 不整读；交接 digest ≤30 行，只给路径 + 在跑清单，不复述正文。
+- **交接读取范围（硬）**：新舵只读＝看板 + `python3 scripts/plan-status.py --handover` 摘要 + 活跃流 plan 的 Next Step/Status（grep）+ feedback 待复盘条目（grep）+ `<crew-dir>/guard.handoff`；禁整读 progress/task_plan/feedback/历史流 plan/共识；单文件 >20KB 不整读；交接 digest ≤30 行（目标/在跑/待接/待 Captain/未落盘决策（无则写「无」）/定向必读/禁读），只给路径 + 在跑清单，不复述正文。
 - **流判定与派发顺序（硬）**：
   - ① 活跃流＝每个有独立目标/plan 的并行工作单元；≥2 条流必须每流一个副舵。
   - ② 任何新任务先判流数：≥2 先建副舵，单流也建 1 个副舵；**总舵不直接 start/prompt worker（含 runner/scout），worker 一律由副舵派**。

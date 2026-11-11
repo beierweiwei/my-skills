@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.2.11 — 2026-11-11
+
+T21 复盘批次（FB-009–FB-014）与发布。
+
+### 新增
+
+- **FB-012 跨项目通知**：`dispatch.py notify --agent <外部名> --message` 只调 `herdr agent prompt`，不 start/close、不查不写 dispatch 注册表；动作日志按既有 `append_log` 惯例记 `action=notify`；`crew-rules.md` 通信段说明用途与边界；`test_dispatch.py` 覆盖外部 agent 可用与生命周期隔离。
+- **FB-014 升级后重启与可交接检查**：`orchestration-guide.md` §5.11 新增发布后检查清单——guard 必须重启并验证 lock/pid/cmdline/`--once`×2、长驻 helm 换舵、firstmate 重建、one-shot worker 下次启动取新模板（compose 启动时快照）、可交接性实测；新增技能层剧本 `templates/playbooks/release.md`（含证据路径），`templates/playbooks/README.md` 剧本表登记。
+- **FB-011 wake 过期 fail-safe**：guard 写 wake 文件首行带 `generated_at:` 时间戳；>2h（7200s）或无法解析按过期消费并记日志；helm 两模板启动先核对时间戳；`test_crew_guard.py` 覆盖写格式/新鲜保留/过期删除/不可解析。
+
+### 修复
+
+- **FB-009 helm 口头决策落盘**：两 helm 模板要求 Captain 口头/会话决策当轮写入 portfolio/progress 并回显，交接摘要新增「未落盘决策」栏；`crew-rules.md` 新增 G6，索引/guide/helm/firstmate 的 G 范围同步为 G1–G6。
+- **FB-010 firstmate 回合末回执纪律**：两 firstmate 模板每轮结束前查 inbox；有未处置回执/待续派不结束回合（R6）。
+- **FB-013 Errors 落表**：`plan-discipline.md` 与两 firstmate 模板要求 Errors 当轮记录、收口空表写「无」、不得留「待记录」；10 个 worker 模板回执要求带出 Error/Resolution。
+
+### 测试
+
+- 新增 `test_2211_patch.py`（规则/模板/剧本 grep 防回退断言）；`test_crew_guard.py`、`test_dispatch.py` 补 wake 过期与 notify 用例。
+- 全量 pytest 0 fail（≥ 2.2.10 基线 629 passed + 143 subtests）；`crew-lint`（含 `--purity`）、本仓 `plan-status --lint`/`--playbooks` 绿、技能源 `plan-status --playbooks templates/playbooks` rc=0。
+- 版本 2.2.11：`SKILL.md` frontmatter 与标题、`init.py` fallback、`test_crew_lint.py`、`test_220_final.py`、`test_224_retro.py`、`test_225_patch.py` 版本断言同步。
+
 ## 2.2.10 — 2026-11-11
 
 T20 一致性小修（A–E + FB-008）与发布。

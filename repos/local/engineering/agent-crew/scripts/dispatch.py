@@ -7,7 +7,8 @@
   start    启动角色：配置 → 描述符 → 继承/门禁/frontmatter 校验 → compose →
            运行时使用 init/upgrade 安装的组合基础代理
            （Qoder `crew-<role>` / opencode `crew-<role>`）→ agent-log。
-  prompt / close / status / list / tab / pane  生命周期与工位操作（写 agent-log）。
+  prompt / notify / close / status / list / tab / pane  生命周期与工位操作（写 agent-log）。
+  notify   跨项目通知：只 `herdr agent prompt`，不查/不写 dispatch 注册表，不动生命周期。
 
 继承组合规则：
 - 角色 = 技能基类（<skillRoot>/templates/agents/<runtime>/<role>.md）+ 项目角色文件；
@@ -1226,6 +1227,22 @@ def cmd_prompt(args: argparse.Namespace, root: Path) -> int:
     return 0
 
 
+def cmd_notify(args: argparse.Namespace, root: Path) -> int:
+    """跨项目通知：只 herdr agent prompt，不查/不写注册表，不 start/close/碰 pane/tab。"""
+    run_herdr(["herdr", "agent", "prompt", args.agent, args.message])
+    append_log(root, {
+        "ts": utc_now(),
+        "action": "notify",
+        "agent": args.agent,
+        "result": "ok",
+    })
+    if args.json:
+        print_json({"agent": args.agent, "result": "ok"})
+    else:
+        print(f"已通知：{args.agent}")
+    return 0
+
+
 def cmd_close(args: argparse.Namespace, root: Path) -> int:
     registry = load_registry(root)
     info = registry.get(args.agent)
@@ -1400,7 +1417,7 @@ def cmd_pane(args: argparse.Namespace, root: Path) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dispatch.py",
-        description="唯一派单入口：compose/start/prompt/close/status/list/tab/pane",
+        description="唯一派单入口：compose/start/prompt/close/notify/status/list/tab/pane",
     )
     parser.add_argument("--root", default=".", help="项目仓根（默认 cwd）")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1426,6 +1443,13 @@ def build_parser() -> argparse.ArgumentParser:
     prompt_p.add_argument("--message", required=True)
     prompt_p.add_argument("--json", action="store_true")
     prompt_p.set_defaults(func=cmd_prompt)
+
+    notify_p = sub.add_parser(
+        "notify", help="跨项目通知：只 herdr agent prompt，不查/不写注册表")
+    notify_p.add_argument("--agent", required=True)
+    notify_p.add_argument("--message", required=True)
+    notify_p.add_argument("--json", action="store_true")
+    notify_p.set_defaults(func=cmd_notify)
 
     close_p = sub.add_parser("close", help="关闭 dispatch 托管的 agent")
     close_p.add_argument("--agent", required=True)

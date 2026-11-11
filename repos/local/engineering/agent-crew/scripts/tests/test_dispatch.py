@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -28,7 +29,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 SKILL_DIR = Path(__file__).resolve().parent.parent.parent
 DISPATCH = SKILL_DIR / "scripts" / "dispatch.py"
@@ -741,6 +744,73 @@ class DispatchTest(unittest.TestCase):
         rc, report = self.compose("process-auditor", "qoder")
         self.assertEqual(1, rc)
         self.assertTrue(any("dispatch" in err for err in report["errors"]), report)
+
+
+class NotifyCommandTest(unittest.TestCase):
+    """FB-012：notify 只 herdr agent prompt，不查/不写注册表，不碰 pane/tab。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name) / "external-proj"
+        self.root.mkdir()
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        self.calls: list[list[str]] = []
+
+    def fake_herdr(self, argv: list[str]) -> str:
+        self.calls.append(list(argv))
+        return ""
+
+    def dispatch_main(self, *args: str) -> tuple[int, str]:
+        out = io.StringIO()
+        with mock.patch.object(dispatch_mod, "run_herdr", side_effect=self.fake_herdr):
+            with redirect_stdout(out):
+                code = dispatch_mod.main(["--root", str(self.root), *args])
+        return code, out.getvalue()
+
+    def agent_log(self) -> list[dict]:
+        path = dispatch_mod.crew_dir(self.root) / "agent-log.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in
+                path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    def test_unregistered_agent_notified_via_herdr_prompt_only(self):
+        registry = dispatch_mod.registry_path(self.root)
+        self.assertFalse(registry.exists())
+        code, out = self.dispatch_main(
+            "notify", "--agent", "case-helm", "--message", "2.2.11 已发布", "--json")
+        self.assertEqual(0, code)
+        self.assertEqual(
+            [["herdr", "agent", "prompt", "case-helm", "2.2.11 已发布"]], self.calls)
+        self.assertFalse(registry.exists())
+        row = self.agent_log()[-1]
+        self.assertEqual("notify", row["action"])
+        self.assertEqual("case-helm", row["agent"])
+        self.assertEqual("ok", row["result"])
+        self.assertIn("ts", row)
+        self.assertEqual({"agent": "case-helm", "result": "ok"}, json.loads(out))
+
+    def test_existing_registry_is_left_untouched(self):
+        registry = dispatch_mod.registry_path(self.root)
+        registry.parent.mkdir(parents=True, exist_ok=True)
+        registry.write_text(
+            json.dumps({"crew-helm": {"role": "helm", "runtime": "qoder"}}),
+            encoding="utf-8")
+        before = registry.read_bytes()
+        code, _ = self.dispatch_main(
+            "notify", "--agent", "case-helm", "--message", "ping")
+        self.assertEqual(0, code)
+        self.assertEqual(before, registry.read_bytes())
+        self.assertEqual(
+            [["herdr", "agent", "prompt", "case-helm", "ping"]], self.calls)
+
+    def test_cli_description_lists_notify(self):
+        parser = dispatch_mod.build_parser()
+        self.assertIn(
+            "compose/start/prompt/close/notify/status/list/tab/pane",
+            parser.description)
+        self.assertIn("notify", parser.format_help())
 
 
 if __name__ == "__main__":

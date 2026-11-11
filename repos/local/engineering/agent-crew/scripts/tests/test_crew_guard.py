@@ -12,7 +12,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -772,6 +772,126 @@ class WakeChannelTest(GuardTestBase):
         self.assertEqual(out.getvalue(), "")
         self.assertEqual(self.prompt_calls, [])
         self.assertTrue(any("herdr" in line for line in self.logs))
+
+
+class WakeExpiryTest(GuardTestBase):
+    """FB-011：guard.wake 首行带 generated_at；>2h 或不可解析按过期消费（fail-safe）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.now[0] = 1_800_000_000.0
+
+    def iso(self, epoch: float) -> str:
+        return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def write_wake(self, head: str) -> Path:
+        self.crew.mkdir(parents=True, exist_ok=True)
+        path = self.crew / "guard.wake"
+        path.write_text(f"{head}\nguard 叫醒：待办A\n", encoding="utf-8")
+        return path
+
+    def test_written_wake_has_generated_at_first_line(self):
+        guard = self.make_guard()
+        guard._write_wake_file("guard 叫醒：待办A")
+        text = (self.crew / "guard.wake").read_text(encoding="utf-8")
+        first, rest = text.split("\n", 1)
+        self.assertTrue(first.startswith("generated_at: "), first)
+        stamp = first.split(": ", 1)[1]
+        self.assertTrue(stamp.endswith("Z"), stamp)
+        self.assertIsNotNone(cg.parse_wake_generated_at(text))
+        self.assertIn("guard 叫醒：待办A", rest)
+
+    def test_fresh_wake_is_kept(self):
+        path = self.write_wake(f"generated_at: {self.iso(self.now[0] - 60)}")
+        before = path.read_text(encoding="utf-8")
+        self.make_guard().run_once()
+        self.assertTrue(path.exists())
+        self.assertEqual(before, path.read_text(encoding="utf-8"))
+        self.assertFalse(any("已过期" in line for line in self.logs))
+
+    def test_wake_within_two_hours_is_kept(self):
+        path = self.write_wake(f"generated_at: {self.iso(self.now[0] - 7199)}")
+        self.make_guard().run_once()
+        self.assertTrue(path.exists())
+
+    def test_wake_at_exactly_two_hours_is_kept(self):
+        # 语义为「超过 2h」才过期：恰好 7200s 保留（边界锁）。
+        path = self.write_wake(f"generated_at: {self.iso(self.now[0] - 7200)}")
+        self.make_guard().run_once()
+        self.assertTrue(path.exists())
+        self.assertFalse(any("已过期" in line for line in self.logs))
+
+    def test_wake_just_over_two_hours_is_deleted(self):
+        stamp = datetime.fromtimestamp(
+            self.now[0] - 7200.001, timezone.utc
+        ).isoformat(timespec="milliseconds")
+        path = self.write_wake(f"generated_at: {stamp}")
+        self.make_guard().run_once()
+        self.assertFalse(path.exists())
+        self.assertTrue(any("已过期/已忽略" in line for line in self.logs))
+
+    def test_wake_older_than_two_hours_is_deleted_and_logged(self):
+        stamp = self.iso(self.now[0] - 7201)
+        path = self.write_wake(f"generated_at: {stamp}")
+        self.make_guard().run_once()
+        self.assertFalse(path.exists())
+        logs = "\n".join(self.logs)
+        self.assertIn("已过期/已忽略", logs)
+        self.assertIn(stamp, logs)
+
+    def test_unparseable_wake_is_deleted_and_logged(self):
+        path = self.write_wake("guard 叫醒：没有时间戳")
+        self.make_guard().run_once()
+        self.assertFalse(path.exists())
+        logs = "\n".join(self.logs)
+        self.assertIn("已过期/已忽略", logs)
+        self.assertIn("无法解析", logs)
+
+    def test_legacy_bare_iso_first_line_is_supported(self):
+        fresh = self.write_wake(self.iso(self.now[0] - 60))
+        self.make_guard().run_once()
+        self.assertTrue(fresh.exists())
+
+        expired = self.write_wake(self.iso(self.now[0] - 7201))
+        self.make_guard().run_once()
+        self.assertFalse(expired.exists())
+
+    def test_no_wake_file_is_silent(self):
+        self.make_guard().run_once()
+        self.assertFalse((self.crew / "guard.wake").exists())
+        self.assertFalse(any("guard.wake" in line for line in self.logs))
+
+    def test_wake_read_error_does_not_break_once(self):
+        (self.crew / "guard.wake").mkdir(parents=True)
+        guard = self.make_guard()
+        with redirect_stdout(io.StringIO()):
+            result = guard.run_once()
+        self.assertFalse(result.get("error"))
+        self.assertTrue(any("guard.wake 读取失败" in line for line in self.logs))
+
+        with mock.patch.object(cg, "herdr_agents", return_value=[]), \
+                mock.patch.object(cg, "run_plan_status", return_value=(0, "看板新鲜")), \
+                mock.patch.object(cg, "herdr_prompt"), \
+                mock.patch.object(cg, "herdr_notify"):
+            code, out, err = self.run_main(
+                ["--once", "--root", str(self.root), "--crew-dir", str(self.crew),
+                 "--helm", "helm-1"]
+            )
+        self.assertEqual(0, code)
+        self.assertEqual("", out)
+        self.assertEqual("", err)
+
+    def test_wake_write_error_does_not_crash_round(self):
+        self.agents = [
+            {"name": "helm-1", "agent_status": "idle", "focused": True},
+        ]
+        write_file(self.root / ".planning" / "flow-a" / "task_plan.md", STREAM_PLAN)
+        guard = self.make_guard()
+        with mock.patch.object(guard, "_write_wake_file", side_effect=OSError("disk full")):
+            guard.run_once()
+            guard.run_once()
+        self.assertTrue(any("叫醒失败" in line for line in self.logs))
 
 
 class SchedulingTest(GuardTestBase):

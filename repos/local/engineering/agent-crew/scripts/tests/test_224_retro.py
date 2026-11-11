@@ -127,10 +127,10 @@ class TemplateLayerTest(unittest.TestCase):
 
 class VersionTest(unittest.TestCase):
     def test_version_225_in_three_places(self):
-        self.assertIn("version: 2.2.10", read(SKILL_MD))
-        self.assertIn("v2.2.10", read(SKILL_MD))
-        self.assertIn('SKILL_VERSION_FALLBACK = "2.2.10"', read(INIT))
-        self.assertIn("## 2.2.10", read(CHANGELOG))
+        self.assertIn("version: 2.2.11", read(SKILL_MD))
+        self.assertIn("v2.2.11", read(SKILL_MD))
+        self.assertIn('SKILL_VERSION_FALLBACK = "2.2.11"', read(INIT))
+        self.assertIn("## 2.2.11", read(CHANGELOG))
 
 
 if __name__ == "__main__":
