@@ -5,7 +5,7 @@
 ## 适用与退出条件
 
 - 适用：换舵、工位重启、代理交接后接续前任工作；或 Captain 说「接着某某的活」。
-- 退出：接续点明确并完成首报，后续工作交回对应剧本或派活 SOP；或确认前任足迹不可用、需要重新定界。
+- 退出：接续点明确并完成首报（含 guard 存在核验），后续工作交回对应剧本或派活 SOP；或确认前任足迹不可用、需要重新定界。
 
 ## Phases
 
@@ -18,6 +18,7 @@
 ### Phase 2: 重建运行态
 - owner: firstmate
 - [ ] 以 plan 与回执为真源重建：当前 Phase/Status、Next Step、在跑工单、占用与分支
+- [ ] **必核 guard 存在**：`python3 scripts/doctor.py --only runtime.guard`——pass 且 detail 带 pid 才算值守在线；warn/fail 按输出 next 启动 `python3 scripts/crew-guard.py --helm <当前舵> --interval 120` 后再继续
 - [ ] 只读必要文件，长材料交子代理归纳，不把前任全文搬进上下文（F11）
 - **Status:** pending
 

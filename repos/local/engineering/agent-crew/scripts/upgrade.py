@@ -5,7 +5,8 @@
 - 只处理 manifest 中 kind:file 的受管脚本（scripts/*.py|*.sh）；不碰 AGENTS 块、
   项目角色文件、项目文案、规则/验收（项目无副本）。
 - `--diff`：只读列出脚本内容/版本差异；`--apply --confirm`：加锁 → 备份到
-  <common>/crew/backups/<UTC>/ + backup-manifest.json → 原子替换 → 同步 config 的
+  <common>/crew/backups/<UTC>/ + backup-manifest.json → 原子替换 → 复核受管脚本
+  与安装源一致（不一致 rc=1、不写版本）→ 同步 config 的
   skillVersion（仅此一项）→ 更新 manifest 哈希/版本 → install-log。
 - `--rollback <backup-id>`：按备份 manifest 逐字节还原受管脚本并校验 sha256。
 - 不做 3-way、不做 baseline、不做路径/其他配置迁移；除 skillVersion 外不改 orchestration.json。
@@ -61,6 +62,20 @@ def managed_script_names(manifest: dict) -> list[str]:
         if rel.startswith("scripts/") and rel.endswith((".py", ".sh")):
             names.append(Path(rel).name)
     return names
+
+
+def missing_source_scripts(source_dir: Path) -> list[str]:
+    """init.SCRIPT_MANIFEST 中安装源缺失的受管脚本相对路径（T33 覆盖集缺口）。"""
+    return [
+        (Path("scripts") / name).as_posix()
+        for name in init_lib.SCRIPT_MANIFEST
+        if not (source_dir / "scripts" / name).is_file()
+    ]
+
+
+def names_preview(names: list[str], limit: int = 5) -> str:
+    preview = "、".join(names[:limit])
+    return preview + ("…" if len(names) > limit else "")
 
 
 def diff_report(root: Path, manifest: dict, version: str, source_dir: Path) -> dict:
@@ -134,6 +149,14 @@ def apply_upgrade(root: Path, confirm: bool, version: str, source_dir: Path) -> 
     if not confirm:
         print("upgrade --apply 需要 --confirm（不会自动覆盖受管脚本）。")
         return 2
+    # T33 覆盖集缺口：源缺失受管脚本时不得早退/写版本（否则版本假绿）
+    missing = missing_source_scripts(source_dir)
+    if missing:
+        print(
+            f"upgrade 中止：安装源缺失受管脚本 {len(missing)} 项"
+            f"（{names_preview(missing)}）；未写入版本 {version}。请修复技能源后重试。",
+            file=sys.stderr)
+        return 1
     report = diff_report(root, manifest, version, source_dir)
     config_path = root / init_lib.CONFIG_REL
     config_stale = (
@@ -141,6 +164,9 @@ def apply_upgrade(root: Path, confirm: bool, version: str, source_dir: Path) -> 
     if (not report["changed"] and manifest.get("skillVersion") == version
             and not config_stale):
         print("受管脚本已是最新，无需升级。")
+        hint = init_lib.guard_absent_hint(root)
+        if hint:
+            print(hint)
         return 0
     try:
         with init_lib.init_lock(root):
@@ -169,6 +195,15 @@ def apply_upgrade(root: Path, confirm: bool, version: str, source_dir: Path) -> 
                 init_lib.atomic_write_text(target, content, mode=mode)
                 after[rel.as_posix()] = init_lib.sha256_text(
                     target.read_text(encoding="utf-8"))
+            # T33 复核：复制后、写 manifest 版本前确认受管脚本已与安装源对齐
+            mismatches = init_lib.script_source_mismatches(root, source_dir)
+            if mismatches:
+                print(
+                    "upgrade 复核失败：受管脚本与安装源仍不一致"
+                    f"（{len(mismatches)} 项，如 {'、'.join(mismatches[:3])}）；"
+                    f"未写入版本 {version}。请检查安装源/写入权限后重试。",
+                    file=sys.stderr)
+                return 1
             # 版本戳同步（值更新，不改其他配置）；回滚时按备份逐字节还原
             if config_path.is_file():
                 try:
@@ -216,6 +251,9 @@ def apply_upgrade(root: Path, confirm: bool, version: str, source_dir: Path) -> 
         print(f"upgrade 完成：{len(report['changed'])} 个受管脚本更新；backup={backup_id}")
     else:
         print(f"upgrade 完成：仅同步版本戳 {version}；backup={backup_id}")
+    hint = init_lib.guard_absent_hint(root)
+    if hint:
+        print(hint)
     return 0
 
 

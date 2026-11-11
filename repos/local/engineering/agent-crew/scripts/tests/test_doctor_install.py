@@ -4,11 +4,15 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from doctor_fixtures import ProjectFixture
+from doctor_fixtures import ProjectFixture, SKILL_DIR
+
+sys.path.insert(0, str(SKILL_DIR / "scripts"))
+import init as init_lib  # noqa: E402
 
 
 class DoctorInstallTest(unittest.TestCase):
@@ -87,6 +91,72 @@ class DoctorInstallTest(unittest.TestCase):
                 self.assertIn(key, item)
         self.assertTrue(out.is_file())
         self.assertEqual(report, json.loads(out.read_text(encoding="utf-8")))
+
+    def test_install_scripts_source_pass_warn_skip_and_strict(self):
+        names = list(init_lib.SCRIPT_MANIFEST)
+
+        # 源无 scripts/：覆盖集=SCRIPT_MANIFEST，全部源缺失 → warn（strict rc=1）
+        rc, report = self.fx.doctor_json("--only", "install.scripts_source")
+        self.assertEqual(0, rc, report)
+        item = self.fx.item(report, "install.scripts_source")
+        self.assertEqual("warn", item["status"], item)
+        self.assertIn(f"源缺失 {len(names)} 项", item["detail"])
+        self.assertIn("scripts/init.py", item["detail"])
+        proc = self.fx.doctor("--only", "install.scripts_source", "--strict", "--json")
+        self.assertEqual(1, proc.returncode, proc.stdout)
+
+        # 源补齐、项目仍只有 dispatch.py（源有/项目无）→ warn 项目缺失
+        origin_dir = self.fx.skill / "scripts"
+        origin_dir.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            text = (self.fx.script.read_text(encoding="utf-8") if name == "dispatch.py"
+                    else f"#!/usr/bin/env python3\n# managed {name}\n")
+            (origin_dir / name).write_text(text, encoding="utf-8")
+        rc, report = self.fx.doctor_json("--only", "install.scripts_source")
+        self.assertEqual(0, rc, report)
+        item = self.fx.item(report, "install.scripts_source")
+        self.assertEqual("warn", item["status"], item)
+        self.assertIn(f"项目缺失 {len(names) - 1} 项", item["detail"])
+        self.assertIn("scripts/init.py", item["detail"])
+
+        # 项目补齐且全部一致 → pass，detail 含核对数量
+        for name in names:
+            if name == "dispatch.py":
+                continue
+            target = self.fx.root / "scripts" / name
+            target.write_text(f"#!/usr/bin/env python3\n# managed {name}\n",
+                              encoding="utf-8")
+        rc, report = self.fx.doctor_json("--only", "install.scripts_source")
+        self.assertEqual(0, rc, report)
+        item = self.fx.item(report, "install.scripts_source")
+        self.assertEqual("pass", item["status"], item)
+        self.assertIn(f"核对 {len(names)} 项", item["detail"])
+
+        # 源脚本不同 → warn（非 strict rc 不变）；strict → rc=1；next 指向 upgrade
+        (origin_dir / "dispatch.py").write_text(
+            "#!/usr/bin/env python3\n# source newer\n", encoding="utf-8")
+        rc, report = self.fx.doctor_json("--only", "install.scripts_source")
+        self.assertEqual(0, rc, report)
+        item = self.fx.item(report, "install.scripts_source")
+        self.assertEqual("warn", item["status"], item)
+        self.assertIn(f"1/{len(names)}", item["detail"])
+        self.assertIn("scripts/dispatch.py", item["detail"])
+        self.assertIn("upgrade.py --apply --confirm", item["next"])
+        proc = self.fx.doctor("--only", "install.scripts_source", "--strict", "--json")
+        self.assertEqual(1, proc.returncode, proc.stdout)
+
+    def test_install_scripts_source_skips_without_manifest_or_source(self):
+        (self.fx.root / "docs/crew/manifest.json").unlink()
+        rc, report = self.fx.doctor_json("--only", "install.scripts_source")
+        self.assertEqual(0, rc, report)
+        self.assertEqual("skip", self.fx.item(report, "install.scripts_source")["status"])
+
+        self.fx.write_manifest()
+        proc = self.fx.doctor("--only", "install.scripts_source",
+                              "--check-source", str(self.fx.base / "no-skill"), "--json")
+        self.assertEqual(0, proc.returncode, proc.stdout)
+        item = self.fx.item(json.loads(proc.stdout), "install.scripts_source")
+        self.assertEqual("skip", item["status"], item)
 
     def test_readonly_full_run_zero_project_writes(self):
         self.fx.commit()

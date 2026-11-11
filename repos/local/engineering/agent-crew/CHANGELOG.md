@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.2.14 — 2026-11-11
+
+值守存在性检查（T31/FB-028）、版本假绿防护（T33/FB-031）与发布。
+
+### 新增
+
+- **T31/FB-028 值守存在性检查**：`scripts/doctor.py` 新增 `runtime.guard`——`guard.lock` 缺失、内容无法解析或 pid 不活 → warn（`--strict` 下 rc=1）；进程存活 → pass 并带 pid；`--only`/`--json`/profile/strict 语义与 `runtime.lock` 一致，不误报运行中的 guard。`scripts/init.py`（`--check` 与实际 init 完成提示）与 `scripts/upgrade.py`（完成提示，含「已是最新」早退）在 guard 未运行时追加一行启动提示，退出码语义不变。
+- **清单「必核 guard 存在」**：`templates/playbooks/release.md`、`references/orchestration-guide.md` §5.11、`templates/AGENTS-编排节.md` 安装/升级/体检、qoder/opencode 的 helm/firstmate 换舵与交接、`templates/playbooks/session-pickup.md` 均要求 `doctor --only runtime.guard` pass 带 pid；warn/fail 不得报发布、换舵或收口。项目侧使用指南与 verify-crew feature `doctor-guard-presence` 同步。
+
+### 修复
+
+- **T33/FB-031 版本假绿防护**：`scripts/doctor.py` 新增 `install.scripts_source`——受管脚本与安装源逐项比对（一致 pass、脚本旧 warn/strict fail、源缺失 skip）。`scripts/init.py` 在「旧脚本 + 新技能源 + 旧 manifest」时 rc=1、零写 manifest、保留旧 `skillVersion` 并提示先 `upgrade.py --apply --confirm`；`--refresh-block --confirm` 同根因旁路一并拦截。`scripts/upgrade.py` 源缺失与复制后复核不一致 rc=1。脚本比较按 CRLF 归一化文本哈希（仅换行差异视为一致，真实内容差异仍拦截）。
+
+### 测试
+
+- 新增 `test_2214_guard_presence.py`（清单落点 grep 防回退）、`test_2214_manifest_guard.py`（T33 CASE 场景/源缺失/新增脚本/CRLF/refresh-block）；补 `test_doctor_runtime.py`、`test_doctor_install.py`、`test_init.py`、`test_init_v2.py`、`test_upgrade.py` 用例。
+- 全量 pytest 0 fail（本版 875 passed + 374 subtests）；`crew-lint`（含 `--purity`）、`plan-status --selftest`/`--playbooks` 绿。
+- 版本 2.2.14：`SKILL.md` frontmatter 与标题、`init.py` fallback、本段、`test_crew_lint.py`、`test_220_final.py`、`test_224_retro.py`、`test_225_patch.py`、`test_2214_guard_presence.py` 版本断言同步。
+
 ## 2.2.13 — 2026-11-11
 
 验证技能交付门（A）、verify-crew 转正（B）、维护循环（C）、凭据红线（D）、派单根因（E）、T27 非阻断项（F）、交接上下文预算（H）、角色/模型选择（I）与发布。

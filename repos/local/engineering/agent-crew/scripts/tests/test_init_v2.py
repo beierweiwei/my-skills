@@ -48,6 +48,12 @@ class InitV2Test(unittest.TestCase):
     def run_init(self, *extra: str) -> tuple[int, str]:
         return self.run_init_at(self.root, *extra)
 
+    def write_aligned_manifest(self, fx: ProjectFixture) -> None:
+        """ProjectFixture 默认 manifest=2.1.0；init 源为真实技能版本，对齐避免 T33 误判。"""
+        manifest = fx.manifest()
+        manifest["skillVersion"] = init_v2.read_skill_version()
+        fx.write_manifest(manifest)
+
     def test_default_config_and_template_redlines_are_generic(self):
         # G10/G12：默认红线与模板同步，去掉平台专属项；Captain 决策保留通用 8 项
         template = json.loads(
@@ -223,7 +229,7 @@ class InitV2Test(unittest.TestCase):
             fx.config["skillRoot"] = os.path.relpath(skill, fx.root).replace(os.sep, "/")
             fx.write_config()
             fx.composed_entries = fx.write_composed_agents()
-            fx.write_manifest()
+            self.write_aligned_manifest(fx)
 
         apply_skill_root(repo_skill)
         code, out = self.run_init_at(fx.root, "--check")
@@ -269,12 +275,47 @@ class InitV2Test(unittest.TestCase):
         fx.write_config()
         manifest = fx.manifest()
         manifest["composedAgents"] = []  # 隔离提示块，避免既有组合校验干扰 rc
+        manifest["skillVersion"] = init_v2.read_skill_version()
         fx.write_manifest(manifest)
         code, out = self.run_init_at(fx.root, "--check")
         self.assertEqual(0, code, out)
         self.assertIn("skillRoot 不存在或不可读", out)
         self.assertIn("下一步", out)
         self.assertNotIn("开发 worktree", out)
+
+    def test_check_guard_hint_absent_uses_configured_helm_name(self):
+        base = Path(self._tmp.name) / "fx"
+        fx = ProjectFixture(base)
+        fx.config["skillVersion"] = init_v2.read_skill_version()
+        fx.config["helm"] = {"agentName": "helm-demo"}
+        fx.write_config()
+        self.write_aligned_manifest(fx)
+        code, out = self.run_init_at(fx.root, "--check")
+        self.assertEqual(0, code, out)
+        self.assertIn("提示：未检测到值守 guard", out)
+        self.assertIn("--helm helm-demo", out)
+
+    def test_check_guard_hint_silent_when_alive(self):
+        base = Path(self._tmp.name) / "fx"
+        fx = ProjectFixture(base)
+        fx.config["skillVersion"] = init_v2.read_skill_version()
+        fx.write_config()
+        self.write_aligned_manifest(fx)
+        crew = init_v2.crew_dir(fx.root)
+        crew.mkdir(parents=True, exist_ok=True)
+        (crew / "guard.lock").write_text(f"{os.getpid()}\n", encoding="utf-8")
+        code, out = self.run_init_at(fx.root, "--check")
+        self.assertEqual(0, code, out)
+        self.assertNotIn("提示：未检测到值守 guard", out)
+
+    def test_check_guard_hint_silent_for_non_git(self):
+        base = Path(self._tmp.name) / "fx"
+        fx = ProjectFixture(base)
+        fx.config["skillVersion"] = init_v2.read_skill_version()
+        fx.write_config()
+        shutil.rmtree(fx.root / ".git")
+        code, out = self.run_init_at(fx.root, "--check")
+        self.assertNotIn("提示：未检测到值守 guard", out)
 
     def test_check_fixed_checkouts_do_not_hint_worktree(self):
         # F2：真实 submodule / --separate-git-dir 检出不再提示开发 worktree
@@ -292,7 +333,7 @@ class InitV2Test(unittest.TestCase):
                     skill, fx.root).replace(os.sep, "/")
                 fx.write_config()
                 fx.composed_entries = fx.write_composed_agents()
-                fx.write_manifest()
+                self.write_aligned_manifest(fx)
                 code, out = self.run_init_at(fx.root, "--check")
                 self.assertEqual(0, code, out)
                 self.assertNotIn("开发 worktree", out)
@@ -305,6 +346,7 @@ class InitV2Test(unittest.TestCase):
         fx = ProjectFixture(base)
         fx.config["skillVersion"] = init_v2.read_skill_version()
         fx.write_config()
+        self.write_aligned_manifest(fx)
         copy_rel = "skill-src/repos/local/engineering/agent-crew/references/crew-rules.md"
         copy = fx.root / copy_rel
         copy.parent.mkdir(parents=True)

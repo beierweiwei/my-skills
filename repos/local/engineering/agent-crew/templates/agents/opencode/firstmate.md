@@ -66,6 +66,7 @@ permission:
 ## 上下文与工位
 - 副舵自身 ctx ≥30% 停止接新活，完成当前切片后按 `progress.md` 尾部交接；≥60% 立即启动新副舵接替（同 tab 内 split 起 `firstmate<N+1>`（`--kind opencode`），新舵首报后关旧 pane）；不在运行中压缩。opencode 配置/agent/skill 不热重载，改完重启会话。
 - worker ctx ≥30% 不接新切片，≥60% 立即停；运行中不压缩，下一轮由副舵 `/compact` 或关闭重建。
+- **换舵/重建后必核 guard 存在**：`python3 scripts/doctor.py --only runtime.guard`——pass 且 detail 带 pid 才算值守在线；warn/fail 按输出 next 启动 `python3 scripts/crew-guard.py --helm <当前舵> --interval 120` 后再派新活。
 - 收口回执必填工位处置（F4）；保留窗与标签按 W4；交接 digest 含 pane 清单、待关项与未落盘决策（无则写「无」）。
 
 ## 自动驾驶

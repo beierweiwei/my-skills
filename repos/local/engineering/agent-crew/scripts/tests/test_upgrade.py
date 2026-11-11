@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -97,6 +98,64 @@ class UpgradeTest(unittest.TestCase):
              "--git-common-dir"], capture_output=True, text=True).stdout.strip()
         directory = Path(common) / "crew" / "backups"
         return sorted(directory.iterdir()) if directory.is_dir() else []
+
+    def crew_dir(self) -> Path:
+        common = subprocess.run(
+            ["git", "-C", str(self.root), "rev-parse", "--path-format=absolute",
+             "--git-common-dir"], capture_output=True, text=True).stdout.strip()
+        return Path(common) / "crew"
+
+    def test_apply_prints_guard_hint_when_absent(self):
+        applied = self.apply_version_only()
+        self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
+        self.assertIn("upgrade 完成", applied.stdout)
+        self.assertIn("提示：未检测到值守 guard", applied.stdout)
+
+    def test_apply_guard_hint_silent_when_alive(self):
+        crew = self.crew_dir()
+        crew.mkdir(parents=True, exist_ok=True)
+        (crew / "guard.lock").write_text(f"{os.getpid()}\n", encoding="utf-8")
+        applied = self.apply_version_only()
+        self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
+        self.assertIn("upgrade 完成", applied.stdout)
+        self.assertNotIn("提示：未检测到值守 guard", applied.stdout)
+
+    def test_apply_source_missing_script_fails_without_version_bump(self):
+        # T33 覆盖集：源缺受管脚本 → rc=1、版本不变、零写入（不得早退假绿）
+        broken = self.base / "skill-missing-script"
+        shutil.copytree(self.v2, broken)
+        (broken / "scripts/crew-msg.py").unlink()
+        before_manifest = sha(self.root / "docs/crew/manifest.json")
+        before_config = sha(self.root / ".planning/orchestration.json")
+        proc = self.upgrade_from(broken, "--apply", "--confirm")
+        self.assertEqual(1, proc.returncode, proc.stdout + proc.stderr)
+        self.assertIn("安装源缺失受管脚本", proc.stderr)
+        self.assertIn("scripts/crew-msg.py", proc.stderr)
+        self.assertEqual("2.0.0", self.manifest()["skillVersion"])
+        self.assertEqual("2.0.0", self.config()["skillVersion"])
+        self.assertEqual(before_manifest, sha(self.root / "docs/crew/manifest.json"))
+        self.assertEqual(before_config, sha(self.root / ".planning/orchestration.json"))
+
+    def test_apply_noop_prints_guard_hint_when_absent(self):
+        applied = self.apply_version_only()
+        self.assertEqual(0, applied.returncode, applied.stdout + applied.stderr)
+        again = self.upgrade_from(
+            self.make_version_only_skill("2.0.1"), "--apply", "--confirm")
+        self.assertEqual(0, again.returncode, again.stdout + again.stderr)
+        self.assertIn("已是最新", again.stdout)
+        self.assertIn("提示：未检测到值守 guard", again.stdout)
+
+    def test_apply_noop_guard_hint_silent_when_alive(self):
+        crew = self.crew_dir()
+        crew.mkdir(parents=True, exist_ok=True)
+        (crew / "guard.lock").write_text(f"{os.getpid()}\n", encoding="utf-8")
+        applied = self.apply_version_only()
+        self.assertEqual(0, applied.returncode, applied.stdout + applied.stderr)
+        again = self.upgrade_from(
+            self.make_version_only_skill("2.0.1"), "--apply", "--confirm")
+        self.assertEqual(0, again.returncode, again.stdout + again.stderr)
+        self.assertIn("已是最新", again.stdout)
+        self.assertNotIn("提示：未检测到值守 guard", again.stdout)
 
     def test_diff_apply_rollback(self):
         dispatch = self.root / "scripts/dispatch.py"

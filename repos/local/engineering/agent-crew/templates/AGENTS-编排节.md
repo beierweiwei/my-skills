@@ -25,6 +25,7 @@
 - 块重渲染：`python3 scripts/init.py --refresh-block --confirm`（只重渲染本节，块外不动；技能版本升级后使用，换机/改 skillRoot 无需重渲染）。
 - 受管脚本升级/回滚：`python3 scripts/upgrade.py --diff`、`--apply --confirm`、`--rollback <backup-id>`（只替换受管脚本，逐字节可回滚）。
 - 体检：`python3 scripts/doctor.py --root . --profile release --strict --json`；失败按输出 `next` 处理，不静默放行。
+- **必核 guard 存在**：升级、换舵或换会话重建后跑 `python3 scripts/doctor.py --only runtime.guard`——pass 且 detail 带 pid 才算值守在线；warn/fail 按输出 `next` 启动 `python3 scripts/crew-guard.py --helm <当前舵> --interval 120` 后复跑，未通过不得报升级/换舵完成。
 
 ### 进度与协同
 
