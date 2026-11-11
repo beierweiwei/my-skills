@@ -879,7 +879,8 @@ def resolve_notify_target(agents: list[dict], workspace: str | None, role: str) 
     """按 workspace + role 选当前活跃 helm/角色，返回 agent 名。
 
     helm 按名称尾部数字取最新代际（最新代际须唯一）；其他角色要求唯一匹配，多实例
-    并存时用 --agent 显式指定。目标 agent_status 为 done/unknown/blocked 时 rc=1 拒绝。
+    并存时用 --agent 显式指定。agent_status 归一化（strip+lower）后仅 idle/working
+    视为活跃；blocked 单独拒绝，缺失/空白/done/unknown/其他值一律 rc=1 拒绝。
     """
     candidates = [agent for agent in agents
                   if isinstance(agent.get("name"), str)
@@ -913,14 +914,19 @@ def resolve_notify_target(agents: list[dict], workspace: str | None, role: str) 
                 f"workspace={workspace or '?'} 匹配到多个 {role} agent：{names}；"
                 "多流并存请用 --agent <名> 指定", 1)
         target = candidates[0]
-    status = str(target.get("agent_status") or "")
+    raw_status = target.get("agent_status")
+    status = str(raw_status or "").strip().lower()
     if status == "blocked":
         raise DispatchError(
             f"目标处于 blocked（{target['name']}，agent_status=blocked），"
             "herdr 会拒绝投递；先处置 blocked 或改用 --agent", 1)
-    if status in ("done", "unknown"):
+    if status not in ("idle", "working"):
+        if raw_status is None:
+            shown = "缺失/None"
+        else:
+            shown = str(raw_status).strip() or "空白"
         raise DispatchError(
-            f"最新代际已结束（{target['name']}，agent_status={status}）；"
+            f"目标不可用（{target['name']}，agent_status={shown}）；"
             "请先确认当前活跃 helm / 用 herdr agent list 核实", 1)
     return target["name"]
 
@@ -1124,8 +1130,9 @@ def cmd_compose(args: argparse.Namespace, root: Path) -> int:
     return 0 if outcome.ok else 1
 
 
-def deliver_qoder(outcome: ComposeOutcome, name: str,
-                  pane: str, run_dir: Path, permission_mode: str | None) -> dict:
+def deliver_qoder(outcome: ComposeOutcome, name: str, pane: str,
+                  run_dir: Path, permission_mode: str | None,
+                  model: str | None = None) -> dict:
     run_dir.mkdir(parents=True, exist_ok=True)
     qoder_dir = run_dir / "qoder"
     qoder_dir.mkdir(parents=True, exist_ok=True)
@@ -1149,6 +1156,8 @@ def deliver_qoder(outcome: ComposeOutcome, name: str,
     ]
     for tool in outcome.disallowed_tools:
         argv.extend(["--disallowed-tools", tool])
+    if model:
+        argv.extend(["-m", model])
     if permission_mode:
         argv.extend(["--permission-mode", permission_mode])
     # Qoder 会话名对齐 Herdr/dispatch 启动名，保证 SendMessage/peer 可互认
@@ -1163,7 +1172,8 @@ def deliver_qoder(outcome: ComposeOutcome, name: str,
     }
 
 
-def deliver_opencode(outcome: ComposeOutcome, name: str, pane: str, run_dir: Path) -> dict:
+def deliver_opencode(outcome: ComposeOutcome, name: str, pane: str, run_dir: Path,
+                     model: str | None = None) -> dict:
     run_dir.mkdir(parents=True, exist_ok=True)
     composed_path = run_dir / f"{outcome.role_id}.md"
     composed_path.write_text(outcome.composed_body, encoding="utf-8")
@@ -1178,6 +1188,7 @@ def deliver_opencode(outcome: ComposeOutcome, name: str, pane: str, run_dir: Pat
         "--pane", pane,
         "--",
         "--agent", f"crew-{outcome.role_id}",
+        *(["-m", model] if model else []),
     ])
     return {
         "delivery": "composed-agent",
@@ -1234,10 +1245,12 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
         )
 
     run_dir = crew_dir(root) / "compose" / run_id()
+    model = (args.model or "").strip()
     if runtime == "qoder":
-        delivery = deliver_qoder(outcome, name, args.pane, run_dir, args.permission_mode)
+        delivery = deliver_qoder(outcome, name, args.pane, run_dir,
+                                 args.permission_mode, model)
     else:
-        delivery = deliver_opencode(outcome, name, args.pane, run_dir)
+        delivery = deliver_opencode(outcome, name, args.pane, run_dir, model)
 
     skill_root = outcome.skill_root
     base_rel = outcome.base_path.relative_to(skill_root).as_posix() if outcome.base_path else ""
@@ -1250,6 +1263,7 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
         "pane": delivery.get("pane", args.pane),
         "composePath": delivery["composePath"],
         "composedSha256": outcome.report["composedSha256"],
+        "model": model,
         "startedAt": utc_now(),
     }
     save_registry(root, registry)
@@ -1259,6 +1273,7 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
         "role": args.role,
         "runtime": runtime,
         "agent": name,
+        "model": model,
         "delivery": delivery["delivery"],
         "policySource": "base",
         "baseRef": f"{skill_version or 'unknown'}:{base_rel}",
@@ -1280,6 +1295,7 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
         "agent": name,
         "role": args.role,
         "runtime": runtime,
+        "model": model,
         "delivery": delivery["delivery"],
         "composedSha256": outcome.report["composedSha256"],
         "composePath": delivery["composePath"],
@@ -1550,6 +1566,7 @@ def build_parser() -> argparse.ArgumentParser:
     start_p.add_argument("--name", help="显式 Herdr/dispatch 实例名（默认 helm 用配置 helm.agentName，其余派生）")
     start_p.add_argument("--instance", type=int, help="同角色多实例编号（Herdr 名后缀）")
     start_p.add_argument("--permission-mode", help="透传 qodercli --permission-mode（默认不传）")
+    start_p.add_argument("--model", help="透传运行时模型（qoder/opencode：-m <model>；空不传）")
     start_p.add_argument("--json", action="store_true")
     start_p.set_defaults(func=cmd_start)
 

@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.2.13 — 2026-11-11
+
+验证技能交付门（A）、verify-crew 转正（B）、维护循环（C）、凭据红线（D）、派单根因（E）、T27 非阻断项（F）、交接上下文预算（H）、角色/模型选择（I）与发布。
+
+### 新增
+
+- **A 验证技能交付门**：`references/crew-rules.md` F6 明确运行态证据＝项目验证技能对应 feature 的真实驱动证据（命令+输出+退出码+证据路径），diff/接口 200/自述只作旁证；技能/模板/升级改动必须跑项目验证技能，无验证技能先 create（外部技能未安装则 ⏸ 上抛 Captain）；release 剧本交付门移到项目升级/安装之后执行；两 runtime helm/firstmate 收口断言同步。
+- **B verify-crew 转正（本仓）**：按 pstack 契约补全 feature map（README 索引 + 5 feature 均含四 H2）、证据标准成文（真实 CLI、退出码+输出原文、/tmp 夹具隔离、清理后证据仍在）；5 feature 真实驱动留证。
+- **C 维护循环**：新增 `templates/playbooks/maintain-verification.md`（Phase 1–6、source wave + live pass、Outcome clean/changed/blocked、Edit scope 只改验证技能自身）；`templates/playbooks/README.md` 登记触发（发布后必跑 + 每周兜底）；release 剧本新增发布后维护循环步骤；helm 复盘路由接入维护检查。
+- **D/FB-023 凭据红线**：`crew-rules.md` X4 补凭据/会话文件落点（仅 `.scratch/` 0600 或平台 env；禁止复制进沙箱/平台/共享目录/线程工作区；涉凭据一律上抛不得代决）；firstmate/runner 模板加凭据自检；凭据复制检查器 + 测试（字面量扫描 + 模板断言兜底）。
+- **E/FB-025 派单根因**：D1 工单必填「上一版为什么没生效（根因）」，无根因不派活；D2 澄清根因属上下文不属实现步骤；helm/firstmate 模板与 `templates/_templates/ticket.md` 同步。
+- **H 交接上下文预算**：helm 模板交接读取白名单 + 32KB 必读预算；`plan-status.py --handover` 输出必读字节数并对超阈值提示；`doctor.py` 新增 `role.overlay_budget`（覆盖层 8KB / 组合 20KB）与 `context.baseline`（60KB）非阻断 warn；F11 与 `plan-discipline` §5.1 同步。
+- **I 角色/模型选择**：`orchestration.json` 顶层 `agents`（default/roles/playbooks）由 init 默认生成、存量缺键深合并回落；`dispatch.py start --model` 对 qoder/opencode 透传 `-m`（空 model 不传）并记录；`doctor.py` 校验 `agents.config`（结构 fail / 通道命令缺失或剧本角色未知 warn）；helm/firstmate 模板与 playbooks README 写明「剧本级角色 > 全局角色 > default」；剧本不硬编码模型（测试防回退）。Claude 通道只读执行一次（网关实际模型 glm-5.3）并切回 qoder。
+
+### 修复
+
+- **S3/A-S5 返工提醒降噪**：`crew-guard.py` 按最长前缀匹配 receipt task → 流 plan 目录，过滤已关闭/不活跃 task；活跃 task ≥3 仍提醒。
+- **A-S8 notify 活跃态**：`dispatch.py notify` 对缺失/None `agent_status` 不再视为活跃。
+- **A-S9 交接摘要边界**：`plan-status.py` `_read_head` 在文件大小恰等于窗口且末行无换行时保留整行。
+
+### 测试
+
+- 新增 `test_2213_rules.py`、`test_2213_playbooks.py`、`test_2213_agent_model.py`、`test_2213_context_budget.py`；补 `test_crew_guard.py`、`test_dispatch.py`、`test_plan_status_handover_rotate.py` 用例。
+- 全量 pytest 0 fail（≥ 2.2.12 基线 714 passed + 225 subtests）；`crew-lint`（含 `--purity`）、`plan-status --selftest`/`--playbooks` 绿。
+- 版本 2.2.13：`SKILL.md` frontmatter 与标题、`init.py` fallback、`test_crew_lint.py`、`test_220_final.py`、`test_224_retro.py`、`test_225_patch.py` 版本断言同步。
+
 ## 2.2.12 — 2026-11-11
 
 2.2.12 小修（T22/T24/T25 + 流程缺口 FB-017–FB-022）与发布。

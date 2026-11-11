@@ -109,6 +109,36 @@ class _TmpRepoTest(unittest.TestCase):
         self.tmp = Path(self._tmp.name)
 
 
+class ReadHeadBoundaryTest(_TmpRepoTest):
+    """A-S9：_read_head 窗口边界（大小恰等于窗口且末行无换行时不得丢完整行）。"""
+
+    def _progress(self, body: bytes) -> Path:
+        path = self.tmp / "progress.md"
+        path.write_bytes(body)
+        return path
+
+    def test_exact_window_without_trailing_newline_keeps_last_line(self):
+        body = b"first-line\nsecond-line-no-newline"
+        path = self._progress(body)
+        self.assertEqual(body.decode("utf-8"), ps._read_head(path, len(body)))
+
+    def test_oversized_file_drops_incomplete_last_line(self):
+        body = b"first-line\nsecond-line-no-newline"
+        path = self._progress(body)
+        window = len(b"first-line\nsecond")
+        self.assertEqual("first-line\n", ps._read_head(path, window))
+
+    def test_window_ending_at_newline_keeps_complete_lines(self):
+        body = b"first-line\nsecond-line-no-newline"
+        path = self._progress(body)
+        window = len(b"first-line\n")
+        self.assertEqual("first-line\n", ps._read_head(path, window))
+
+    def test_window_smaller_than_first_line_returns_empty(self):
+        path = self._progress(b"no-newline-at-all")
+        self.assertEqual("", ps._read_head(path, 5))
+
+
 # —— A. --handover ——
 
 class HandoverTest(_TmpRepoTest):
@@ -199,6 +229,29 @@ class HandoverTest(_TmpRepoTest):
         self.assertEqual(rc, 0)
         active = out.split("## 活跃流", 1)[1].split("## 待 Captain", 1)[0]
         self.assertIn("- 无", active)
+
+    def test_structural_max_with_budget_lines_stays_under_limit(self):
+        # B2：8+ 活跃流 + 8+ C 行 + 3 条最近完成 + 看板超限（预算块 3 行全占）
+        refs = [f".planning/stream-{i}/task_plan.md" for i in range(1, 10)]
+        plans = {"portfolio": portfolio_body(
+            refs,
+            captain_rows=[f"| C{i:02d} | 待拍板 {i} | P0 | — | 需 Captain 决策 |"
+                          for i in range(1, 10)],
+            recent=["- [x] 完成 01", "- [x] 完成 02", "- [x] 完成 03"],
+        )}
+        for i in range(1, 10):
+            plans[f"stream-{i}"] = stream_body(
+                [("阶段一", "complete"), ("阶段二", "in_progress")])
+        repo = make_repo(self.tmp, plans, progress=progress_body(numbered_entries(3)))
+        board = repo / "docs/进度追踪.md"
+        board.parent.mkdir(parents=True, exist_ok=True)
+        board.write_bytes(b"x" * 40000)
+        rc, out, err = self._run(repo)
+        self.assertEqual(rc, 0, err)
+        self.assertLessEqual(len(out.splitlines()), ps.HANDOVER_MAX_LINES)
+        self.assertIn("## 交接必读预算", out)
+        self.assertIn("超预算", out)  # 看板 40KB：预算块 3 行（含提示）
+        self.assertEqual(2, out.count("另有"))  # 活跃流/C 行各一条溢出注
 
     def test_empty_repo_degrades_readably(self):
         root = self.tmp / "empty"

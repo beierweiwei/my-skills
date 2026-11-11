@@ -73,6 +73,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from crew_paths import CrewPathsError, crew_dir  # noqa: E402
+
 SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 
 PHASE_RE = re.compile(r"^### Phase\s+\d+\s*[:：]\s*(.+?)\s*$")
@@ -88,12 +91,18 @@ WRITE_HINT = "请运行 `python3 scripts/plan-status.py --write` 重刷看板"
 # —— 交接瘦身（2.2.7）：--handover 摘要 / --rotate 归档 / --write 体量告警 ——
 # 阈值以常量落代码（--help 与模块 docstring 同步；单测直接构造边界夹具）：
 #   progress ≥ PROGRESS_WARN_BYTES 字节或 ≥ PROGRESS_WARN_ENTRIES 条 → --write stderr 告警；
-#   --handover 恒 ≤ HANDOVER_MAX_LINES 行（结构上限：活跃流/待 Captain 各 8 条 + 溢出注 1 行）；
+#   --handover 恒 ≤ HANDOVER_MAX_LINES 行（结构上限：活跃流/待 Captain 各 8 条 + 溢出注
+#   1 行 + 预算块最多 3 行 = 42；上限 43 留 1 行余量）；
 #   --rotate 默认 dry-run；apply 走 flock + 临时文件 + os.replace，只归档不删除。
-HANDOVER_MAX_LINES = 40
+HANDOVER_MAX_LINES = 43
 HANDOVER_MAX_STREAMS = 8
 HANDOVER_MAX_CAPTAIN = 8
 HANDOVER_RECENT = 3
+# 交接必读字节预算（H1）：摘要 + 看板 + 活跃流 Next Step/Status + feedback 待复盘命中 +
+# guard.handoff；Decisions/Deviation/Backlog 不整读、不计入；超阈值只提示先摘要/grep。
+HANDOVER_BUDGET_BYTES = 32 * 1024
+HANDOVER_BUDGET_HINT = (
+    "- 超预算：先摘要/关键词 grep（Decisions/Deviation/Backlog 不整读），再按需定向补读")
 PROGRESS_TAIL_BYTES = 16384
 PROGRESS_RECENT_WINDOWS = (PROGRESS_TAIL_BYTES, 65536, None)  # 头窗不足 3 条时逐级扩大
 PROGRESS_SECTION = "自动驾驶里程"
@@ -490,11 +499,13 @@ def _entry_blocks(lines: list[str], *, fallback_stops_at_heading: bool = False
 
 
 def _read_head(path: Path, max_bytes: int = PROGRESS_TAIL_BYTES) -> str:
-    """只读文件头部 max_bytes（大文件禁止整读）；截断处丢弃最后一个不完整行。"""
+    """只读文件头部 max_bytes（大文件禁止整读）；文件未超出窗口时全读，
+    超出时截断处丢弃最后一个不完整行。"""
     with open(path, "rb") as fh:
-        data = fh.read(max_bytes)
-    if len(data) < max_bytes:
+        data = fh.read(max_bytes + 1)
+    if len(data) <= max_bytes:
         return data.decode("utf-8", errors="replace")
+    data = data[:max_bytes]
     newline = data.rfind(b"\n")
     data = data[:newline + 1] if newline >= 0 else b""
     return data.decode("utf-8", errors="replace")
@@ -549,13 +560,52 @@ def _fresh_state(root: Path, cfg: dict, plans: list[Plan]) -> str:
     return f"新鲜（{board_rel}）"
 
 
+def _handover_budget(root: Path, cfg: dict, pdir: str, active_plans: list[Plan],
+                     summary_bytes: int) -> dict[str, int]:
+    """交接必读量估算（UTF-8 字节）：摘要本身 + 看板 + 活跃流 Next Step/Status +
+    feedback 待复盘行 + guard.handoff。只读白名单必读项；Decisions/Deviation/Backlog
+    不整读、不计入；估算不含预算行自身（差异 < 一行）。"""
+    board_rel = str((cfg.get("board") or {}).get("path") or "")
+    board_path = root / board_rel if board_rel else None
+    board = (len(board_path.read_bytes())
+             if board_path is not None and board_path.is_file() else 0)
+    streams = 0
+    for plan in active_plans:
+        next_step = "\n".join(_next_step_lines(plan)).encode("utf-8")
+        statuses = "\n".join(f"{name} {status}" for name, status in plan.phases).encode("utf-8")
+        streams += len(next_step) + len(statuses)
+    feedback = 0
+    feedback_path = root / pdir / "feedback.md"
+    try:
+        feedback_text = feedback_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        feedback_text = ""
+    for line in feedback_text.splitlines():
+        if "待复盘" in line:
+            feedback += len(line.encode("utf-8")) + 1
+    handoff = 0
+    try:
+        handoff_path = crew_dir(root) / "guard.handoff"
+        if handoff_path.is_file():
+            handoff = len(handoff_path.read_bytes())
+    except (CrewPathsError, OSError):
+        pass
+    return {
+        "total": summary_bytes + board + streams + feedback + handoff,
+        "summary": summary_bytes, "board": board, "streams": streams,
+        "feedback": feedback, "handoff": handoff,
+    }
+
+
 def handover(root: Path, cfg: dict, plans: list[Plan]) -> int:
-    """≤HANDOVER_MAX_LINES 行交接摘要到 stdout；只读 .planning，不写任何文件。"""
+    """≤HANDOVER_MAX_LINES 行交接摘要到 stdout；只读 .planning，不写任何文件。
+    末尾附「交接必读预算」（H1：本次必读字节 + 阈值 32768，超限提示先摘要/grep）。"""
     pattern = cfg["portfolioMatch"]
     portfolio = next((p for p in plans if fnmatch.fnmatch(p.path.parent.name, pattern)), None)
     pdir = str(cfg.get("portfolioDir") or ".planning/portfolio").rstrip("/")
 
     active: list[str] = []
+    active_plans: list[Plan] = []
     captain: list[str] = []
     if portfolio is not None:
         index = {p.rel: p for p in plans}
@@ -571,11 +621,13 @@ def handover(root: Path, cfg: dict, plans: list[Plan]) -> int:
                 f"- **{cell(name)}**（`{ref or target.rel}`）— 当前阶段："
                 f"{cell(current_phase(target))}；Next Step：{next_step}"
             )
+            active_plans.append(target)
         cap_prefix = cfg["backlog"]["captainPrefix"]
         captain = _captain_lines(plans, portfolio, cap_prefix, name_by_rel)
     if len(active) > HANDOVER_MAX_STREAMS:
         more = len(active) - HANDOVER_MAX_STREAMS
         active = active[:HANDOVER_MAX_STREAMS] + [f"- …另有 {more} 个活跃流（见看板流表）"]
+        active_plans = active_plans[:HANDOVER_MAX_STREAMS]
     if len(captain) > HANDOVER_MAX_CAPTAIN:
         more = len(captain) - HANDOVER_MAX_CAPTAIN
         captain = captain[:HANDOVER_MAX_CAPTAIN] + [f"- …另有 {more} 条待 Captain（见看板）"]
@@ -599,6 +651,16 @@ def handover(root: Path, cfg: dict, plans: list[Plan]) -> int:
         "## 看板",
         _fresh_state(root, cfg, plans),
     ]
+    budget = _handover_budget(root, cfg, pdir, active_plans,
+                              len(("\n".join(out) + "\n").encode("utf-8")))
+    out += [
+        "## 交接必读预算",
+        f"- 本次必读字节：{budget['total']}（阈值 {HANDOVER_BUDGET_BYTES}；"
+        f"摘要 {budget['summary']} / 看板 {budget['board']} / 活跃流 {budget['streams']} / "
+        f"feedback {budget['feedback']} / handoff {budget['handoff']}）",
+    ]
+    if budget["total"] > HANDOVER_BUDGET_BYTES:
+        out.append(HANDOVER_BUDGET_HINT)
     # 结构上限已保证 ≤HANDOVER_MAX_LINES（见常量注释）；防御性兜底不静默丢块。
     assert len(out) <= HANDOVER_MAX_LINES, f"交接摘要超行数上限：{len(out)}"
     sys.stdout.write("\n".join(out) + "\n")

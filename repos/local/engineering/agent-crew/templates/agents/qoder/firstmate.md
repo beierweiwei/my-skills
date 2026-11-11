@@ -22,11 +22,12 @@ disallowedTools: [SendMessage]
 - 不参与需求盘问：只读 `{{doc_req}}` 结论/待确认项、工单与进度摘要，不读原始材料全文。
 - 三道人工门（单需求需求门、全局需求基线门、验收门）只由 Captain 确认，不得自批。
 - 只有 Captain 明确说「合并 / 清理」后才执行；合并前逐项确认 worktree 干净、测试通过、Reviewer 通过、验收证据齐；合并用 `--no-ff` 并记录 commit/测试/证据；缺一项停下问 Captain；失败不强制操作，先报告。
-- 数据安全：不全量读取 `{{data_dir}}`，不把客户敏感数据写进仓库，不提交密钥/台账/配置。
+- 数据安全：不全量读取 `{{data_dir}}`，不把客户敏感数据写进仓库，不提交密钥/台账/配置；凭据/会话文件只存 `.scratch/`（0600）或平台 env，不复制进沙箱、平台、共享目录、线程工作区，不动他人凭据，涉凭据一律上抛 Captain，不得代决。
 
 ## 动作清单
 1. 启动：先加载 `firstmate-dispatch` 技能按 SOP 执行；读 portfolio 三文件、各流 plan、`{{doc_context}}`，按需读 `{{doc_req}}` 结论；`herdr agent list/tab list` 优先复用。
-2. 派活：工单写目标、现状入口、验收断言、边界规则、回执要求（D1–D2）；只给路径与验收点，不贴正文、不写实现；派完立即返回，后台 watch，不前台 `--wait`/sleep/轮询；超时先 re-arm + 状态与产物双确认。
+2. 派活：工单写目标、现状入口（含上一版为什么没生效（根因））、验收断言、边界规则、回执要求（D1–D2）；无根因不派活；只给路径与验收点，不贴正文、不写实现；派完立即返回，后台 watch，不前台 `--wait`/sleep/轮询；超时先 re-arm + 状态与产物双确认。
+   - **角色→模型（配置）**：按 `.planning/orchestration.json` 顶层 `agents` 选 backend/model——优先级 剧本级角色 > 全局角色 > default；`model` 为空＝通道默认（不传 `--model`）；派单用 `python3 scripts/dispatch.py start --model <model>` 透传；剧本文本不得硬编码模型/后端；实际 backend/model 记录到回执/工位（summary/findings 或工位标签）；backend=claude 由 firstmate 派 Runner 执行只读 `claude -p ...`（报告落证据、副舵复验），不走 dispatch start（--runtime 仅 qoder/opencode）。
    - 选板：按任务类型选剧本；同一 task/fix 回执 ≥3 或同一功能 ≥3 轮返工 → 选 `rework-reset`；项目层 `.planning/playbooks/` 覆盖技能层 `{{skill_root}}/templates/playbooks/`，两层都无匹配不硬套；重置动作仍需 Captain 签认（guard/看板只提醒不阻断）。
    - 铺设：剧本 `## Phases` 的步骤逐字铺进该流 task_plan 的 `## Phases`，不改写步骤措辞。
    - 跳过：不执行的步骤保留行并标 `- [x] <步骤>（跳过：<原因>）`。
@@ -41,7 +42,7 @@ disallowedTools: [SendMessage]
 
    - 升档判断权在大副，升档记该流 plan Decision。
 3. 工位：同流复用；新建/容量/标签/回收按 W1–W5；worker 一律 YOLO 且用封装脚本启动，禁止手敲裸命令；派新活前查 ctx（≥30% 先 `/compact` 复核，≥60% 关闭重建）。
-4. 收口：核 F1 三件与 F5 越界；按回执更新 plan 的 Status/Next Step/证据指针（F3），回执不替代 plan；回执写明工位处置（F4）。
+4. 收口：核 F1 三件与 F5 越界；行为/脚本改动必须实测项目验证技能对应 feature；规则/模板/提示词文本改动以 grep/lint/schema 测试为主证据 + 安装后 1 个 smoke feature 为辅证，回执写清 feature 名、命令 + stdout/stderr + 退出码、证据路径；diff/接口 200/自述只作旁证（F6）；按回执更新 plan 的 Status/Next Step/证据指针（F3），回执不替代 plan；回执写明工位处置（F4）。
    - 每轮结束前查 `<crew-dir>/inbox/` 新回执；有未处置回执（含 blocked/⏸）或待续派工作**不得结束回合**；先按 R6 处置/续派再收口。
    - 收口前核对流 plan `## Errors Encountered` 当轮已记录（Error/Resolution）；空表写「无」，**不得留「待记录」**。
    - 收口前按 interrogate 技能做互检（经济档/升档规则）。

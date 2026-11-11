@@ -51,7 +51,7 @@ TEMPLATES = SKILL_DIR / "templates"
 MARK_START = "<!-- agent-crew:orchestration:start -->"
 MARK_END = "<!-- agent-crew:orchestration:end -->"
 MARK_PREFIX = "<!-- agent-crew:orchestration:"
-SKILL_VERSION_FALLBACK = "2.2.12"
+SKILL_VERSION_FALLBACK = "2.2.13"
 
 CONFIG_REL = Path(".planning/orchestration.json")
 MANIFEST_REL = Path("docs/crew/manifest.json")
@@ -111,6 +111,20 @@ COPY_BASENAMES = ("crew-rules.md", "crew-acceptance.md",
                   "orchestration-guide.md", "plan-discipline.md")
 
 DEFAULT_ROLES = {"enabled": list(ROLE_ORDER), "instances": {}}
+# 角色→模型映射（I 切片）：配置唯一落 orchestration.json；派单时由 helm/firstmate
+# 读取并透传给 dispatch start --model。adversary 为互检/对抗审查角色预留。
+DEFAULT_AGENTS = {
+    "default": {"backend": "qoder", "model": ""},
+    "roles": {
+        "builder": {"backend": "qoder", "model": ""},
+        "planner": {"backend": "qoder", "model": ""},
+        "reviewer": {"backend": "qoder", "model": ""},
+        "adversary": {"backend": "qoder", "model": ""},
+        "scout": {"backend": "qoder", "model": ""},
+        "runner": {"backend": "qoder", "model": ""},
+    },
+    "playbooks": {},
+}
 DEFAULT_HOOKS = {
     "paths": {"topology": DEFAULT_TOPOLOGY_REL.as_posix()},
     "roleExt": {},
@@ -149,6 +163,7 @@ DEFAULT_CONFIG: dict = {
     "helm": {"tabLabel": "总舵", "expectedModel": "", "agentName": ""},
     "retro": {"enabled": True, "periodDays": 7},
     "roles": DEFAULT_ROLES,
+    "agents": DEFAULT_AGENTS,
     "hooks": DEFAULT_HOOKS,
 }
 
