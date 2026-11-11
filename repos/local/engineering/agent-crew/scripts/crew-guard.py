@@ -335,6 +335,27 @@ def _strip_comments(lines: list[str]):
         yield line
 
 
+def _plan_phase_statuses(text: str) -> list[str]:
+    """按 `### Phase` 分段取 `**Status:**`（缺省 pending）；HTML 注释先剥离，
+    `## Notes` 等非 Phase 区域的 Status 不计入（与 plan-status.py 同口径）。"""
+    statuses: list[str] = []
+    in_phase = False
+    for line in _strip_comments(text.splitlines()):
+        if line.startswith("## "):
+            in_phase = False
+            continue
+        if PHASE_RE.match(line):
+            statuses.append("pending")
+            in_phase = True
+            continue
+        if not in_phase:
+            continue
+        match = STATUS_RE.search(line)
+        if match:
+            statuses[-1] = match.group(1)
+    return statuses
+
+
 def _table_rows(lines: list[str]) -> list[list[str]]:
     rows, seen_header = [], False
     for line in lines:
@@ -423,9 +444,13 @@ def scan_todos(root: Path) -> tuple[list[Todo], list[Todo]]:
     portfolio = (root / config["portfolioDir"] / "task_plan.md").resolve()
     for path in sorted(planning.glob("*/task_plan.md")):
         rel = path.relative_to(root).as_posix()
-        _parse_plan_todos(path, rel, pending, residual)
-        if path.resolve() == portfolio:
-            _parse_backlog(root, path, rel, pending)
+        try:
+            _parse_plan_todos(path, rel, pending, residual)
+            if path.resolve() == portfolio:
+                _parse_backlog(root, path, rel, pending)
+        except (OSError, UnicodeDecodeError, ValueError):
+            # S1：坏 plan（非 UTF-8/不可读）跳过，不拖垮整轮值守
+            continue
     return pending, residual
 
 
@@ -685,6 +710,7 @@ class Guard:
     handoff_wait_rounds: int = field(default=0, init=False)
     handoff_close_rounds: int = field(default=0, init=False)
     rework_logged: set[str] = field(default_factory=set, init=False)
+    rework_skipped: set[str] = field(default_factory=set, init=False)
     project_roots: set[Path] | None = None
     roots_cache: set[Path] | None = field(default=None, init=False)
 
@@ -703,10 +729,62 @@ class Guard:
     def _read_handoff(self) -> dict[str, str]:
         return read_handoff_state(self.crew_dir)
 
+    @staticmethod
+    def _valid_task_key(task: str) -> bool:
+        """task 作为 plan 目录前缀匹配键：拒绝空、NUL、绝对路径与 `..` 段。"""
+        if not task or "\x00" in task:
+            return False
+        if task.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", task):
+            return False
+        return ".." not in re.split(r"[\\/]", task)
+
+    def _plan_dir_for_task(self, task: str) -> str | None:
+        """最长前缀匹配流 plan 目录：task == dir 或 task.startswith(dir + "-" / "/")。
+        本仓回执用切片式 task（如 patch-2213-code），需映射回流目录（patch-2213）。"""
+        planning = self.root / ".planning"
+        try:
+            candidates = [path.name for path in planning.iterdir()
+                          if path.is_dir() and (path / "task_plan.md").is_file()]
+        except OSError:
+            return None
+        matches = [name for name in candidates
+                   if task == name or task.startswith(name + "-")
+                   or task.startswith(name + "/")]
+        return max(matches, key=len) if matches else None
+
+    def _log_rework_skip(self, task: str, reason: str) -> None:
+        if task in self.rework_skipped:
+            return
+        self.rework_skipped.add(task)
+        display = task.replace("\x00", "\\0")
+        self.log(f"返工提醒跳过：task={display}（{reason}）")
+
+    def _rework_task_active(self, task: str) -> bool:
+        """仅有活跃流 plan 的 task 才做返工提醒：task 按最长前缀映射到
+        `.planning/<流>/task_plan.md`，plan 的 Phase 状态未全部 complete 才算活跃。
+        无匹配 plan、已收口 plan、非法 task 名与坏 plan 文件都不提醒（S3/A-S5 降噪；
+        非法/坏输入记日志一次并跳过，不拖垮整轮）。"""
+        if not self._valid_task_key(task):
+            self._log_rework_skip(task, "非法 task 名（绝对路径 / .. / NUL）")
+            return False
+        plan_dir = self._plan_dir_for_task(task)
+        if plan_dir is None:
+            return False
+        plan = self.root / ".planning" / plan_dir / "task_plan.md"
+        try:
+            text = plan.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            self._log_rework_skip(task, f"plan 读取失败：{type(exc).__name__}: {exc}")
+            return False
+        statuses = _plan_phase_statuses(text)
+        return not statuses or any(status != "complete" for status in statuses)
+
     def _scan_rework(self) -> list[dict]:
-        """统计 <crew-dir>/inbox/*.json 的回执 task；同一 task ≥3 条写一次提醒。
+        """统计 <crew-dir>/inbox/*.json 的回执 task；同一活跃 task ≥3 条写一次提醒。
         回执按 receipt_id 去重（缺失回退文件名，R3）；只读回执，不叫醒、不改 plan、
-        不删文件；同一 guard 进程内每个 task 只记一次日志。"""
+        不删文件；同一 guard 进程内每个 task 只记一次日志。task 按最长前缀映射到
+        `.planning/<流>/task_plan.md`；无匹配或 plan 已全部 complete 的 task 不计数
+        （历史噪声过滤，S3/A-S5）。"""
         counts: dict[str, int] = {}
         seen: set[str] = set()
         try:
@@ -732,7 +810,8 @@ class Guard:
                 counts[task_key] = counts.get(task_key, 0) + 1
         rework = [{"task": task, "receipts": count}
                   for task, count in sorted(counts.items())
-                  if count >= REWORK_RECEIPT_THRESHOLD]
+                  if count >= REWORK_RECEIPT_THRESHOLD
+                  and self._rework_task_active(task)]
         for row in rework:
             if row["task"] in self.rework_logged:
                 continue

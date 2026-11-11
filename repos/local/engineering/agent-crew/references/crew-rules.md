@@ -23,15 +23,15 @@
 
 - **普通技能引用**：通用规则/验收/机制/plan 纪律只在技能源一份；项目 `AGENTS.md` 与角色文件用 `{{skill_root}}`/`{{crew_rules}}`/`{{crew_acceptance}}` 指针引用，`skillRoot` 变化用 `init --refresh-block --confirm` 重渲染块。项目内出现规则/验收副本按 doctor `skill.source` 失败处理。
 - **唯一 dispatcher**：Agent 生命周期与工位变更只走 `python3 scripts/dispatch.py`（compose/start/prompt/close/notify/status/list/tab/pane）；`start-agent.sh`/`start-helm.sh` 只是薄包装。角色文件、项目文档、项目脚本禁止直写 `herdr agent start/prompt/close`、`herdr tab/pane` 变更或 runtime `--agent` 直启；只读 `agent list`/`tab list`/`pane list`/`status` 允许。
-- **跨项目通知（外部 agent）**：向未托管的兄弟项目 agent 发提示只允许 `python3 scripts/dispatch.py notify --agent <外部名> --message <文本>`——只调 `herdr agent prompt`，不查/不写 dispatch 注册表，不 start/close、不动生命周期；`--agent <外部名>` 直发；或 `--workspace <id> --role helm` 解析当前 workspace 最新活跃代际并默认要求回执；多实例非 helm 角色用 `--agent` 指定；仍禁止直写 `herdr agent prompt`。
+- **跨项目通知（外部 agent）**：向未托管的兄弟项目 agent 发提示只允许 `python3 scripts/dispatch.py notify --agent <外部名> --message <文本>`——只调 `herdr agent prompt`，不查/不写 dispatch 注册表，不 start/close、不动生命周期；`--agent <外部名>` 直发；或 `--workspace <id> --role helm` 解析当前 workspace 最新活跃代际并默认要求回执；多实例非 helm 角色用 `--agent` 指定；仍禁止直写 `herdr agent prompt`。notify 目标活跃态判定＝`idle/working`（`strip().lower()` 后），其余状态（含缺失/空白/done/unknown/blocked）拒绝；需要时用 `--agent` 显式指定。
 - **角色继承与组合**：角色 = 技能基类（`skillRoot/templates/agents/<runtime>/<role>.md`）+ 项目角色文件（`extends: skill:<role>`、`managed: false`）。dispatch 启动时 base 先、项目后 append-only 组合；frontmatter/权限只取基类；受保护标题冲突、残留 token、项目 frontmatter 权限键一律拒绝；组合结果不写项目发现目录。
 - **安装 / 升级 / 体检**：`init` 只在缺失时生成项目角色 stub，AGENTS 无标记零写入并生成 pending 文件；受管块只经 `--refresh-block --confirm` 重渲染；`upgrade` 只替换受管脚本并保留逐字节回滚；`doctor` 只读，输出 JSON 证据与可执行 `next`。
 - **版本与迁移**：技能版本见 `SKILL.md`/`CHANGELOG.md`；安装版本与配置 `skillVersion` 由 doctor 校验。基类升级只改技能源，下次 dispatch 自动生效，项目角色文件不需改。
 
 ## D 派单
 
-- **D1 工单五段**：每张工单必须写齐目标、现状入口、验收断言、边界规则、回执要求五段；缺段不得派出。
-- **D2 只给边界不给做法**：工单不写文件白名单、行数预算、实现步骤与字段级设计；实现方式由 worker 现场决定并回写证据。
+- **D1 工单五段**：每张工单必须写齐目标、现状入口、验收断言、边界规则、回执要求五段；现状入口必须含「上一版为什么没生效（根因）」——返工/修复/升级类工单必填，首版/新建写「无（首版）」；缺段或缺根因不得派出（无根因不派活）。
+- **D2 只给边界不给做法**：工单不写文件白名单、行数预算、实现步骤与字段级设计；根因属上下文（解释上一版为何失效），不属实现步骤；实现方式由 worker 现场决定并回写证据。
 - **D3 单写者入界**：边界规则必须写明单写者约束（见 P1）；归属不确定时，先由 worker 取占用（见 O1）再开工。
 - **D4 最小改动**：worker 只做验收断言要求的事；不顺手重构、不校正范围外问题、不新增未要求的功能。
 - **D5 AMEND**：任何扩围必须先提交 AMEND（原因/文件/风险）并获确认；禁止静默扩围。
@@ -40,7 +40,7 @@
 ## R 回执
 
 - **R1 文件真源**：回执以 `<git-common-dir>/crew/inbox/` 下的文件为真源；先原子落盘（见 P3）再尝试推送，推送失败不影响回执成立。
-- **R2 回执字段**：`receipt_id`、`from`、`runtime`、`task`、`status`（`done|blocked|captain`）、`commit`、`changed_files[]`、`evidence[]`、`work_slot`、`findings[]`、`summary`、`ts`；缺字段视为无效回执；⏸ 一律用 `status=captain`。
+- **R2 回执字段**：`receipt_id`、`from`、`runtime`、`task`、`status`（`done|blocked|captain`）、`commit`、`changed_files[]`、`evidence[]`、`work_slot`、`findings[]`、`summary`、`ts`；缺字段视为无效回执；⏸ 一律用 `status=captain`。返工/修复/升级类任务的 findings 首条必须写「根因：成立」或「根因：修正为…」，形成派单—回执闭环。
 - **R3 去重**：回执按 `receipt_id` 去重，同一 `receipt_id` 只处理一次。
 - **R4 触发器不是状态**：回执只触发收口与审计，任务状态只认 plan；回执与 plan 不一致时以 plan 为准并触发核对。
 - **R5 反馈分诊**：发现先分四路，不混用——①阻断级（流程跑不下去/工具坏）走回执 `blocked` + 即时推送总舵/副舵，20–30 分钟自检兜底，不进 feedback；②repo 犯错记该流 plan `## Errors Encountered`（回执 findings 带出），correct 启用后转其队列；③跨项目认知由总舵/大副当场 inone 推送（`INONE_AGENT_NAME` 用角色名），船员只报不推；④仅编排/流程/提示词问题进 feedback 信箱（项目 portfolio 目录 `feedback.md`），上报者预分诊填「预判去向」（改规则 R* / 改 SOP 步骤 / 改脚本 / 改模板措辞），格式与生命周期按 [plan-discipline.md](plan-discipline.md) §5.3。复盘去向必须留痕（已改 R*/已改文件、转_correct、已_inone、归档+原因）；待复盘未清零且无去向视为复盘未完成。
@@ -67,12 +67,12 @@
 - **F3 plan 更新**：owner 收到回执后必须更新对应 plan 的阶段 Status、Next Step 与证据指针；回执不替代 plan，未更新视为未收口。
 - **F4 工位处置**：每段收口回执必须写明「工位处置：关闭 / 保留至 HH:MM」；不填视为未收口。
 - **F5 越界即 BLOCK**：reviewer 对超出工单目标的 diff 可直接 BLOCK；收口方只看结果与证据，不看实现细节。
-- **F6 prove-it-works**：结论只认真实运行证据（测试、复现、真实数据回放、可执行命令输出）；自述完成与演示样例不算数（pstack 原名 prove-it-works）。
+- **F6 prove-it-works**：结论只认真实运行证据（测试、复现、真实数据回放、可执行命令输出）；运行态证据分两类：行为/脚本改动必须驱动项目验证技能（`verify-<app>`）对应 feature 的真实驱动证据；规则/模板/提示词文本改动以 grep/lint/schema 测试为主证据 + 安装后 1 个 smoke feature 为辅证，并在回执写清 feature 名、命令 + stdout/stderr + 退出码、证据路径。diff、接口 200、自述完成只作旁证；无验证技能先按 create-verification-skill 生成（外部工程技能，需环境已安装；未安装则暂停该交付门并 ⏸ 上抛 Captain 记录缺口，不得跳过或用人肉清单替代），不以人工核对代替（pstack 原名 prove-it-works）。
 - **F7 sequence-verifiable-units**：工作切成可独立验证的最小单元，前一单元验证通过再开下一个，禁止最后批量补验（pstack 原名 sequence-verifiable-units）。
 - **F8 test-behavior-not-implementation**：测试断言对外行为与契约，不断言内部实现细节，重构不因实现变动而重写测试（pstack 原名 test-behavior-not-implementation）。
 - **F9 build-the-lever**：一次性验证沉淀为可复用的脚本、检查或看板，让同类验证自动完成，不重复手工操作（pstack 原名 build-the-lever）。
 - **F10 explain-the-number**：报数必须带口径（来源、算法、时间窗口、限制），解释不了的数字不进结论（pstack 原名 explain-the-number）。
-- **F11 guard-the-context-window**：主动管理上下文预算，长材料交子代理或脚本归纳只带回结论，到阈值按交接规则换舵，不在运行中压缩硬撑（pstack 原名 guard-the-context-window）。
+- **F11 guard-the-context-window**：主动管理上下文预算，长材料交子代理或脚本归纳只带回结论，到阈值按交接规则换舵，不在运行中压缩硬撑；读取量预算：交接必读 ≤32KB（含 `--handover` 输出与必读文件），超阈值先摘要/关键词 grep 再定向补读，`Decisions`/`Deviation`/`Backlog` 不整读（pstack 原名 guard-the-context-window）。
 - **F12 never-block-on-the-human**：只有不可逆、超授权或需偏好判断的事项交人工，其余按红线自主推进并留里程（pstack 原名 never-block-on-the-human）。
 - **F13 意图前置**：评审开工先一句话复述「变更想干什么」（从工单/commit 提炼），钉死评审范围；范围外既有问题只报不审。
 - **F14 证据门槛分级**：阻断级发现必须附运行复现（失败测试/repro 脚本/错误输出）；仅有静态推断的发现自动降「建议」级。
@@ -100,7 +100,7 @@
 
   | 迁移 | 放行条件 |
   |---|---|
-  | backlog → ready | 工单有目标、验收断言、边界规则 |
+  | backlog → ready | 工单五段齐 + 根因（首版写「无（首版）」）；D1 优先于本表 |
   | ready → dispatched | worker 可路由、文件占用无冲突 |
   | dispatched → running | 有回执确认或运行时 working |
   | running → review | 回执 done + 改动文件清单 + 证据 |
@@ -126,5 +126,5 @@
 - **X1 不 push**：未经 Captain 明确授权不推送远端；授权后只推任务分支。
 - **X2 不删除**：未经 Captain 明确授权不删除文件、分支、worktree 或数据；任何删除前必须备份。
 - **X3 不无备份覆盖**：覆盖既有文件前必须备份并可回滚；强制覆盖不得用于客户既有产物。
-- **X4 不碰客户业务数据**：原始数据不全量读取，只取必要列/行；证据脱敏或哈希；客户敏感数据不得以原始形态入库。
+- **X4 不碰客户业务数据与凭据**：原始数据不全量读取，只取必要列/行；证据脱敏或哈希；客户敏感数据不得以原始形态入库。凭据/会话文件只允许存 `.scratch/`（0600，用 `install -m 600` 或 `chmod 600` 落盘）或平台 env；禁止复制进沙箱、平台、共享目录或线程工作区；「平台」指平台/CI 的密钥管理（环境变量或密钥服务）。「涉凭据」＝复制/移动/持久化/新增凭据或修改权限，必须上抛 Captain，不得代决；经 Captain 授权的平台 env 读取用于执行不算涉凭据。X4 优先于 F12。能自动扫的凭据风险做成检查器；无执行器时以角色模板断言 + 测试兜底（取舍：静态扫描只做技能源回归，不覆盖变量构造的运行时复制路径，行为靠模板自检覆盖）。
 - **X5 遇红线即停**：触线只暂停受影响项并写「⏸ 待 Captain」，不擅自扩大范围，其余独立任务继续。

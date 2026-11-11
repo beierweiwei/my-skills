@@ -33,7 +33,7 @@ MARK_START = "<!-- agent-crew:orchestration:start -->"
 MARK_END = "<!-- agent-crew:orchestration:end -->"
 BLOCK_LINE_LIMIT = 150
 RESIDUAL_TOKEN_RE = re.compile(r"\{\{[^{}\n]+\}\}")
-# AGENTS 体量非阻断阈值（2.2.12，样本见 evidence/agents-budget-warn.md）：
+# AGENTS 体量非阻断阈值（agents.budget 批次引入，样本见 evidence/agents-budget-warn.md）：
 # 本仓 14,621B/149 行/自有段 61.5% 不告警；大型项目 25,227B/178 行/76.5% 告警。
 AGENTS_BUDGET_MAX_BYTES = 20 * 1024
 AGENTS_BUDGET_MAX_LINES = 180
@@ -43,6 +43,26 @@ AGENTS_BUDGET_NEXT = (
     "按 `agents-md-slimming` 剧本（技能层 `templates/playbooks/agents-md-slimming.md`）"
     "做只读诊断，方案经确认后再改 AGENTS"
 )
+# H2/H3 上下文预算（2.2.13，非阻断 warn；样本：本仓 firstmate 覆盖层 13,011B、
+# 组合产物 21,640B、AGENTS 14,677B、CONTEXT 2,069B、交接必读 35,470B）：
+#   覆盖层 >8KB 或组合产物 >20KB → 提示外移业务规则到项目文档；
+#   角色组合 + AGENTS + CONTEXT + 交接必读估算 >60KB → 提示先摘要/清理交接必读。
+ROLE_OVERLAY_MAX_BYTES = 8 * 1024
+ROLE_COMPOSED_MAX_BYTES = 20 * 1024
+CONTEXT_BASELINE_MAX_BYTES = 60 * 1024
+ROLE_OVERLAY_NEXT = "把业务规则外移到项目文档（如 docs/），角色覆盖层只留角色特有约束"
+CONTEXT_BASELINE_NEXT = (
+    "先摘要/关键词 grep 缩小交接必读；精简 AGENTS/CONTEXT 或把业务规则外移到项目文档"
+)
+# I 切片：agents 角色→模型配置校验（结构问题 fail；backend 命令缺失仅 warn）
+AGENT_BACKENDS = ("qoder", "opencode", "claude")
+BACKEND_COMMANDS = {"qoder": "qodercli", "opencode": "opencode", "claude": "claude"}
+AGENTS_CONFIG_NEXT = (
+    "按 .planning/orchestration.json 的 agents 结构修正：backend ∈ qoder/opencode/claude；"
+    "model 为字符串或 \"\"；playbooks.<name>.roles.<role> 须在 agents.roles/default 中；"
+    "或删除 agents 让 init 重建默认"
+)
+AGENTS_COMMAND_NEXT = "安装缺失命令或改用已安装的 backend（backend 只影响派单启动）"
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 COPY_BASENAMES = ("crew-rules.md", "crew-acceptance.md",
@@ -70,7 +90,7 @@ CORE_TOP_KEYS = {
     "projectId", "projectName", "skillRoot", "skillVersion", "portfolioDir",
     "portfolioMatch", "board", "backlog", "docNames", "captainDecisions",
     "redLines", "dataDir", "aopReference", "helm", "retro", "guard", "roles",
-    "hooks", "schemaVersion",
+    "agents", "hooks", "schemaVersion",
 }
 RUNTIME_DIRECT_PATTERNS = (
     re.compile(r"herdr\s+agent\s+(?:start|prompt|close)\b"),
@@ -1118,6 +1138,107 @@ class Doctor:
             return Result("config.identity", "warn", "；".join(warns))
         return Result("config.identity", "pass", f"projectId={project_id}")
 
+    # ================= D2. agents（角色→模型配置，I 切片） =================
+
+    @staticmethod
+    def _agents_entry_problems(prefix: str, entry: dict) -> list[str]:
+        problems: list[str] = []
+        backend = entry.get("backend")
+        if backend not in AGENT_BACKENDS:
+            problems.append(
+                f"agents.{prefix}.backend 非法：{backend!r}"
+                f"（应为 {'/'.join(AGENT_BACKENDS)}）")
+        model = entry.get("model")
+        if not isinstance(model, str):
+            problems.append(f"agents.{prefix}.model 必须是字符串：{model!r}")
+        elif model != "" and not model.strip():
+            problems.append(f"agents.{prefix}.model 不得为空白字符串")
+        return problems
+
+    def check_agents_config(self) -> Result:
+        """I：agents 角色→模型映射结构 + backend 命令存在性（命令缺失仅 warn）。"""
+        config = self.config()
+        if config is None:
+            return Result("agents.config", "fail", self._config_error)
+        agents = config.get("agents")
+        if agents is None:
+            return Result("agents.config", "skip",
+                          "配置无 agents（存量项目按 init 默认回落；重跑 init --yes 可补齐）")
+        if not isinstance(agents, dict):
+            return Result("agents.config", "fail",
+                          f"agents 必须是对象：{agents!r}", next=AGENTS_CONFIG_NEXT)
+        problems: list[str] = []
+        default = agents.get("default")
+        roles = agents.get("roles")
+        playbooks = agents.get("playbooks")
+        if not isinstance(default, dict):
+            problems.append("缺 agents.default 或不是对象")
+            default = {}
+        else:
+            problems.extend(self._agents_entry_problems("default", default))
+        if not isinstance(roles, dict):
+            problems.append("缺 agents.roles 或不是对象")
+            roles = {}
+        else:
+            for role, entry in sorted(roles.items()):
+                if not isinstance(role, str) or not role:
+                    problems.append(f"agents.roles 键非法：{role!r}")
+                elif not isinstance(entry, dict):
+                    problems.append(f"agents.roles.{role} 必须是对象")
+                else:
+                    problems.extend(self._agents_entry_problems(f"roles.{role}", entry))
+        if not isinstance(playbooks, dict):
+            problems.append("缺 agents.playbooks 或不是对象")
+            playbooks = {}
+        else:
+            for name, entry in sorted(playbooks.items()):
+                if not isinstance(entry, dict):
+                    problems.append(f"agents.playbooks.{name} 必须是对象")
+                    continue
+                refs = entry.get("roles")
+                if refs is None:
+                    continue
+                if not isinstance(refs, dict):
+                    problems.append(f"agents.playbooks.{name}.roles 必须是对象")
+                    continue
+                for role, role_entry in sorted(refs.items()):
+                    prefix = f"playbooks.{name}.roles.{role}"
+                    if role != "default" and role not in roles:
+                        problems.append(
+                            f"agents.{prefix} 未在 agents.roles/default 中定义")
+                    if not isinstance(role_entry, dict):
+                        problems.append(f"agents.{prefix} 必须是对象")
+                        continue
+                    problems.extend(self._agents_entry_problems(prefix, role_entry))
+        used_backends: set[str] = set()
+        for entry in [default, *roles.values()]:
+            if isinstance(entry, dict) and entry.get("backend") in AGENT_BACKENDS:
+                used_backends.add(entry["backend"])
+        for entry in playbooks.values():
+            refs = entry.get("roles") if isinstance(entry, dict) else None
+            if not isinstance(refs, dict):
+                continue
+            for role_entry in refs.values():
+                if isinstance(role_entry, dict) \
+                        and role_entry.get("backend") in AGENT_BACKENDS:
+                    used_backends.add(role_entry["backend"])
+        missing = sorted(
+            f"{backend}（{BACKEND_COMMANDS[backend]}）"
+            for backend in used_backends
+            if shutil.which(BACKEND_COMMANDS[backend]) is None)
+        if problems:
+            detail = "；".join(problems[:20])
+            if missing:
+                detail += "；另缺命令：" + "、".join(missing)
+            return Result("agents.config", "fail", detail, next=AGENTS_CONFIG_NEXT)
+        summary = (f"default={default.get('backend')}；"
+                   f"roles={len(roles)}；playbooks={len(playbooks)}")
+        if missing:
+            return Result("agents.config", "warn",
+                          summary + "；缺命令：" + "、".join(missing),
+                          next=AGENTS_COMMAND_NEXT)
+        return Result("agents.config", "pass", summary)
+
     # ================= E. roles =================
 
     def check_role_frontmatter(self) -> Result:
@@ -1261,6 +1382,121 @@ class Doctor:
             return Result("role.compose", "fail", "；".join(problems[:20]),
                           evidence={"roles": len(entries)})
         return Result("role.compose", "pass", f"{len(entries)} 个角色组合通过（append-only，无残留 token）")
+
+    # ---------- H2/H3 上下文预算（非阻断 warn） ----------
+
+    def _qoder_overlay_entries(self) -> list[dict]:
+        qoder_dir = self.root / ".qoder/agents"
+        return [entry for entry in self.role_entries()
+                if entry["runtime"] == "qoder" and entry["path"].parent == qoder_dir]
+
+    def _composed_role_sizes(
+            self, entries: list[dict]) -> tuple[list[tuple[str, int]], list[str]]:
+        sizes: list[tuple[str, int]] = []
+        errors: list[str] = []
+        for entry in entries:
+            parsed, error = self._parse_role(entry)
+            if error:
+                errors.append(f"{entry['id']}: {error}")
+                continue
+            descriptor = parsed.get("descriptor") or {}
+            role_id = str(descriptor.get("id") or entry["id"])
+            outcome = dispatch_lib.build_compose(self.root, role_id, entry["runtime"])
+            if not outcome.ok:
+                errors.append(f"{role_id}: 组合失败")
+                continue
+            sizes.append((role_id, len(outcome.composed_body.encode("utf-8"))))
+        return sizes, errors
+
+    def check_role_overlay_budget(self) -> Result:
+        """H2：项目角色覆盖层 >8KB 或组合产物 >20KB → warn，提示外移业务规则。"""
+        entries = self._qoder_overlay_entries()
+        if not entries:
+            return Result("role.overlay_budget", "skip",
+                          "无项目角色覆盖层（.qoder/agents/*.md）")
+        overlays = [
+            (entry["path"].relative_to(self.root).as_posix(), entry["path"].stat().st_size)
+            for entry in entries
+        ]
+        composed, compose_errors = self._composed_role_sizes(entries)
+        triggers = [f"{rel} {size} 字节 > {ROLE_OVERLAY_MAX_BYTES}"
+                    for rel, size in overlays if size > ROLE_OVERLAY_MAX_BYTES]
+        triggers += [f"组合产物 {role} {size} 字节 > {ROLE_COMPOSED_MAX_BYTES}"
+                     for role, size in composed if size > ROLE_COMPOSED_MAX_BYTES]
+        detail = (
+            "覆盖层：" + "、".join(f"{rel} {size}B" for rel, size in overlays)
+            + "；组合产物：" + ("、".join(f"{role} {size}B" for role, size in composed)
+                                or "不可用")
+            + f"；阈值：覆盖层 >{ROLE_OVERLAY_MAX_BYTES}B 或组合产物 "
+              f">{ROLE_COMPOSED_MAX_BYTES}B"
+        )
+        if compose_errors:
+            detail += "；组合异常：" + "；".join(compose_errors[:5]) + "（由 role.compose 负责）"
+        if triggers:
+            return Result("role.overlay_budget", "warn",
+                          detail + "；触发：" + "、".join(triggers),
+                          evidence={"overlays": dict(overlays), "composed": dict(composed)},
+                          next=ROLE_OVERLAY_NEXT)
+        return Result("role.overlay_budget", "pass", detail)
+
+    def _handover_required_bytes(self) -> tuple[int | None, str]:
+        """跑技能自带 plan-status.py --handover，解析「本次必读字节」；不可用返回 None+原因。
+        portfolio 目录按配置 portfolioDir（缺省 .planning/portfolio），不硬编码。"""
+        config = self.config() or {}
+        pdir = str(config.get("portfolioDir") or ".planning/portfolio").rstrip("/")
+        script = Path(__file__).resolve().parent / "plan-status.py"
+        if not (self.root / pdir).is_dir():
+            return None, f"无 {pdir}"
+        if not script.is_file():
+            return None, "plan-status.py 不可用"
+        rc, stdout, stderr = self._run_cli(
+            [sys.executable, str(script), "--handover", "--root", str(self.root)], timeout=60)
+        if rc != 0:
+            return None, f"plan-status --handover 失败 rc={rc}：{stderr.strip()[:120]}"
+        match = re.search(r"本次必读字节：(\d+)", stdout)
+        if not match:
+            return None, "plan-status --handover 输出无「本次必读字节」字段"
+        return int(match.group(1)), ""
+
+    def check_context_baseline(self) -> Result:
+        """H3：角色组合（取最大）+ AGENTS + CONTEXT + 交接必读估算 >60KB → warn。"""
+        overlays = self._qoder_overlay_entries()
+        composed, compose_errors = self._composed_role_sizes(overlays)
+        top_role, composed_bytes = max(composed, key=lambda item: item[1]) if composed else ("", 0)
+
+        agents_path = self.root / "AGENTS.md"
+        agents_bytes = agents_path.stat().st_size if agents_path.is_file() else 0
+        config = self.config() or {}
+        doc_names = config.get("docNames") if isinstance(config.get("docNames"), dict) else {}
+        context_rel = str(doc_names.get("context") or "CONTEXT.md")
+        context_path = self.root / context_rel
+        context_bytes = context_path.stat().st_size if context_path.is_file() else 0
+
+        handover_bytes, handover_note = self._handover_required_bytes()
+        if not any((composed_bytes, agents_bytes, context_bytes)) and handover_bytes is None:
+            return Result("context.baseline", "skip",
+                          "无 AGENTS/CONTEXT/角色组合/portfolio，无法估算基线")
+        handover_part = handover_bytes or 0
+        total = composed_bytes + agents_bytes + context_bytes + handover_part
+        detail = (
+            f"角色组合 {composed_bytes}B（{top_role or '不可用'}）/ AGENTS {agents_bytes}B / "
+            f"CONTEXT {context_bytes}B / 交接必读 {handover_part}B"
+            f"{'（不可用）' if handover_bytes is None else ''}；合计 {total}B；"
+            f"阈值 >{CONTEXT_BASELINE_MAX_BYTES}B"
+        )
+        if handover_note:
+            detail += f"；交接必读说明：{handover_note}"
+        if compose_errors:
+            detail += "；组合异常：" + "；".join(compose_errors[:5]) + "（由 role.compose 负责）"
+        evidence = {
+            "composedBytes": composed_bytes, "composedRole": top_role,
+            "agentsBytes": agents_bytes, "contextBytes": context_bytes,
+            "handoverBytes": handover_part, "totalBytes": total,
+        }
+        if total > CONTEXT_BASELINE_MAX_BYTES:
+            return Result("context.baseline", "warn", detail, evidence=evidence,
+                          next=CONTEXT_BASELINE_NEXT)
+        return Result("context.baseline", "pass", detail, evidence=evidence)
 
     def check_role_composed(self) -> Result:
         config = self.config() or {}
@@ -1970,10 +2206,13 @@ CHECKS = [
     "manifest.schema", "manifest.hash.file", "manifest.hash.block", "manifest.config",
     "manifest.roleStubs", "manifest.orphan",
     "agents.markers", "agents.block", "agents.budget", "agents.duplicate", "agents.pending",
+    "agents.config",
+    "context.baseline",
     "docs.duplicate", "docs.pointers", "skill.source", "docs.links",
     "config.schema", "config.paths", "config.identity",
     "role.frontmatter", "role.descriptor", "role.capability", "role.inherit",
-    "role.compose", "role.composed", "role.delivery", "role.gates", "role.names",
+    "role.compose", "role.overlay_budget", "role.composed", "role.delivery", "role.gates",
+    "role.names",
     "role.discovery.qoder", "role.discovery.opencode", "role.runtime-direct",
     "role.orphan",
     "runtime.dir", "runtime.state", "runtime.names", "runtime.lock", "runtime.worktree",
@@ -1994,6 +2233,8 @@ METHODS = {
     "agents.budget": "check_agents_budget",
     "agents.duplicate": "check_agents_duplicate",
     "agents.pending": "check_agents_pending",
+    "agents.config": "check_agents_config",
+    "context.baseline": "check_context_baseline",
     "docs.duplicate": "check_docs_duplicate",
     "docs.pointers": "check_docs_pointers",
     "skill.source": "check_skill_source",
@@ -2006,6 +2247,7 @@ METHODS = {
     "role.capability": "check_role_capability",
     "role.inherit": "check_role_inherit",
     "role.compose": "check_role_compose",
+    "role.overlay_budget": "check_role_overlay_budget",
     "role.composed": "check_role_composed",
     "role.delivery": "check_role_delivery",
     "role.gates": "check_role_gates",

@@ -891,6 +891,60 @@ class NotifyCommandTest(unittest.TestCase):
         self.assertEqual([], self.prompt_calls())
         self.assertEqual([], self.agent_log())
 
+    def test_missing_agent_status_not_selected(self):
+        # A-S8：agent_status 缺失不视为活跃（与 done/unknown 同等排除）
+        self.agents = [{"name": "helm-x-3", "workspace_id": "w1"}]
+        code, _ = self.dispatch_main(
+            "notify", "--workspace", "w1", "--role", "helm",
+            "--message", "hi", "--no-require-receipt", "--json")
+        self.assertEqual(1, code)
+        self.assertEqual([], self.prompt_calls())
+        with self.assertRaises(dispatch_mod.DispatchError) as ctx:
+            dispatch_mod.resolve_notify_target(self.agents, "w1", "helm")
+        message = str(ctx.exception)
+        self.assertIn("agent_status", message)
+        self.assertIn("herdr agent list", message)
+
+    def test_none_agent_status_not_selected(self):
+        # A-S8：agent_status=None 不视为活跃
+        self.agents = [
+            {"name": "helm-x-3", "workspace_id": "w1", "agent_status": None}]
+        code, _ = self.dispatch_main(
+            "notify", "--workspace", "w1", "--role", "helm",
+            "--message", "hi", "--no-require-receipt", "--json")
+        self.assertEqual(1, code)
+        self.assertEqual([], self.prompt_calls())
+        with self.assertRaises(dispatch_mod.DispatchError) as ctx:
+            dispatch_mod.resolve_notify_target(self.agents, "w1", "helm")
+        self.assertIn("agent_status", str(ctx.exception))
+
+    def test_non_whitelisted_status_rejected(self):
+        # S3：归一化后仅 idle/working 放行；Done/空白/未知值一律拒绝
+        for status in ("Done", " ", "unknown-state", "starting"):
+            with self.subTest(status=status):
+                self.agents = [{"name": "helm-x-3", "workspace_id": "w1",
+                                "agent_status": status}]
+                code, _ = self.dispatch_main(
+                    "notify", "--workspace", "w1", "--role", "helm",
+                    "--message", "hi", "--no-require-receipt", "--json")
+                self.assertEqual(1, code)
+                self.assertEqual([], self.prompt_calls())
+                with self.assertRaises(dispatch_mod.DispatchError) as ctx:
+                    dispatch_mod.resolve_notify_target(self.agents, "w1", "helm")
+                self.assertIn("herdr agent list", str(ctx.exception))
+
+    def test_status_normalized_whitelist_accepted(self):
+        # S3：大小写/空白归一化后 idle/working 正常放行
+        for status in (" Working ", "IDLE"):
+            with self.subTest(status=status):
+                self.agents = [{"name": "helm-x-3", "workspace_id": "w1",
+                                "agent_status": status}]
+                code, _ = self.dispatch_main(
+                    "notify", "--workspace", "w1", "--role", "helm",
+                    "--message", "hi", "--no-require-receipt", "--json")
+                self.assertEqual(0, code)
+                self.assertEqual("helm-x-3", self.agent_log()[-1]["target"])
+
     def test_no_candidates_fails(self):
         self.agents = [
             {"name": "worker", "workspace_id": "w1", "agent_status": "idle"}]

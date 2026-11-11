@@ -2416,6 +2416,13 @@ class ReworkReminderTest(GuardTestBase):
             write_file(self.crew / "inbox" / f"{prefix}{index}.json",
                        json.dumps(data, ensure_ascii=False))
 
+    def write_plan(self, task: str, status: str) -> None:
+        write_file(
+            self.root / ".planning" / task / "task_plan.md",
+            f"# Task Plan: {task}\n\n## Phases\n\n"
+            f"### Phase 1: 夹具\n- **Status:** {status}\n",
+        )
+
     def rework_logs(self) -> list[str]:
         return [log for log in self.logs if "返工提醒" in log]
 
@@ -2431,6 +2438,7 @@ class ReworkReminderTest(GuardTestBase):
         self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
         self.write_receipts("T22", 3)
         self.write_receipts("T23", 1, prefix="other")
+        self.write_plan("T22", "in_progress")
         guard = self.make_guard()
         result = guard.run_once()
         self.assertEqual([{"task": "T22", "receipts": 3}], result["rework"])
@@ -2459,6 +2467,7 @@ class ReworkReminderTest(GuardTestBase):
     def test_duplicate_receipt_id_counted_once(self):
         # S4：按 receipt_id 去重（R3），重复投递/复制不得触发返工提醒
         self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.write_plan("T-X", "in_progress")
         for index in range(3):
             write_file(self.crew / "inbox" / f"dup{index}.json",
                        json.dumps({"receipt_id": "SAME-ID", "task": "T-X"}))
@@ -2469,15 +2478,160 @@ class ReworkReminderTest(GuardTestBase):
     def test_missing_receipt_id_falls_back_to_filename(self):
         # S4：receipt_id 缺失时回退文件名去重
         self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.write_plan("T-X", "in_progress")
         for index in range(3):
             write_file(self.crew / "inbox" / f"noid{index}.json",
                        json.dumps({"task": "T-X"}))
         result = self.make_guard().run_once()
         self.assertEqual([{"task": "T-X", "receipts": 3}], result["rework"])
 
+    def test_completed_task_plan_not_reminded(self):
+        # S3/A-S5：task 的 plan 全部 Status=complete（已收口）→ 不提醒
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.write_receipts("T22", 3)
+        self.write_plan("T22", "complete")
+        result = self.make_guard().run_once()
+        self.assertEqual([], result["rework"])
+        self.assertEqual([], self.rework_logs())
+
+    def test_completed_plan_with_skeleton_comment_not_reminded(self):
+        # S3/A-S5：plan 头部 HTML 骨架注释里的示例 Status 字样不得当作活跃状态
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.write_receipts("T22", 3)
+        write_file(
+            self.root / ".planning" / "T22" / "task_plan.md",
+            "# Task Plan: T22\n\n"
+            "<!-- 约定：每个 Phase 下恰好一行 "
+            "`**Status:** pending|in_progress|complete`；勿手改结构 -->\n\n"
+            "## Phases\n\n### Phase 1: 夹具\n- **Status:** complete\n",
+        )
+        result = self.make_guard().run_once()
+        self.assertEqual([], result["rework"])
+        self.assertEqual([], self.rework_logs())
+
+    def test_active_task_plan_still_reminded(self):
+        # S3/A-S5：活跃 plan（Status≠complete）仍按阈值提醒
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.write_receipts("T22", 3)
+        self.write_plan("T22", "pending")
+        result = self.make_guard().run_once()
+        self.assertEqual([{"task": "T22", "receipts": 3}], result["rework"])
+        self.assertEqual(1, len(self.rework_logs()))
+
+    def test_mixed_phase_status_counts_as_active(self):
+        # S3/A-S5：多 Phase 中仍有非 complete → 视为活跃
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.write_receipts("T22", 3)
+        write_file(
+            self.root / ".planning" / "T22" / "task_plan.md",
+            "# Task Plan: T22\n\n## Phases\n\n"
+            "### Phase 1: 已完成\n- **Status:** complete\n\n"
+            "### Phase 2: 进行中\n- **Status:** in_progress\n",
+        )
+        result = self.make_guard().run_once()
+        self.assertEqual([{"task": "T22", "receipts": 3}], result["rework"])
+
+    def test_task_without_plan_not_reminded(self):
+        # S3/A-S5：无 .planning/<task>/task_plan.md 的历史/编号 task 不提醒
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.write_receipts("patch-2210", 3, prefix="old")
+        self.write_receipts("T21", 3, prefix="hist")
+        result = self.make_guard().run_once()
+        self.assertEqual([], result["rework"])
+        self.assertEqual([], self.rework_logs())
+
+    def test_slice_task_maps_to_active_stream_plan(self):
+        # B1：切片式 task（patch-2213-code）按最长前缀映射到活跃流 plan（patch-2213）
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.write_receipts("patch-2213-code", 3)
+        self.write_plan("patch-2213", "in_progress")
+        result = self.make_guard().run_once()
+        self.assertEqual([{"task": "patch-2213-code", "receipts": 3}], result["rework"])
+        self.assertEqual(1, len(self.rework_logs()))
+
+    def test_slice_task_maps_to_completed_stream_plan(self):
+        # B1：切片映射到的流 plan 已全部 complete → 仍不提醒
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.write_receipts("patch-2213-code", 3)
+        self.write_plan("patch-2213", "complete")
+        result = self.make_guard().run_once()
+        self.assertEqual([], result["rework"])
+
+    def test_slash_suffix_task_maps_to_stream_plan(self):
+        # B1：历史切片名（流/切片）同样按前缀映射
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        task = "patch-2210/03-release（发布）"
+        self.write_receipts(task, 3)
+        self.write_plan("patch-2210", "in_progress")
+        result = self.make_guard().run_once()
+        self.assertEqual([{"task": task, "receipts": 3}], result["rework"])
+
+    def test_longest_prefix_wins(self):
+        # B1：最长匹配优先——短流活跃、长切片已收口 → 不提醒
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.write_receipts("patch-2213-code", 3)
+        self.write_plan("patch-2213", "in_progress")
+        self.write_plan("patch-2213-code", "complete")
+        result = self.make_guard().run_once()
+        self.assertEqual([], result["rework"])
+
+    def test_invalid_task_names_do_not_crash_or_escape(self):
+        # S1：../../escape 不得越界读取；NUL 不得抛异常；整轮正常返回
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        write_file(
+            self.base / "escape" / "task_plan.md",
+            "# Task Plan: outside\n\n## Phases\n\n### Phase 1\n- **Status:** in_progress\n",
+        )
+        self.write_receipts("../../escape", 3, prefix="esc")
+        self.write_receipts("bad\x00name", 3, prefix="nul")
+        result = self.make_guard().run_once()
+        self.assertEqual([], result["rework"])
+        joined = "\n".join(self.logs)
+        self.assertIn("返工提醒跳过", joined)
+        self.assertIn("../../escape", joined)
+
+    def test_non_utf8_plan_skipped_without_crash(self):
+        # S1：坏 UTF-8 plan 记日志跳过（每 task 一次），不拖垮整轮
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.write_receipts("patch-2213", 3)
+        path = self.root / ".planning" / "patch-2213" / "task_plan.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"\xff\xfe invalid utf-8")
+        result = self.make_guard().run_once()
+        self.assertEqual([], result["rework"])
+        skipped = [log for log in self.logs if "返工提醒跳过" in log]
+        self.assertEqual(1, len(skipped))
+        self.assertIn("plan 读取失败", skipped[0])
+
+    def test_notes_status_does_not_activate_completed_plan(self):
+        # S2：非 Phase 区域（## Notes）的 Status 不计入
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.write_receipts("patch-2213", 3)
+        write_file(
+            self.root / ".planning" / "patch-2213" / "task_plan.md",
+            "# Task Plan: patch-2213\n\n## Phases\n\n### Phase 1: A\n"
+            "- **Status:** complete\n\n## Notes\n\n**Status:** pending\n",
+        )
+        result = self.make_guard().run_once()
+        self.assertEqual([], result["rework"])
+        self.assertEqual([], self.rework_logs())
+
+    def test_phase_missing_status_counts_as_pending(self):
+        # S2：缺 Status 的 Phase 视为 pending → 活跃
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.write_receipts("patch-2213", 3)
+        write_file(
+            self.root / ".planning" / "patch-2213" / "task_plan.md",
+            "# Task Plan: patch-2213\n\n## Phases\n\n### Phase 1: A\n"
+            "- **Status:** complete\n\n### Phase 2: B\n- 无状态行\n",
+        )
+        result = self.make_guard().run_once()
+        self.assertEqual([{"task": "patch-2213", "receipts": 3}], result["rework"])
+
     def test_once_json_reports_rework_and_keeps_receipts(self):
         self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
         self.write_receipts("T22", 3)
+        self.write_plan("T22", "in_progress")
         before = sorted(p.name for p in (self.crew / "inbox").iterdir())
         with mock.patch.object(
             cg, "herdr_agents", return_value=[{"name": "w", "agent_status": "idle"}]
