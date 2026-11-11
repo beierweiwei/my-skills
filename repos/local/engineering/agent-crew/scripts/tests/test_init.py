@@ -217,20 +217,37 @@ class InitV21Test(unittest.TestCase):
         cfg_sha = sha(cfg_path)
         agents = self.root / "AGENTS.md"
         before = agents.read_text(encoding="utf-8")
+        start = "<!-- agent-crew:orchestration:start -->"
+        end = "<!-- agent-crew:orchestration:end -->"
+        block = before.split(start, 1)[1].split(end, 1)[0]
+
+        # 可移植：块内无绝对 skillRoot，含描述性锚点与相对名
+        self.assertNotIn(str(alt), block)
+        self.assertNotIn(str(Path(init_mod.SKILL_DIR).resolve()), block)
+        self.assertIn(".planning/orchestration.json", block)
+        self.assertIn("skillRoot", block)
+        self.assertIn("references/crew-rules.md", block)
+        for token in ("{{skill_root}}", "{{crew_rules}}", "{{crew_acceptance}}"):
+            self.assertNotIn(token, block)
+        for check in ("agents.block", "docs.pointers"):
+            self.assertEqual(self.doctor(check).returncode, 0, check)
+
+        # 人工改块（模拟漂移）：未确认 rc=2 零写入；确认后 2→0 且块外字节不变
+        pre, rest = before.split(start, 1)
+        body, post = rest.split(end, 1)
+        drifted = pre + start + body.replace("技能根", "技能根（人工改）", 1) + end + post
+        agents.write_text(drifted, encoding="utf-8")
         self.assertEqual(self.doctor("agents.block").returncode, 1)
-        self.assertEqual(self.doctor("docs.pointers").returncode, 1)
 
         code, _ = self.run_init("--refresh-block")
         self.assertEqual(code, 2)
-        self.assertEqual(agents.read_text(encoding="utf-8"), before)
+        self.assertEqual(agents.read_text(encoding="utf-8"), drifted)
 
         code, _ = self.run_init("--refresh-block", "--confirm")
         self.assertEqual(code, 0)
         after = agents.read_text(encoding="utf-8")
-        self.assertIn(str(alt), after)
+        self.assertEqual(after, before)
         self.assertEqual(sha(cfg_path), cfg_sha)
-        start = "<!-- agent-crew:orchestration:start -->"
-        end = "<!-- agent-crew:orchestration:end -->"
         self.assertEqual(after.split(start)[0], before.split(start)[0])
         self.assertEqual(after.split(end)[1], before.split(end)[1])
         self.assertEqual(self.doctor("agents.block").returncode, 0)

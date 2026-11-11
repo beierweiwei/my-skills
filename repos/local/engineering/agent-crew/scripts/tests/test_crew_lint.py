@@ -68,6 +68,14 @@ class CrewLintTest(unittest.TestCase):
 
     # ---- helpers ---------------------------------------------------------
 
+    def portable_agents(self, rules: str = "D1–D6", accept: str = "A1–A5") -> str:
+        return (
+            "# AGENTS\n\n"
+            "技能根见 `.planning/orchestration.json` 的 `skillRoot`。\n"
+            f"规则见 `references/crew-rules.md`（{rules}）与 "
+            f"`references/crew-acceptance.md`（{accept}）。\n"
+        )
+
     def write(self, rel: str, text: str) -> None:
         path = self.root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -76,10 +84,7 @@ class CrewLintTest(unittest.TestCase):
     def make_skill(self) -> None:
         self.write("references/crew-rules.md", rules_text())
         self.write("references/crew-acceptance.md", acceptance_text())
-        self.write(
-            "templates/AGENTS-编排节.md",
-            "# AGENTS\n\n规则见 {{crew_rules}}（D1–D6）与 {{crew_acceptance}}（A1–A5）。\n",
-        )
+        self.write("templates/AGENTS-编排节.md", self.portable_agents())
         for rel in ROLE_FILES:
             self.write(rel, "# 角色\n\n规则：{{crew_rules}}（D1–D6）。\n")
         self.write(
@@ -152,10 +157,7 @@ class CrewLintTest(unittest.TestCase):
 
     def test_rule_reference_missing_endpoint(self):
         self.make_skill()
-        self.write(
-            "templates/AGENTS-编排节.md",
-            "# AGENTS\n\n规则见 {{crew_rules}}（D1–D9）与 {{crew_acceptance}}（A1–A5）。\n",
-        )
+        self.write("templates/AGENTS-编排节.md", self.portable_agents(rules="D1–D9"))
         proc = self.lint()
         self.assertEqual(proc.returncode, 1)
         self.assertIn("D9 not defined", proc.stdout)
@@ -163,20 +165,14 @@ class CrewLintTest(unittest.TestCase):
     def test_rule_reference_missing_interior(self):
         self.make_skill()
         self.write("references/crew-rules.md", rules_text().replace("- **D4 规则4**：说明。\n", ""))
-        self.write(
-            "templates/AGENTS-编排节.md",
-            "# AGENTS\n\n规则见 {{crew_rules}}（D1–D6）。\n",
-        )
+        self.write("templates/AGENTS-编排节.md", self.portable_agents())
         proc = self.lint()
         self.assertEqual(proc.returncode, 1)
         self.assertIn("D4 not defined", proc.stdout)
 
     def test_acceptance_reference_missing(self):
         self.make_skill()
-        self.write(
-            "templates/AGENTS-编排节.md",
-            "# AGENTS\n\n验收见 {{crew_acceptance}}（A1–A6）。\n",
-        )
+        self.write("templates/AGENTS-编排节.md", self.portable_agents(accept="A1–A6"))
         proc = self.lint()
         self.assertEqual(proc.returncode, 1)
         self.assertIn("A6 not defined", proc.stdout)
@@ -191,12 +187,46 @@ class CrewLintTest(unittest.TestCase):
         self.assertIn("pointer", proc.stdout)
         self.assertIn("templates/agents/qoder/builder.md", proc.stdout)
 
+    def test_agents_template_relative_pointer_allowed(self):
+        self.make_skill()
+        self.write(
+            "templates/AGENTS-编排节.md",
+            self.portable_agents()
+            + "- 剧本库：`templates/playbooks/README.md`。\n",
+        )
+        proc = self.lint()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_agents_template_absolute_token_rejected(self):
+        for token in ("{{skill_root}}", "{{crew_rules}}", "{{crew_acceptance}}"):
+            with self.subTest(token=token):
+                self.make_skill()
+                self.write(
+                    "templates/AGENTS-编排节.md",
+                    self.portable_agents() + f"- 规则：`{token}`。\n",
+                )
+                proc = self.lint()
+                self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                self.assertIn("pointer", proc.stdout)
+                self.assertIn(token, proc.stdout)
+
+    def test_agents_template_missing_anchor_rejected(self):
+        self.make_skill()
+        self.write("templates/AGENTS-编排节.md", "# AGENTS\n\n规则见 `references/crew-rules.md`。\n")
+        proc = self.lint()
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("missing skill root anchor", proc.stdout)
+
     # ---- 重复句 ----------------------------------------------------------
 
     def test_duplicate_sentence_across_documents(self):
         self.make_skill()
         sentence = "跨文档重复句子检查需要至少三十个字符才能被脚本报出来用于验证。"
-        self.write("templates/AGENTS-编排节.md", f"# AGENTS\n\n{sentence}\n")
+        self.write(
+            "templates/AGENTS-编排节.md",
+            "# AGENTS\n\n技能根见 `.planning/orchestration.json` 的 `skillRoot`。\n"
+            f"{sentence}\n",
+        )
         self.write("templates/_templates/ticket.md", f"# 工单\n\n{sentence}\n")
         proc = self.lint()
         self.assertEqual(proc.returncode, 1)
@@ -217,8 +247,10 @@ class CrewLintTest(unittest.TestCase):
         long_heading = "# 相同标题相同标题相同标题相同标题相同标题相同标题"
         table = "|---|---|"
         code_line = "这是代码块内的长句子不会参与跨文档重复检查因为围栏内容被跳过。"
+        anchors = "技能根见 `.planning/orchestration.json` 的 `skillRoot`。\n"
         for rel in ("templates/AGENTS-编排节.md", "templates/_templates/ticket.md"):
-            self.write(rel, f"{long_heading}\n{table}\n```\n{code_line}\n```\n")
+            head = anchors if rel == "templates/AGENTS-编排节.md" else ""
+            self.write(rel, f"{long_heading}\n{head}{table}\n```\n{code_line}\n```\n")
         proc = self.lint()
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 

@@ -37,6 +37,17 @@ HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 COPY_BASENAMES = ("crew-rules.md", "crew-acceptance.md",
                   "orchestration-guide.md", "plan-discipline.md")
+SKILL_POINTER_MARKERS = (
+    "references/crew-rules.md", "references/crew-acceptance.md",
+    "references/plan-discipline.md", "SKILL.md",
+)
+SKILL_ROOT_ANCHORS = (".planning/orchestration.json", "skillRoot")
+ABS_SKILL_POINTER_RE = re.compile(
+    r"(?:^|[\s`'\"「『（(])(?:/|~/|[A-Za-z]:[\\/])[^\s`'\"」』）)]*(?:"
+    r"references/crew-(?:rules|acceptance)\.md|references/plan-discipline\.md|"
+    r"references/orchestration-guide\.md|references/herdr-cheatsheet\.md|"
+    r"SKILL\.md|CHANGELOG\.md|templates/playbooks)"
+)
 # 与 crew-guard.py 的 DEFAULT_BLOCKED_{REPEAT,GRACE}_MINUTES 对齐；缺省参与 effective 比较
 GUARD_BLOCKED_REPEAT_DEFAULT = 15
 GUARD_BLOCKED_GRACE_DEFAULT = 30
@@ -243,6 +254,30 @@ def block_body(text: str) -> tuple[str | None, list[str]]:
     while normalized and not normalized[-1]:
         normalized.pop()
     return "\n".join(normalized) + "\n", []
+
+
+def agents_block_pointer_problem(
+    body: str, skill_root: Path | None, raw_root: object
+) -> str | None:
+    """AGENTS 受管块技能指针判定（agents.block / docs.pointers 共用，避免两处漂移）。
+
+    - 绝对指针：必须指向当前 skillRoot（配置原值或解析值），否则 stale；
+    - 描述性指针：不依赖 skillRoot，但必须含技能根锚点，缺失时 stale；
+    - 块内无技能指针：不判定。
+    """
+    if not any(name in body for name in SKILL_POINTER_MARKERS):
+        return None
+    accepted = {str(skill_root)} if skill_root else set()
+    if isinstance(raw_root, str) and raw_root.strip():
+        accepted.add(raw_root.strip().rstrip("/"))
+    if any(item in body for item in accepted):
+        return None
+    if ABS_SKILL_POINTER_RE.search(body):
+        return "块内指针未指向当前 skillRoot（stale）"
+    if any(anchor not in body for anchor in SKILL_ROOT_ANCHORS):
+        return ("块内缺少技能根锚点（" + " / ".join(SKILL_ROOT_ANCHORS)
+                + "）（stale）")
+    return None
 
 
 @dataclass
@@ -637,18 +672,11 @@ class Doctor:
         tokens = sorted(set(RESIDUAL_TOKEN_RE.findall(body)))
         if tokens:
             problems.append(f"块内未解析 token：{tokens}")
-        skill_root = self.skill_root()
-        pointer_like = any(name in body for name in (
-            "references/crew-rules.md", "references/crew-acceptance.md",
-            "references/plan-discipline.md", "SKILL.md",
-        ))
         config = self.config() or {}
-        raw_root = config.get("skillRoot")
-        accepted = {str(skill_root)} if skill_root else set()
-        if isinstance(raw_root, str) and raw_root.strip():
-            accepted.add(raw_root.strip().rstrip("/"))
-        if pointer_like and skill_root and not any(item in body for item in accepted):
-            problems.append("块内指针未指向当前 skillRoot（stale）")
+        pointer_problem = agents_block_pointer_problem(
+            body, self.skill_root(), config.get("skillRoot"))
+        if pointer_problem:
+            problems.append(pointer_problem)
         stored, _ = self._manifest_block_hash()
         actual = sha256_bytes(body.encode("utf-8"))
         if stored and not same_hash(stored, actual):
@@ -709,17 +737,10 @@ class Doctor:
         agents_text = read_text(agents) if agents.is_file() else None
         if agents_text:
             body, _ = block_body(agents_text)
-            skill_root = self.skill_root()
-            pointer_like = body and any(name in body for name in (
-                "references/crew-rules.md", "references/crew-acceptance.md",
-                "references/plan-discipline.md", "SKILL.md",
-            ))
-            raw_root = config.get("skillRoot")
-            accepted = {str(skill_root)} if skill_root else set()
-            if isinstance(raw_root, str) and raw_root.strip():
-                accepted.add(raw_root.strip().rstrip("/"))
-            if pointer_like and skill_root and not any(item in body for item in accepted):
-                problems.append("AGENTS.md 块内指针未指向当前 skillRoot（stale）")
+            pointer_problem = agents_block_pointer_problem(
+                body or "", self.skill_root(), config.get("skillRoot"))
+            if pointer_problem:
+                problems.append("AGENTS.md " + pointer_problem)
         role_ext = ((config.get("hooks") or {}).get("roleExt")
                     if isinstance(config.get("hooks"), dict) else None)
         if isinstance(role_ext, dict):
