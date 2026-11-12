@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.2.19 — 2026-11-12
+
+交接必读硬达标（A）与进度看板人类可读 v2（B），含互检/评审补口与本地发布。
+
+### 新增
+
+- **A 交接摘要与硬预算**：`plan-status.py --handover` 摘要重构——Goal ≤2 行；每活跃流一行（plan 路径 + 当前阶段 + Next Step 首条 ≤200 字符 + 待 Captain 计数）；待 Captain ≤3 条标题 + 溢出计数；recent progress 3 条；未处理通知段保留。预算按 D-2 只计实际要求读的段（摘要 / brief / 活跃流整行 / feedback 待复盘命中 / handoff），整看板与整 plan 不计入且不重复计算，输出「只读段」说明；stdout 硬 ≤32,768B，超限按 D-3 确定性截断并标注「已截断，详情见 plan」；只读不写文件。helm（qoder/opencode）交接白名单、`plan-discipline` §5.1.4、`crew-rules` F11 同步新口径。
+- **B 看板人类可读 v2**：`--write` 输出改为「现在状态一句 + 健康图例 + 今日变化 ≤3 行 + 待 Captain ≤5 条 + 流表（排序＝活跃 → 待立项 → 已完成折叠，活跃永不截）+ 最近完成 ≤5 条 + 偏差/Backlog 计数 + 证据/plan 指针」；体量 ≤120 行且 ≤24KB，超限按行确定性截断并给指针；`--brief` 与看板同表头/待 Captain 计数/今日变化来源；`plan-discipline` §3/§5.1 同步，`BOARD_VERSION=v2`（旧 v1 看板判过期）。
+
+### 修复
+
+- 互检 B-1：预算封顶时输出封顶前原值（`raw_total` + 缺口归因到实际被截分项）与 handoff 过大可执行提示，不低报真实必读；S-1–S-5（活跃流整行计入且不重复计、溢出指针、现在句拆活跃/待立项、raw 精确边界 32,768/32,769、规则口径对齐）。
+- 两轴评审 R-1：看板流表排序改为活跃 → 待立项 → 已完成折叠，活跃/待立项不被已完成挤出（含回归测试）；同批 S1 健康图例、S2 三处旧口径、S3 `BOARD_VERSION=v2`、S4 selftest 解析断言 + negative 测试、S5 删除孤儿常量。S6–S9 记录转后续流，S10 发布阶段刷新 live 看板。
+
+### 测试
+
+- 新增 `test_2219_handover_budget.py`、`test_2219_board_readable.py`；迁移 `test_2213_context_budget.py`、`test_2213_rules.py`、`test_2218_fb044_handover_brief.py`、`test_plan_status_*.py` 相关断言（先红后绿）；60KB+ 看板 / 100KB plan / 50 条待 Captain / 超长 Next Step 夹具覆盖预算口径、硬上限与截断确定性。
+- 全量 pytest 0 fail（本版 1271 passed + 986 subtests）；`crew-lint`（含 `--purity`）、`plan-status --selftest`/`--playbooks` 绿。
+- 版本 2.2.19：`SKILL.md` frontmatter 与标题、`init.py` fallback、本段、`test_crew_lint.py`、`test_220_final.py`、`test_224_retro.py`、`test_225_patch.py`、`test_2214_guard_presence.py` 版本断言同步。
+
 ## 2.2.18 — 2026-11-12
 
 反馈闭环（FB-041–FB-044）：评审/终验报告与回执成对、占用键统一、dispatch 双 runtime 判读、交接一屏摘要，含互检/评审补口与本地发布。

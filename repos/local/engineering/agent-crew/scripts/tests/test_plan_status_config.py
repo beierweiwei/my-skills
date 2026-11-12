@@ -169,15 +169,15 @@ class PlanStatusConfigTest(unittest.TestCase):
             config={"backlog": {"captainBlocks": {"T7": "C5"}}},
         )
         board = ps.render(plans=ps.load_plans(root), cfg=ps.load_config(root))
-        backlog = board.split("## Backlog", 1)[1].split("## 待 Captain", 1)[0]
-        self.assertIn("待 C5", backlog)  # T7 的阻塞列被映射改写
-        self.assertNotIn("| T7 | 任务七 | P1 | — | — |", backlog)
+        backlog = board.split("## Backlog", 1)[1].split("## 证据/plan 指针", 1)[0]
+        self.assertIn("待 C 阻塞 1 条", backlog)  # T7 的阻塞映射计入计数
+        self.assertNotIn("| T7 |", backlog)  # 明细不再导出
 
     def test_no_blocks_by_default(self):
         root = make_repo(self.tmp, DEFAULT_PLANS)
         board = ps.render(plans=ps.load_plans(root), cfg=ps.load_config(root))
-        backlog = board.split("## Backlog", 1)[1].split("## 待 Captain", 1)[0]
-        self.assertIn("| T7 | 任务七 | P1 | — | — |", backlog)  # 默认 {} → 原样透出
+        backlog = board.split("## Backlog", 1)[1].split("## 证据/plan 指针", 1)[0]
+        self.assertIn("待 C 阻塞 0 条", backlog)
 
     def test_config_portfolio_match_glob(self):
         plans = {"streams-home": PORTFOLIO_BODY, "stream-a": STREAM_BODY}
@@ -193,11 +193,10 @@ class PlanStatusConfigTest(unittest.TestCase):
             config={"backlog": {"captainPrefix": "B", "agentPrefix": "A", "captainBlocks": {"A2": "B9"}}},
         )
         board = ps.render(plans=ps.load_plans(root), cfg=ps.load_config(root))
-        backlog = board.split("## Backlog", 1)[1].split("## 待 Captain", 1)[0]
+        backlog = board.split("## Backlog", 1)[1].split("## 证据/plan 指针", 1)[0]
         captain = board.split("## 待 Captain", 1)[1]
         self.assertIn("**B9**", captain)
-        self.assertIn("| A1 |", backlog)
-        self.assertIn("待 B9", backlog)
+        self.assertIn("agent 待办 2 条（待 B 阻塞 1 条）", backlog)
 
     # --- 归档行为（§2.4 #2：一次性动作不内置） ---
 

@@ -106,7 +106,10 @@ class TemplateRulesTest(unittest.TestCase):
                     line for line in text.splitlines() if "交接读取范围（硬）" in line)
                 self.assertIn(BRIEF_FIRST_ITEM, whitelist)
                 self.assertNotIn("只读白名单＝看板", whitelist)
-                self.assertIn("活跃流 plan 的 Next Step/Status（grep）", whitelist)
+                # S-5：White list 的 Status grep 只是核对手段，不计入交接必读预算。
+                self.assertIn("活跃流 plan 的 Next Step 首条", whitelist)
+                self.assertIn("Status 仅核对", whitelist)
+                self.assertIn("不计入", whitelist)
                 self.assertIn("单文件 >20KB 不整读", whitelist)
                 self.assertIn("看板仅按关键词 grep", whitelist)
                 budget = next(
@@ -184,7 +187,9 @@ class HandoverBudgetTest(unittest.TestCase):
         rc, out, _err = run(repo, "--handover")
         self.assertEqual(rc, 0)
         fields = budget_fields(out)
-        self.assertGreater(fields["total"], BUDGET)
+        # A1：feedback 分项封顶后 total 硬 ≤32KB；原始必读仍超 → 保留摘要/grep 提示。
+        self.assertLessEqual(fields["total"], BUDGET)
+        self.assertIn("已封顶", out)
         self.assertIn("超预算", out)
         self.assertIn("先摘要", out)
         self.assertIn("grep", out)

@@ -127,7 +127,7 @@ class DeviationLifecycleTest(unittest.TestCase):
     def _board_deviation(self, body: str) -> str:
         root = make_repo(self.tmp, {"x-portfolio": body, "stream-a": stream_body([("阶段一", "complete")])})
         board = ps.render(plans=ps.load_plans(root), cfg=ps.load_config(root))
-        return board.split("## 偏差明细", 1)[1].split("## Backlog", 1)[0]
+        return board.split("## 偏差", 1)[1].split("## Backlog", 1)[0]
 
     def test_resolved_row_folded_with_count(self):
         body = portfolio_body([
@@ -135,8 +135,8 @@ class DeviationLifecycleTest(unittest.TestCase):
             "| 预期乙 | 实际乙 | 原因乙 | 已解决（2026-10-29） |",
         ])
         dev = self._board_deviation(body)
-        self.assertIn("| 预期甲 |", dev)
-        self.assertNotIn("预期乙", dev)  # 已解决行被过滤
+        self.assertIn("活跃 1 条", dev)
+        self.assertNotIn("预期乙", dev)  # 已解决行不计入活跃
         self.assertIn("已解决 1 条（折叠）", dev)
 
     def test_resolved_mark_hits_any_column(self):
@@ -147,11 +147,11 @@ class DeviationLifecycleTest(unittest.TestCase):
         ])
         dev = self._board_deviation(body)
         self.assertNotIn("预期甲（已解决）", dev)
-        self.assertIn("| 预期乙 |", dev)
+        self.assertIn("活跃 1 条", dev)
         self.assertIn("已解决 1 条（折叠）", dev)
 
     def test_all_resolved_closed_state(self):
-        # 整节无活跃行：显示收口态，不渲染表头与数据行
+        # 整节无活跃行：显示收口态，不渲染明细表
         body = portfolio_body([
             "| 预期甲 | 实际甲 | 原因甲 | 已解决（2026-10-28） |",
             "| 预期乙 | 实际乙 | 原因乙 | 已解决（2026-10-29） |",

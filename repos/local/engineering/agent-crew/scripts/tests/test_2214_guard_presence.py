@@ -177,13 +177,13 @@ class SkillChecklistTest(unittest.TestCase):
 
 
 class ChangelogVersionSectionTest(unittest.TestCase):
-    """发布 2.2.18：CHANGELOG 顶部含 2.2.18 发布段，2.2.17 基线段保留。"""
+    """发布 2.2.19：CHANGELOG 顶部含 2.2.19 发布段，2.2.17 基线段保留。"""
 
     def test_changelog_has_2218_section(self):
         text = read("CHANGELOG.md")
         top = re.search(r"^## (2\.2\.\d+)(?:\s|$)", text, flags=re.MULTILINE)
         self.assertIsNotNone(top, "CHANGELOG 缺少发布段")
-        self.assertEqual("2.2.18", top.group(1), "CHANGELOG 顶部发布段应为 2.2.18")
+        self.assertEqual("2.2.19", top.group(1), "CHANGELOG 顶部发布段应为 2.2.19")
         self.assertIsNotNone(
             re.search(r"^## 2\.2\.17(?:\s|$)", text, flags=re.MULTILINE),
             "CHANGELOG 缺少 2.2.17 基线段",

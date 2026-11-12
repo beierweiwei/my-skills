@@ -627,9 +627,21 @@ class WriteWarningTest(_TmpRepoTest):
         return rc, out.getvalue(), err.getvalue()
 
     @staticmethod
-    def _board_without_timestamp(repo: Path) -> str:
-        text = (repo / "docs/进度追踪.md").read_text(encoding="utf-8")
-        return "\n".join(l for l in text.splitlines() if "生成于" not in l)
+    def _board_without_volatile(repo: Path) -> str:
+        """去时间戳与今日变化节（该节按 progress 派生，两仓进度不同属预期差异）。"""
+        lines = (repo / "docs/进度追踪.md").read_text(encoding="utf-8").splitlines()
+        out, skipping = [], False
+        for line in lines:
+            if "生成于" in line:
+                continue
+            if line.startswith("## 今日变化"):
+                skipping = True
+                continue
+            if skipping and line.startswith("## "):
+                skipping = False
+            if not skipping:
+                out.append(line)
+        return "\n".join(out)
 
     def test_warning_on_byte_threshold(self):
         padding = "x" * (ps.PROGRESS_WARN_BYTES + 100)
@@ -644,8 +656,8 @@ class WriteWarningTest(_TmpRepoTest):
         self.assertIn(str(ps.PROGRESS_WARN_BYTES), err)
         self.assertEqual(len(out.strip().splitlines()), 1)  # stdout 只余写入行
         self.assertEqual(self._write(base)[0], 0)
-        self.assertEqual(self._board_without_timestamp(repo),
-                         self._board_without_timestamp(base))
+        self.assertEqual(self._board_without_volatile(repo),
+                         self._board_without_volatile(base))
 
     def test_warning_on_entry_threshold(self):
         repo = self._repo(progress_body(numbered_entries(ps.PROGRESS_WARN_ENTRIES)))

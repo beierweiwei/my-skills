@@ -122,29 +122,28 @@ class HandoverBudgetTest(unittest.TestCase):
             "- 待复盘 " + "x" * 40000 + "\n", encoding="utf-8")
         rc, out, _err = self._run(repo)
         self.assertEqual(rc, 0)
-        self.assertGreater(self._field(out), BUDGET)
+        self.assertLessEqual(self._field(out), BUDGET)  # A1：必读 total 硬 ≤32KB
+        self.assertIn("已封顶", out)
         self.assertIn("超预算", out)
         self.assertIn("先摘要", out)
         self.assertIn("grep", out)
         self.assertIn("写明只读段", out)
         self.assertLessEqual(len(out.splitlines()), ps.HANDOVER_MAX_LINES)
 
-    def test_exact_threshold_no_hint_and_plus_one_hints(self):
+    def test_feedback_byte_cap_keeps_total_under_budget(self):
         repo = self._repo()
         _rc, out, _err = self._run(repo)
-        delta = BUDGET - self._field(out)
-        prefix = "- 待复盘 "
-        self.assertGreater(delta, len(prefix.encode("utf-8")) + 1)
-        line = prefix + "y" * (delta - len(prefix.encode("utf-8")) - 1)
+        base = self._field(out)
+        self.assertLessEqual(base, BUDGET)
+        self.assertNotIn("已封顶", out)  # 正常夹具不封顶
         feedback = self._feedback(repo)
-        feedback.write_text(line + "\n", encoding="utf-8")
+        feedback.write_text("- 待复盘 " + "y" * 40000 + "\n", encoding="utf-8")
         rc, out, _err = self._run(repo)
         self.assertEqual(rc, 0)
-        self.assertEqual(BUDGET, self._field(out))
-        self.assertNotIn("超预算", out)
-        feedback.write_text(line + "y\n", encoding="utf-8")
-        _rc, out, _err = self._run(repo)
-        self.assertEqual(BUDGET + 1, self._field(out))
+        capped = self._field(out)
+        self.assertLessEqual(capped, BUDGET)  # A1：total 也硬 ≤32KB
+        self.assertEqual(base + ps.HANDOVER_FEEDBACK_MAX_BYTES, capped)
+        self.assertIn("已封顶", out)
         self.assertIn("超预算", out)
 
     def test_handover_still_writes_nothing(self):
@@ -250,14 +249,14 @@ class ContextBaselineTest(DoctorBudgetTestBase):
         self.assertGreater(item["evidence"]["totalBytes"], 60 * 1024)
         self.assertIn("摘要", item["next"])
 
-    def test_large_feedback_handover_bytes_push_over_budget(self):
-        # FB-044：整看板不整读、不计入；大 feedback 待复盘行仍是必读分项。
+    def test_large_feedback_capped_in_handover_bytes(self):
+        # A1：feedback 分项封顶，交接必读硬 ≤32KB（不再由 feedback 推高到 60KB+）。
         feedback = self.fx.root / ".planning/portfolio/feedback.md"
         feedback.write_text("- 待复盘 " + "b" * 70000 + "\n", encoding="utf-8")
         rc, item = self.check("context.baseline")
         self.assertEqual(0, rc)
-        self.assertEqual("warn", item["status"], item["detail"])
-        self.assertGreater(item["evidence"]["handoverBytes"], 60 * 1024)
+        self.assertGreater(item["evidence"]["handoverBytes"], 0)
+        self.assertLessEqual(item["evidence"]["handoverBytes"], 32768)
 
     def test_large_board_not_counted_in_handover_bytes(self):
         # FB-044：看板仅按关键词 grep，大看板不得单独推高交接必读估算。
@@ -279,7 +278,8 @@ class ContextBaselineTest(DoctorBudgetTestBase):
             "- 待复盘 " + "b" * 40000 + "\n", encoding="utf-8")
         rc, item = self.check("context.baseline")
         self.assertEqual(0, rc)
-        self.assertGreater(item["evidence"]["handoverBytes"], 39000)
+        self.assertGreater(item["evidence"]["handoverBytes"], 0)
+        self.assertLessEqual(item["evidence"]["handoverBytes"], 32768)
         self.assertNotIn("无 .planning/portfolio", item["detail"])
 
     def test_missing_custom_portfolio_dir_reports_configured_path(self):

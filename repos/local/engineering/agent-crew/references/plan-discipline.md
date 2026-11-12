@@ -11,7 +11,7 @@
 - **写者**：一 plan 一 owner；worker 只写自己的报告/ledger，不改 `task_plan.md`（多写者会静默覆盖）。
 - **阶段纪律**：阶段完成改该 Phase 下**唯一**的 `**Status:**` 行（pending → in_progress → complete）并刷新 `## Next Step`（单一动作）；错误**当轮**记录到 `## Errors Encountered`（Error/Resolution），不攒到收口；收口时空表写「无」，**不得留「待记录」**；决策进 `## Decisions Made`（Decision/Rationale，代决标注「代决（可覆盖）」）。
 - **Current Phase 自动推导**：`## Current Phase` 由 `plan-status.py` 自动推导（首个非 complete 的 Phase），勿手工维护；所有 Phase 都 complete 时，可在该节写收口说明文字，作为看板兜底显示。
-- **Deviation 解决标记**：Deviation 条目解决后在行内（建议「待决策」列）追加「已解决（YYYY-MM-DD）」标记，看板自动过滤折叠已解决条目，不再僵尸堆积；未带标记的照常显示。
+- **Deviation 解决标记**：Deviation 条目解决后在行内（建议「待决策」列）追加「已解决（YYYY-MM-DD）」标记，看板按「活跃 N 条 / 已解决 M 条（折叠）」计数呈现，不再僵尸堆积；未带标记的计入活跃条数，明细留在 plan（看板不导出明细）。
 - **待办**：需用户/客户/IT 做的事记入需求文档待澄清节，或在 Backlog 阻塞列标 `待 Cx`；不另建待办文件。
 - **Anti-pattern**：手改派生看板；同一状态多处记录；覆盖已有 plan；多写者改同一 plan；把队列字段塞进 Phases。
 
@@ -27,7 +27,7 @@
 | `## Next Step` | 单一动作（含执行者）；每次阶段变化后刷新 |
 | `## Current Phase` | 当前阶段名 |
 | `## Phases` | 每 Phase = `### Phase N: <名>` 标题 + `- owner:` 行 + checklist + **恰好一行** `**Status:** pending\|in_progress\|complete`；portfolio 内的流 plan 另有 `- plan: \`.planning/<路径>\`` 引用行（看板解析流引用的锚点） |
-| `## 业务链`（可选） | 业务主线节点视图；表列/状态/说明写法见 §4，启用后看板自动置顶渲染 |
+| `## 业务链`（可选） | 业务主线节点视图；表列/状态/说明写法见 §4；看板不逐节点渲染，只把 ⏸ 节点汇入待 Captain（明细 grep plan） |
 | `## Decisions Made` | 表：Decision / Rationale |
 | `## Errors Encountered` | 表：Error / Resolution |
 
@@ -45,7 +45,8 @@
 - **真源与视图**：`.planning/*/task_plan.md` 是唯一状态真源；派生看板只由 `python3 scripts/plan-status.py --write` 生成，**勿手改**。
 - **落点与标题**：由项目 `.planning/orchestration.json` 的 `board.path` / `board.title` 配置（默认 `docs/进度追踪.md`）；父目录不存在会自动创建。
 - **portfolio 识别**：按配置 `portfolioMatch` glob 匹配 plan 目录名（默认 `*portfolio*`）。
-- **看板结构**：（可选）业务链置顶 + 流表（当前阶段/完成数/健康/该流 Next Step）+ Deviation + Backlog（T\*）+ 待 Captain（C\*）。
+- **看板结构**（2.2.19 B 人类速读）：现在状态一句（活跃流/最差健康/待 Captain/今日变化）+ 健康图例一行（🟢 完成/🟡 进行中/🔴 阻塞或偏差）+ 今日变化 ≤3 行 + 待 Captain 摘要 ≤5 条 + 流表（与 `--brief` 同表头：流/阶段/完成数+健康/下一步一句话 ≤60 字符/待 Captain 数；排序＝活跃 → 待立项 → 已完成，已完成折叠为一行计数 + 指针，活跃/待立项不被挤出）+ 最近完成 ≤5 条一行 + 偏差/Backlog 计数 + 证据/plan 指针；不整段导出总舵 Next Step、业务链逐节点、各流 todo 与偏差/Backlog 明细（真源在 plan，按指针 grep）。
+- **体量上限**：看板 ≤120 行且 ≤24KB；超限按行保留前缀并给截断指针，`--check-fresh` 指纹行不受影响。
 - **归档**：不内置；需要归档历史看板时以 `--archive <path>` 一次性显式执行。`board.archive` 配置为空时看板不写归档链接行。
 - **自检**：`python3 scripts/plan-status.py --selftest` 验证 T/C 分流与流表结构（核心契约），部署后先跑一次。
 - **一屏摘要**：`python3 scripts/plan-status.py --brief` 输出活跃流表（流｜阶段｜完成数/健康｜下一步｜待 Captain）+ 待 Captain 摘要 + 今日变化（≤40 行）；用于每轮汇报与交接速读，只读不落盘。
@@ -63,10 +64,10 @@
 
 **细化口径**（Captain 2026-10-30 知会；模板与正反例按此书写）：
 - ① todo 条目一律标准 md todo 语法：行首 `- [x]` / `- [ ]`；待 Captain＝行首 `- [ ]` 后文字内带 `⏸` 与「（待 Captain）」，`[⏸]` 不作 todo 标记；
-- ② Markdown 表格单元格不换行——**表＝概览、todo＝分节列表**：看板流表只留概览列，todo 细节按流分节列表（每条一行）；
+- ② Markdown 表格单元格不换行——**表＝概览、todo＝分节列表**：看板只保留流表概览与计数（不导出 todo 明细），todo 细节留在各流 plan 分节列表（每条一行），按指针 grep；
 - ③ 「表内塞多条 todo」是反例，禁止。
 
-**业务链表写法模板**（plan 内节名 `## 业务链`，可选节；启用后看板自动置顶渲染）：
+**业务链表写法模板**（plan 内节名 `## 业务链`，可选节；看板不渲染业务链，只把 ⏸ 节点汇入待 Captain）：
 
 | 节点 | 状态 | 说明 |
 |---|---|---|
@@ -106,7 +107,7 @@
 1. **Next Step 只放未完成**（≤10 条、每条 ≤1 行 ≤100 字）；完成项迁入 `## 最近完成`（≤10 条，含 commit/测试/证据指针）。
 2. **待 Captain 项只在 Backlog**（C 行）；Next Step 只引用编号，不复制待办正文。
 3. **progress 事件触发写入**：决策/阻塞/派单/收口/异常各写一次，最长 30–60 分钟兜底；一段多里程碑、一条一行。
-4. **交接一屏优先**：交接只读白名单＝`python3 scripts/plan-status.py --brief` 一屏 + `python3 scripts/plan-status.py --handover` 摘要 + 活跃流 Next Step/Status（grep）+ feedback 待复盘条目（grep）+ `guard.handoff` + 最近 3 段 progress + 需求当前章节；禁整读 看板/progress/task_plan/feedback/历史流 plan/共识；交接必读 ≤32KB（含 `--handover` 输出与必读文件），超阈值先摘要/关键词 grep，写明只读段，再定向补读；`Decisions`/`Deviation`/`Backlog` 不整读（需要时按关键词 grep）；单文件 >20KB 不整读；看板仅按关键词 grep，不整读；看板未刷新或源 sha 不一致时，禁止交接。
+4. **交接一屏优先**：交接只读白名单＝`python3 scripts/plan-status.py --brief` 一屏 + `python3 scripts/plan-status.py --handover` 摘要 + 活跃流 Next Step 首条（grep；Status 仅核对进度时按需 grep，不计入交接必读预算）+ feedback 待复盘条目（grep）+ `guard.handoff` + 最近 3 段 progress + 需求当前章节；禁整读 看板/progress/task_plan/feedback/历史流 plan/共识；交接必读 ≤32KB（含 `--handover` 输出与必读文件），超阈值先摘要/关键词 grep，写明只读段，再定向补读；`Decisions`/`Deviation`/`Backlog` 不整读（需要时按关键词 grep）；单文件 >20KB 不整读；看板仅按关键词 grep，不整读；看板未刷新或源 sha 不一致时，禁止交接。看板与 `--brief` 同口径（同一表头/待 Captain 计数/今日变化来源），只做一屏速读视图，不整段导出计划正文；看板体量 ≤120 行且 ≤24KB。交接预算只计实际要求读的段（摘要/brief/活跃流整行/feedback 待复盘命中/handoff），整看板/整 plan 不计入；`--handover` 输出硬 ≤32KB，超限截断并标注「已截断，详情见 plan」。
 
 > 交接 digest 另含 pane 清单与待关项；工位/tab 回收规则见 [orchestration-guide.md](orchestration-guide.md) §5.10（单一真源，此处只留指针）。
 
