@@ -1225,11 +1225,13 @@ class Guard:
         portfolio = load_config(self.root)["portfolioDir"]
         message = (
             f"交接接手：原总舵 {self.helm} 的 ctx 已达 {ctx_k:g}k/1M（{pct:.0%}）。\n"
-            "按「交接读取范围（硬）」读取：派生看板（docs/进度追踪.md）+ "
-            "`python3 scripts/plan-status.py --handover` 摘要 + "
-            f"活跃流 plan 的 Next Step/Status（grep）+ {portfolio}/feedback.md 待复盘条目（grep）"
-            "+ `<crew-dir>/guard.handoff`。\n"
-            "禁整读 progress/task_plan/findings/历史流 plan/共识；单文件 >20KB 不整读。\n"
+            "按「交接读取范围（硬）」读取：`python3 scripts/plan-status.py --brief` 一屏 + "
+            f"活跃流 plan 的 Next Step/Status（grep）+ `python3 scripts/plan-status.py --handover` 摘要 + "
+            f"{portfolio}/feedback.md 待复盘条目（grep）+ `<crew-dir>/guard.handoff`。\n"
+            "禁整读 看板/progress/task_plan/feedback/findings/历史流 plan/共识；"
+            "单文件 >20KB 不整读；看板仅按关键词 grep。\n"
+            "交接必读 ≤32KB（含 `--handover` 输出与必读文件），超阈值先摘要/grep、"
+            "写明只读段再定向补读。\n"
             "完成接手首报（当前进度/在跑 agent/待办/下一步），首报前不接新活；"
             "首报后 guard 会确认并关闭旧舵 pane 与旧 tab。"
         )

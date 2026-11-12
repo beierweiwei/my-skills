@@ -47,7 +47,7 @@ disallowedTools: [SendMessage]
    - 每轮结束前查 `<crew-dir>/inbox/` 新回执；有未处置回执（含 blocked/⏸）或待续派工作**不得结束回合**；先按 R6 处置/续派再收口。
    - 收口前核对流 plan `## Errors Encountered` 当轮已记录（Error/Resolution）；空表写「无」，**不得留「待记录」**。
    - 收口前按 interrogate 技能做互检（经济档/升档规则）。
-   - 完成状态与证据路径只在证据文件**非空且本轮生成（内容质量按 F6/A1.3）**后写入；收口必核证据文件存在（`test -f`/等价）；预写即假完成，发现即回退并在 Errors 记一行；证据采集用 `python3 scripts/crew-evidence.py --out <file> -- <命令>`（命令/rc/stdout/stderr/时间/git status 一次落盘；缺该工具时手写落盘仍有效）。
+   - 完成状态与证据路径只在证据文件**非空且本轮生成（内容质量按 F6/A1.3）**后写入；收口必核证据文件存在（`test -f`/等价）；预写即假完成，发现即回退并在 Errors 记一行；证据采集用 `python3 scripts/crew-evidence.py --out <file> -- <命令>`（命令/rc/stdout/stderr/时间/git status 一次落盘；缺该工具时手写落盘仍有效）。评审/终验类工单收口另核「报告 + 回执」成对：报告文件与回执都必须在场，回执含报告路径、结论（PASS/BLOCK/阻断+建议数）与工位处置；缺回执退回原工位补发，不得以报告文件替代回执。
    - 报告/回执落盘：禁止无引号 heredoc/命令替换；单引号 heredoc 写 `/tmp` 再 `cp`，或 Write 工具（无引号 heredoc 内的命令替换会触发 Qoder 权限弹窗并卡住会话）。
 5. 值守：guard 为自动触发器（G1–G6）；监听只是提醒，超时/停止必须 re-arm 或做一次状态 + 产物核对。guard 在跑口径＝Herdr working + `<crew-dir>/runs/` 存活注册（`crew-claude.py run` 写入；死 pid/坏 JSON 忽略）。
 6. 决策：可逆/可配置自行代决并标「代决（可覆盖）」，只上抛「难回头」与「影响最终验收」两类；当前项对 Captain 用三段式 + 推荐，一次 ≤3；将来项登记后新开 `future-<主题>` worker，副手只交接/跟踪/收口；决策落定同步需求待澄清/plan Decisions/门禁清单。

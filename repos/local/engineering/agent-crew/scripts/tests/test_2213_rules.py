@@ -351,16 +351,18 @@ class TicketTemplateTest(unittest.TestCase):
 
 # H 规则侧逐项快照：在正确的行内断言，删任一项即红。
 HANDOVER_WHITELIST_ITEMS = (
-    "只读白名单＝看板",
+    "只读白名单＝`python3 scripts/plan-status.py --brief` 一屏",
     "`python3 scripts/plan-status.py --handover` 摘要",
     "活跃流 plan 的 Next Step/Status（grep）",
     "feedback 待复盘条目（grep）",
     "`<crew-dir>/guard.handoff`",
+    "看板仅按关键词 grep",
 )
 HANDOVER_BUDGET_ITEMS = (
     "交接必读 ≤32KB",
     "含 `--handover` 输出与必读文件",
     "超阈值先摘要/关键词 grep",
+    "写明只读段",
     "`Decisions`/`Deviation`/`Backlog` 不整读",
     "项目文档（AGENTS/CONTEXT）只读与本次交接相关章节，不整读",
 )
@@ -387,15 +389,17 @@ class HandoverBudgetTest(unittest.TestCase):
     def test_rules_f11_has_read_budget(self):
         text = read(RULES)
         line = next(line for line in text.splitlines() if "**F11 " in line)
-        for keyword in ("读取量预算", "32KB", "Decisions", "Deviation", "Backlog", "不整读"):
+        for keyword in ("读取量预算", "plan-status.py --brief", "32KB",
+                        "Decisions", "Deviation", "Backlog", "不整读"):
             self.assertIn(keyword, line, f"F11 缺少：{keyword}")
 
     def test_plan_discipline_handover_rule_has_read_budget(self):
         text = read("references/plan-discipline.md")
         line = next(
-            line for line in text.splitlines() if line.startswith("4. **交接看板优先**")
+            line for line in text.splitlines() if line.startswith("4. **交接一屏优先**")
         )
-        for keyword in ("白名单", "32KB", "Decisions", "Deviation", "Backlog", "不整读"):
+        for keyword in ("白名单", "plan-status.py --brief", "32KB",
+                        "Decisions", "Deviation", "Backlog", "不整读"):
             self.assertIn(keyword, line, f"§5.1 第 4 条缺少：{keyword}")
 
 

@@ -28,7 +28,7 @@ disallowedTools: [Write, Edit, SendMessage]
 5. 防凑数（F15）：无发现合法；同根因合并一条上报，不拆分、不重复。
 6. 择优盲审（F16，默认关）：两流择一才启用匿名候选 + rubric 逐条；升档由大副记流 plan Decision。
 7. 对抗性审查发现分级「阻断/建议」，阻断项清零才放行。
-8. 完成后按 R2 字段写回执（R1/R3）；工位处置按 F4/W4（one-shot 即关）；报 blocked 时必须给 A/B/C 选项与建议保留窗（含最晚处置时间）；超窗未获指令自行关闭工位或升级，不空挂（R6）；遇错在回执 `findings` 带出 Error/Resolution，供 owner 当轮记入流 plan Errors。
+8. 完成门槛（硬）：报告落盘后立即发回执（`python3 scripts/crew-msg.py write --to <大副>`；按 R2 字段；R1/R3），回执必须含「报告路径 + 结论（PASS/BLOCK/阻断+建议数）+ 工位处置」；缺回执视为评审/终验未完成，不得以报告文件替代回执；工位处置按 F4/W4（one-shot 即关）；报 blocked 时必须给 A/B/C 选项与建议保留窗（含最晚处置时间）；超窗未获指令自行关闭工位或升级，不空挂（R6）；遇错在回执 `findings` 带出 Error/Resolution，供 owner 当轮记入流 plan Errors。
 9. 汇报：结论、逐条问题与证据位置（A5）。
 10. 报告落盘：禁止无引号 heredoc/命令替换；单引号 heredoc 写 `/tmp` 再 `cp`，或 Write 工具；本角色无 Write/Edit，用分段单引号 heredoc 或由带 Write 工具的 helper 代写；无引号 heredoc 内的命令替换会触发 Qoder 权限弹窗并卡住会话。
 

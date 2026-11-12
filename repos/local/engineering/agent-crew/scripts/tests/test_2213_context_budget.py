@@ -99,8 +99,8 @@ class HandoverBudgetTest(unittest.TestCase):
         self.assertIsNotNone(match, text)
         return int(match.group(1))
 
-    def _board(self, repo: Path) -> Path:
-        path = repo / "docs/进度追踪.md"
+    def _feedback(self, repo: Path) -> Path:
+        path = repo / ".planning/portfolio/feedback.md"
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -118,37 +118,41 @@ class HandoverBudgetTest(unittest.TestCase):
 
     def test_over_threshold_appends_summary_grep_hint(self):
         repo = self._repo()
-        self._board(repo).write_bytes(b"x" * 40000)
+        self._feedback(repo).write_text(
+            "- 待复盘 " + "x" * 40000 + "\n", encoding="utf-8")
         rc, out, _err = self._run(repo)
         self.assertEqual(rc, 0)
         self.assertGreater(self._field(out), BUDGET)
         self.assertIn("超预算", out)
         self.assertIn("先摘要", out)
         self.assertIn("grep", out)
+        self.assertIn("写明只读段", out)
         self.assertLessEqual(len(out.splitlines()), ps.HANDOVER_MAX_LINES)
 
     def test_exact_threshold_no_hint_and_plus_one_hints(self):
         repo = self._repo()
         _rc, out, _err = self._run(repo)
-        board = self._board(repo)
-        board.write_bytes(b"y" * (BUDGET - self._field(out)))
-        _rc, out, _err = self._run(repo)
-        # 看板从不存在的提示变为缺指纹提示会带来少量字节差，再校正一次
         delta = BUDGET - self._field(out)
-        data = board.read_bytes()
-        board.write_bytes(data + b"y" * delta if delta >= 0 else data[:len(data) + delta])
+        prefix = "- 待复盘 "
+        self.assertGreater(delta, len(prefix.encode("utf-8")) + 1)
+        line = prefix + "y" * (delta - len(prefix.encode("utf-8")) - 1)
+        feedback = self._feedback(repo)
+        feedback.write_text(line + "\n", encoding="utf-8")
         rc, out, _err = self._run(repo)
         self.assertEqual(rc, 0)
         self.assertEqual(BUDGET, self._field(out))
         self.assertNotIn("超预算", out)
-        board.write_bytes(board.read_bytes() + b"y")
+        feedback.write_text(line + "y\n", encoding="utf-8")
         _rc, out, _err = self._run(repo)
         self.assertEqual(BUDGET + 1, self._field(out))
         self.assertIn("超预算", out)
 
     def test_handover_still_writes_nothing(self):
         repo = self._repo()
-        self._board(repo).write_bytes(b"z" * 100)
+        self._feedback(repo).write_text("- 待复盘 z\n", encoding="utf-8")
+        board = repo / "docs/进度追踪.md"
+        board.parent.mkdir(parents=True, exist_ok=True)
+        board.write_bytes(b"z" * 100)
         before = snapshot(repo)
         _rc, _out, _err = self._run(repo)
         self.assertEqual(snapshot(repo), before)
@@ -246,23 +250,33 @@ class ContextBaselineTest(DoctorBudgetTestBase):
         self.assertGreater(item["evidence"]["totalBytes"], 60 * 1024)
         self.assertIn("摘要", item["next"])
 
-    def test_large_board_handover_bytes_push_over_budget(self):
-        board = self.fx.root / "docs/进度追踪.md"
-        board.parent.mkdir(parents=True, exist_ok=True)
-        board.write_bytes(b"b" * 70000)
+    def test_large_feedback_handover_bytes_push_over_budget(self):
+        # FB-044：整看板不整读、不计入；大 feedback 待复盘行仍是必读分项。
+        feedback = self.fx.root / ".planning/portfolio/feedback.md"
+        feedback.write_text("- 待复盘 " + "b" * 70000 + "\n", encoding="utf-8")
         rc, item = self.check("context.baseline")
         self.assertEqual(0, rc)
         self.assertEqual("warn", item["status"], item["detail"])
         self.assertGreater(item["evidence"]["handoverBytes"], 60 * 1024)
 
+    def test_large_board_not_counted_in_handover_bytes(self):
+        # FB-044：看板仅按关键词 grep，大看板不得单独推高交接必读估算。
+        board = self.fx.root / "docs/进度追踪.md"
+        board.parent.mkdir(parents=True, exist_ok=True)
+        board.write_bytes(b"b" * 70000)
+        rc, item = self.check("context.baseline")
+        self.assertEqual(0, rc)
+        self.assertEqual("pass", item["status"], item["detail"])
+        self.assertLess(item["evidence"]["handoverBytes"], 60 * 1024)
+
     def test_custom_portfolio_dir_handover_bytes_counted(self):
         # S6：自定义 portfolioDir 时不得误报「无 .planning/portfolio」/handoverBytes=0
         self.fx.config["portfolioDir"] = ".planning/flows"
         self.fx.write_config()
-        (self.fx.root / ".planning/flows").mkdir(parents=True)
-        board = self.fx.root / "docs/进度追踪.md"
-        board.parent.mkdir(parents=True, exist_ok=True)
-        board.write_bytes(b"b" * 40000)
+        flows = self.fx.root / ".planning/flows"
+        flows.mkdir(parents=True, exist_ok=True)
+        (flows / "feedback.md").write_text(
+            "- 待复盘 " + "b" * 40000 + "\n", encoding="utf-8")
         rc, item = self.check("context.baseline")
         self.assertEqual(0, rc)
         self.assertGreater(item["evidence"]["handoverBytes"], 39000)

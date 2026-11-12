@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.2.18 — 2026-11-12
+
+反馈闭环（FB-041–FB-044）：评审/终验报告与回执成对、占用键统一、dispatch 双 runtime 判读、交接一屏摘要，含互检/评审补口与本地发布。
+
+### 新增
+
+- **FB-041 评审/终验「报告 + 回执」成对**：qoder/opencode reviewer 模板硬性要求「报告落盘后立即发回执」（回执含报告路径 + 结论 PASS/BLOCK/阻断+建议数 + 工位处置，缺回执视为未完成，不得以报告文件替代）；firstmate 收口核报告与回执成对；工单模板与 release 剧本同口径；opencode reviewer `permission.bash` 增 `python3 scripts/crew-msg.py write*` allow（S-8），无人值守不弹权限确认。
+- **FB-042 占用键 canonical + 旧键兼容**：`scripts/crew-ticket.py` 占用键统一为仓库根相对路径（任意子目录/`./` 前缀解析为同一键，绝对路径/越界拒绝），旧式子目录相对键按后缀匹配兼容读取（claim 同 owner 幂等、异 owner 拒绝，新键一律写 canonical）；release 冲突仅按精确键异 owner 判定，后缀命中只清理同 owner 旧键（S-1/S-2：互为后缀不误锁、精确键缺失 no-op rc=0）。
+- **FB-043 dispatch 双 runtime 注册表解析**：`compose`/`start` 无显式 `--runtime` 时按 `<crew-dir>/dispatch-agents.json` 同 role 最新 `startedAt` 记录唯一解析现役 runtime（输出 `runtimeResolvedFrom=registry:<agent>`），显式 flag 优先且不读注册表；无记录/最新并列/注册表损坏或不可读（S-4）统一拒绝并给 `--runtime qoder|opencode` 指引；release 剧本 Phase 6 ③ 与 `orchestration-guide` §5.11 ③ 写明判读。
+- **FB-044 交接一屏摘要与预算**：helm（qoder/opencode）交接只读白名单与恢复顺序以 `plan-status.py --brief` 一屏替代整看板（看板仅按关键词 grep、不整读）；`--handover` 预算以 brief 字节替代整看板并输出分项；guard 自动交接 prompt 与 `firstmate-dispatch` 技能模板（第二真源）同步；`plan-discipline` §5.1 第 4 条与 `crew-rules` F11 同口径；超限提示补「写明只读段」。本仓交接必读 42,682B → 11,177B（brief 1,582B）。
+
+### 修复
+
+- 互检 S-1/S-2/S-4/S-8 四条已并入上述四条（release 后缀死锁与契约收紧、注册表损坏文案、opencode reviewer 回执权限）。
+- 两轴评审 R-1（firstmate-dispatch 第二真源）/R-2（HINT 只读段措辞）返工闭环；R-3（release-scope 工单 JSON 驱动）/R-4（plan 登记 lint）记 D-11/D-12，本批不修。
+
+### 测试
+
+- 新增 `test_2218_fb041_receipt_pairing.py`、`test_2218_fb042_occupancy_keys.py`、`test_2218_fb043_compose_runtime.py`、`test_2218_fb044_handover_brief.py`；补 `test_224_retro.py`、`test_2213_context_budget.py`、`test_crew_guard.py`、`test_plan_status_handover_rotate.py` 等用例（先红后绿）。
+- 全量 pytest 0 fail（本版 1234 passed + 982 subtests）；`crew-lint`（含 `--purity`）、`plan-status --selftest`/`--playbooks` 绿。
+- 版本 2.2.18：`SKILL.md` frontmatter 与标题、`init.py` fallback、本段、`test_crew_lint.py`、`test_220_final.py`、`test_224_retro.py`、`test_225_patch.py`、`test_2214_guard_presence.py` 版本断言同步。
+
 ## 2.2.17 — 2026-11-12
 
 回执到达直推唤醒（FB-039，T37 延伸）、crew-claude 运行注册与 guard 在跑口径（FB-040）、评审建议 S3–S13、维护 map 补齐与发布。

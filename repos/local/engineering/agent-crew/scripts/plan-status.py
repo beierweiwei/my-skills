@@ -106,11 +106,13 @@ HANDOVER_MAX_STREAMS = 8
 HANDOVER_MAX_CAPTAIN = 8
 HANDOVER_MAX_NOTIFICATIONS = 3
 HANDOVER_RECENT = 3
-# 交接必读字节预算（H1）：摘要 + 看板 + 活跃流 Next Step/Status + feedback 待复盘命中 +
-# guard.handoff；Decisions/Deviation/Backlog 不整读、不计入；超阈值只提示先摘要/grep。
+# 交接必读字节预算（H1 / FB-044）：摘要 + brief 一屏（--brief 同口径渲染）+ 活跃流
+# Next Step/Status + feedback 待复盘命中 + guard.handoff；整看板不整读、不计入；
+# Decisions/Deviation/Backlog 不整读、不计入；超阈值只提示先摘要/grep。
 HANDOVER_BUDGET_BYTES = 32 * 1024
 HANDOVER_BUDGET_HINT = (
-    "- 超预算：先摘要/关键词 grep（Decisions/Deviation/Backlog 不整读），再按需定向补读")
+    "- 超预算：先摘要/关键词 grep、写明只读段（Decisions/Deviation/Backlog 不整读），"
+    "再按需定向补读")
 PROGRESS_TAIL_BYTES = 16384
 PROGRESS_RECENT_WINDOWS = (PROGRESS_TAIL_BYTES, 65536, None)  # 头窗不足 3 条时逐级扩大
 PROGRESS_SECTION = "自动驾驶里程"
@@ -582,14 +584,12 @@ def _fresh_state(root: Path, cfg: dict, plans: list[Plan]) -> str:
 
 
 def _handover_budget(root: Path, cfg: dict, pdir: str, active_plans: list[Plan],
-                     summary_bytes: int) -> dict[str, int]:
-    """交接必读量估算（UTF-8 字节）：摘要本身 + 看板 + 活跃流 Next Step/Status +
-    feedback 待复盘行 + guard.handoff。只读白名单必读项；Decisions/Deviation/Backlog
-    不整读、不计入；估算不含预算行自身（差异 < 一行）。"""
-    board_rel = str((cfg.get("board") or {}).get("path") or "")
-    board_path = root / board_rel if board_rel else None
-    board = (len(board_path.read_bytes())
-             if board_path is not None and board_path.is_file() else 0)
+                     summary_bytes: int, plans: list[Plan]) -> dict[str, int]:
+    """交接必读量估算（UTF-8 字节）：摘要本身 + brief 一屏 + 活跃流 Next Step/Status +
+    feedback 待复盘行 + guard.handoff。整看板不整读、不计入（board 恒 0 仅作分项占位）；
+    Decisions/Deviation/Backlog 不整读、不计入；估算不含预算行自身（差异 < 一行）。"""
+    brief_lines, _exceeded = _render_brief(root, cfg, plans)
+    brief = len(("\n".join(brief_lines) + "\n").encode("utf-8"))
     streams = 0
     for plan in active_plans:
         next_step = "\n".join(_next_step_lines(plan)).encode("utf-8")
@@ -612,9 +612,9 @@ def _handover_budget(root: Path, cfg: dict, pdir: str, active_plans: list[Plan],
     except (CrewPathsError, OSError):
         pass
     return {
-        "total": summary_bytes + board + streams + feedback + handoff,
-        "summary": summary_bytes, "board": board, "streams": streams,
-        "feedback": feedback, "handoff": handoff,
+        "total": summary_bytes + brief + streams + feedback + handoff,
+        "summary": summary_bytes, "brief": brief, "board": 0,
+        "streams": streams, "feedback": feedback, "handoff": handoff,
     }
 
 
@@ -671,8 +671,8 @@ def _notification_lines(root: Path, items: list[tuple[Path, dict]]) -> list[str]
 
 def handover(root: Path, cfg: dict, plans: list[Plan]) -> int:
     """≤HANDOVER_MAX_LINES 行交接摘要到 stdout；只读 .planning 与 crew inbox，
-    不写任何文件。末尾附「交接必读预算」（H1：本次必读字节 + 阈值 32768，
-    超限提示先摘要/grep）。"""
+    不写任何文件。末尾附「交接必读预算」（H1/FB-044：本次必读字节 + 阈值 32768，
+    brief 一屏替代整看板计入，超限提示先摘要/grep）。"""
     pattern = cfg["portfolioMatch"]
     portfolio = next((p for p in plans if fnmatch.fnmatch(p.path.parent.name, pattern)), None)
     pdir = str(cfg.get("portfolioDir") or ".planning/portfolio").rstrip("/")
@@ -726,11 +726,12 @@ def handover(root: Path, cfg: dict, plans: list[Plan]) -> int:
         _fresh_state(root, cfg, plans),
     ]
     budget = _handover_budget(root, cfg, pdir, active_plans,
-                              len(("\n".join(out) + "\n").encode("utf-8")))
+                              len(("\n".join(out) + "\n").encode("utf-8")), plans)
     out += [
         "## 交接必读预算",
         f"- 本次必读字节：{budget['total']}（阈值 {HANDOVER_BUDGET_BYTES}；"
-        f"摘要 {budget['summary']} / 看板 {budget['board']} / 活跃流 {budget['streams']} / "
+        f"摘要 {budget['summary']} / brief {budget['brief']} / "
+        f"看板（不整读）{budget['board']} / 活跃流 {budget['streams']} / "
         f"feedback {budget['feedback']} / handoff {budget['handoff']}）",
     ]
     if budget["total"] > HANDOVER_BUDGET_BYTES:
@@ -773,10 +774,11 @@ def _today_changes(root: Path, cfg: dict, today: str) -> list[str]:
     return lines
 
 
-def brief(root: Path, cfg: dict, plans: list[Plan]) -> int:
-    """一屏摘要（≤BRIEF_MAX_LINES 行）：活跃流表（流/阶段/完成数+健康/下一步/待 Captain
-    计数）+ 待 Captain 摘要（portfolio C 前缀与 ⏸ 项 + 各流 Backlog/业务链 ⏸）+ 今日变化
-    （progress 今日条目 ≤3 行）；末尾附卫生 lint 提醒计数。只读 .planning，不写文件。"""
+def _render_brief(root: Path, cfg: dict, plans: list[Plan]) -> tuple[list[str], int]:
+    """一屏摘要行（--brief 与 --handover 预算共用同一渲染口径）：活跃流表（流/阶段/
+    完成数+健康/下一步/待 Captain 计数）+ 待 Captain 摘要（portfolio C 前缀与 ⏸ 项 +
+    各流 Backlog/业务链 ⏸）+ 今日变化（progress 今日条目 ≤3 行）；末尾附卫生 lint
+    提醒计数。返回 (≤BRIEF_MAX_LINES 行的输出, 截断前超出行数；0=未截断)。"""
     pattern = cfg["portfolioMatch"]
     portfolio = next((p for p in plans if fnmatch.fnmatch(p.path.parent.name, pattern)), None)
     now = datetime.now()
@@ -835,11 +837,19 @@ def brief(root: Path, cfg: dict, plans: list[Plan]) -> int:
         out += ["",
                 f"> lint 提醒 {len(hygiene)} 条"
                 "（`python3 scripts/plan-status.py --lint` 查看，不阻断）。"]
+    exceeded = 0
     if len(out) > BRIEF_MAX_LINES:
         exceeded = len(out)
         out = out[: BRIEF_MAX_LINES - 1] + [
             "- …（已截断：完整内容见看板 / --handover）"
         ]
+    return out, exceeded
+
+
+def brief(root: Path, cfg: dict, plans: list[Plan]) -> int:
+    """一屏摘要到 stdout（≤BRIEF_MAX_LINES 行，渲染口径见 _render_brief）。"""
+    out, exceeded = _render_brief(root, cfg, plans)
+    if exceeded:
         print(
             f"warning: --brief 输出 {exceeded} 行，超过 {BRIEF_MAX_LINES} 行上限，"
             "已截断；完整内容见看板 / --handover",

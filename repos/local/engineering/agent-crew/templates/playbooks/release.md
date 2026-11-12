@@ -56,7 +56,7 @@
 - [ ] **必核 guard 存在（①判据）**：`python3 scripts/doctor.py --only runtime.guard`——status=pass 且 detail 带 pid 才算通过；warn/fail 按输出 `next` 启动 `python3 scripts/crew-guard.py --helm <当前舵> --interval 120` 后复跑；未通过不得报发布收口（输出并入 `guard-restart.txt`）
 - [ ] **汇总门（发布后）复跑**：`python3 scripts/release-check.py --dry-run` 必须全 pass（skip 需注明原因），fail 清零才可继续；输出落 `.planning/<task>/evidence/release/release-check-post.txt`
 - [ ] ② 长驻角色处置：compose 在启动时快照，升级不热更新已运行会话——helm 换舵（新 tab 新舵、首报后关旧）、firstmate 重建/重派、one-shot worker 下次启动自动取新模板；处置写入发布回执
-- [ ] ③ 可交接性实测：`herdr pane read <helm pane> --lines 80` 可见 `ctx Nk/1M`、① 无锁窗口采集的 `--once --json` 非空 JSON、`python3 scripts/dispatch.py compose --role helm --json` rc=0
+- [ ] ③ 可交接性实测：`herdr pane read <helm pane> --lines 80` 可见 `ctx Nk/1M`、① 无锁窗口采集的 `--once --json` 非空 JSON、`python3 scripts/dispatch.py compose --role helm --json` rc=0。**双 runtime 判读**：项目同时装 qoder+opencode 时，compose 按 `<crew-dir>/dispatch-agents.json` 中同 role 最新 `startedAt` 记录自动解析现役 runtime（human/JSON 输出 `runtimeResolvedFrom=registry:<agent>`，无需手补 `--runtime`）；若拒绝（无现役记录或最新记录并列），按提示确认现役总舵/该角色实际运行的 runtime 并补 `--runtime qoder|opencode` 后重跑至 rc=0；解析来源（`runtimeResolvedFrom` 或显式 `--runtime`）记入 `handover-readiness.txt`
 - [ ] **验证技能交付门（安装后，由 builder/runner 执行）**：项目升级/安装完成后必须重跑，并以新证据为准——行为/脚本改动真实驱动项目验证技能（`<skills>/verify-<app>/` 占位，项目层安装、不随技能分发）对应 feature；规则/模板/提示词文本改动以 grep/lint/schema 测试为主证据 + 安装后 1 个 smoke feature 为辅证。回执写明 feature 名、命令、退出码、证据路径，对应关系不可省；证据落 `.planning/<task>/evidence/release/verify-skill.txt`，清理夹具后 `test -f` 复查证据仍在；项目无验证技能时先按 create-verification-skill 生成并自证跑通一个 feature（外部工程技能，需环境已安装；未安装则暂停该交付门并 ⏸ 上抛 Captain 记录缺口，不得跳过或用人肉清单替代）
 - [ ] ④ 证据落 `.planning/<task>/evidence/release/`（`myskills-push.txt`、`user-install.txt`、`upgrade-apply.txt`、`init-check.txt`、`doctor-after.json`、`guard-once.json`、`guard-restart.txt`、`handover-readiness.txt`、`verify-skill.txt`、`maintain-verification.txt`（Phase 7 维护 outcome，产出后补入））；任一未完成或无证据不得报发布收口
 - [ ] **S1 外部只读快照**：对外部仓/环境采集只读状态快照时带 `date -Iseconds` 与 `git rev-parse HEAD`（同一证据写明采集时刻与 HEAD）；对比出现漂移先按「外部并发提交」归因（查 reflog/mtime/提交内容），全程只读、不写外部仓
@@ -73,6 +73,7 @@
 ### Phase 8: 收口回执
 - owner: firstmate
 - [ ] 报告落盘：禁止无引号 heredoc/命令替换；单引号 heredoc 写 `/tmp` 再 `cp`，或 Write 工具（无引号 heredoc 内的命令替换会触发 Qoder 权限弹窗并卡住会话）
+- [ ] 评审/终验报告必须与回执成对：报告路径/结论/工位处置随回执一并给出，缺回执不得报收口（交叉 FB-041）
 - [ ] 按 R2 写回执：版本/commit/push/用户目录/init/doctor/guard 新 pid/guard 存在核验（`doctor --only runtime.guard` 结果）/长驻角色处置/工位处置
 - [ ] 更新 plan 的 Status 与 Next Step，刷新看板（`python3 scripts/plan-status.py --write`）；交接前 `--check-fresh`
 - [ ] 回执包含 Phase 6 验证技能交付门证据（feature 名/命令/退出码/证据路径）与 Phase 7 维护 outcome（clean/changed/blocked）；两项缺失不得报发布收口
