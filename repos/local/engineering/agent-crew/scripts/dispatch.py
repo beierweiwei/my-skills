@@ -398,8 +398,52 @@ def custom_role_path(root: Path, runtime: str, role_id: str) -> Path:
     return role_file_path(root, runtime, role_id, custom=True)
 
 
-def locate_role(root: Path, role_id: str, runtime: str | None) -> tuple[str, bool, Path]:
-    """定位项目角色文件；返回 (runtime, 是否自定义, 路径)。"""
+def registry_runtime_resolution(root: Path, role_id: str) -> dict:
+    """按托管注册表现役记录解析 role 的唯一 runtime。
+
+    同 role 记录按 runtime 分组取各自最新 startedAt；整体最新唯一 → 解析，
+    返回 {"runtime", "source": "registry:<agent>"}；无记录、最新并列
+    （多 runtime 无更晚可判定记录）或注册表损坏/不可读 → 返回 {"error": <原因>}，
+    由调用方统一包装 --runtime 指引。
+    """
+    try:
+        registry = load_registry(root)
+    except DispatchError as exc:
+        return {"error": f"注册表不可读/损坏：{exc}"}
+    latest: dict[str, tuple[str, str]] = {}
+    for agent, info in registry.items():
+        if not isinstance(info, dict) or info.get("role") != role_id:
+            continue
+        candidate_runtime = info.get("runtime")
+        if candidate_runtime not in ("qoder", "opencode"):
+            continue
+        started = info.get("startedAt")
+        stamp = started if isinstance(started, str) else ""
+        best = latest.get(candidate_runtime)
+        if best is None or stamp > best[0]:
+            latest[candidate_runtime] = (stamp, agent)
+    if not latest:
+        return {"error": f"dispatch-agents.json 无 role={role_id} 的现役启动记录"}
+    top = max(stamp for stamp, _ in latest.values())
+    winners = sorted(
+        (candidate_runtime, agent)
+        for candidate_runtime, (stamp, agent) in latest.items()
+        if stamp == top
+    )
+    if len(winners) > 1:
+        detail = "、".join(f"{item[0]}:{item[1]}" for item in winners)
+        return {"error": f"同 role 多 runtime 最新记录并列，无法判定（{detail}）"}
+    resolved_runtime, agent = winners[0]
+    return {"runtime": resolved_runtime, "source": f"registry:{agent}"}
+
+
+def locate_role(root: Path, role_id: str,
+                runtime: str | None) -> tuple[str, bool, Path, str | None]:
+    """定位项目角色文件；返回 (runtime, 是否自定义, 路径, runtimeResolvedFrom)。
+
+    双 runtime 且未显式 --runtime 时按托管注册表最新现役记录解析；无依据或最新
+    记录并列则拒绝并给出 --runtime 指引。显式 --runtime 不读注册表。
+    """
     if not ROLE_ID_RE.match(role_id):
         raise DispatchError(f"非法角色 id：{role_id!r}（要求 {ROLE_ID_RE.pattern}）")
     candidates: list[tuple[str, bool, Path]] = []
@@ -425,8 +469,19 @@ def locate_role(root: Path, role_id: str, runtime: str | None) -> tuple[str, boo
         where = runtime or "qoder/opencode"
         raise DispatchError(f"角色文件不存在：{role_id}（runtime={where}）；先由 init 生成 stub")
     if len({item[0] for item in candidates}) > 1:
-        raise DispatchError(f"角色 {role_id} 同时存在于两套 runtime；需显式 --runtime 指定")
-    return candidates[0]
+        resolution = registry_runtime_resolution(root, role_id)
+        if "error" in resolution:
+            raise DispatchError(
+                f"角色 {role_id} 同时存在于两套 runtime；注册表无法唯一判定现役 runtime："
+                f"{resolution['error']}。先按现役总舵/该角色实际运行的 runtime 判定，"
+                "再显式指定：--runtime qoder 或 --runtime opencode"
+            )
+        candidates = [item for item in candidates if item[0] == resolution["runtime"]]
+        resolved_from = resolution["source"]
+    else:
+        resolved_from = "flag" if runtime else "single-runtime"
+    resolved_runtime, custom, path = candidates[0]
+    return resolved_runtime, custom, path, resolved_from
 
 
 def parse_project_role(root: Path, path: Path, runtime: str, custom: bool) -> dict:
@@ -623,6 +678,7 @@ def build_compose(root: Path, role_id: str, runtime: str | None,
     report: dict = {
         "role": role_id,
         "runtime": runtime,
+        "runtimeResolvedFrom": None,
         "baseSource": None,
         "baseSha256": None,
         "overlayPath": None,
@@ -651,11 +707,12 @@ def build_compose(root: Path, role_id: str, runtime: str | None,
 
     try:
         config = load_config(root)
-        resolved_runtime, custom, path = locate_role(root, role_id, runtime)
+        resolved_runtime, custom, path, resolved_from = locate_role(root, role_id, runtime)
         outcome.runtime = resolved_runtime
         outcome.custom = custom
         outcome.role_path = path
         report["runtime"] = resolved_runtime
+        report["runtimeResolvedFrom"] = resolved_from
         report["overlayPath"] = path.relative_to(root).as_posix()
         report["overlaySha256"] = sha256_file(path)
         report["delivery"] = "composed-agent"
@@ -1274,8 +1331,19 @@ def print_json(data: object) -> None:
     print(json.dumps(data, ensure_ascii=False, indent=2))
 
 
+def print_runtime_resolution_human(report: dict) -> None:
+    source = report.get("runtimeResolvedFrom")
+    if source == "flag":
+        print("runtime 来源：--runtime 显式指定")
+    elif source == "single-runtime":
+        print("runtime 来源：仅一套 runtime 存在该角色（未指定 --runtime）")
+    elif isinstance(source, str) and source.startswith("registry:"):
+        print(f"runtime 自动解析：{source}（未指定 --runtime，按注册表最新启动记录）")
+
+
 def print_compose_human(report: dict) -> None:
     print(f"组合角色：{report['role']}（{report['runtime']}，delivery={report['delivery']}）")
+    print_runtime_resolution_human(report)
     if report["baseSource"]:
         print(f"基类：{report['baseSource']} sha256={report['baseSha256']}")
     print(f"项目覆盖：{report['overlayPath']} sha256={report['overlaySha256']}")
@@ -1467,6 +1535,7 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
         "agent": name,
         "role": args.role,
         "runtime": runtime,
+        "runtimeResolvedFrom": outcome.report.get("runtimeResolvedFrom"),
         "model": model,
         "delivery": delivery["delivery"],
         "composedSha256": outcome.report["composedSha256"],
@@ -1477,6 +1546,7 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
         print_json(payload)
     else:
         print(f"已启动 {name}（{runtime}，delivery={delivery['delivery']}）")
+        print_runtime_resolution_human(outcome.report)
         print(f"组合产物：{delivery['composePath']}")
     return 0
 

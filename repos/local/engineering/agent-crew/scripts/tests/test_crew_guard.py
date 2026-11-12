@@ -1329,14 +1329,18 @@ class HandoffTest(GuardTestBase):
         self.assertEqual("started", self.handoff_fields()["phase"])
 
     def test_handoff_prompt_uses_handover_read_set(self):
+        # FB-044 补口：自动交接 prompt 与 helm 模板同一白名单——brief 一屏优先，
+        # 整看板不整读、仅按关键词 grep。
         self.prepare_handoff(ctx_k=650)
         self.make_guard().run_once()
         prompts = [c for c in self.dispatch_calls if c[:1] == ["prompt"]]
         self.assertEqual(1, len(prompts))
         message = prompts[0][-1]
-        for token in ("--handover", "feedback.md", "Next Step/Status",
-                      "guard.handoff", "禁整读", "20KB", "首报"):
+        for token in ("--brief", "--handover", "feedback.md", "Next Step/Status",
+                      "guard.handoff", "禁整读 看板", "32KB", "20KB",
+                      "看板仅按关键词 grep", "写明只读段", "首报"):
             self.assertIn(token, message)
+        self.assertNotIn("派生看板（docs/进度追踪.md）+", message)
         self.assertNotIn("先读", message)
         self.assertNotIn("findings.md", message)
         self.assertNotIn("含 progress 尾部", message)

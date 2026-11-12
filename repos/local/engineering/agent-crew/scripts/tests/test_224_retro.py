@@ -103,6 +103,15 @@ class TemplateLayerTest(unittest.TestCase):
         for phrase in ("INONE_AGENT_NAME=firstmate", "预判去向", "（R5）", "Errors"):
             self.assertIn(phrase, text)
 
+    def test_dispatch_sop_handover_uses_brief(self):
+        # FB-044 评审补口 R-1：恢复/交接与全库同口径——brief 一屏优先，
+        # 整看板不整读、仅按关键词 grep。
+        text = read(DISPATCH_SOP)
+        self.assertIn("python3 scripts/plan-status.py --brief", text)
+        self.assertIn("看板仅按关键词 grep", text)
+        self.assertNotIn("恢复顺序：派生看板", text)
+        self.assertNotIn("交接＝看板", text)
+
     def test_plan_discipline_feedback_schema(self):
         text = read(PLAN_DISCIPLINE)
         self.assertIn(FEEDBACK_HEADER, text)
@@ -127,10 +136,10 @@ class TemplateLayerTest(unittest.TestCase):
 
 class VersionTest(unittest.TestCase):
     def test_version_225_in_three_places(self):
-        self.assertIn("version: 2.2.17", read(SKILL_MD))
-        self.assertIn("v2.2.17", read(SKILL_MD))
-        self.assertIn('SKILL_VERSION_FALLBACK = "2.2.17"', read(INIT))
-        self.assertIn("## 2.2.17", read(CHANGELOG))
+        self.assertIn("version: 2.2.18", read(SKILL_MD))
+        self.assertIn("v2.2.18", read(SKILL_MD))
+        self.assertIn('SKILL_VERSION_FALLBACK = "2.2.18"', read(INIT))
+        self.assertIn("## 2.2.18", read(CHANGELOG))
 
 
 if __name__ == "__main__":

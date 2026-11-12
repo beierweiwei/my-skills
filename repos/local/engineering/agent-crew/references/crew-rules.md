@@ -73,7 +73,7 @@
 - **F8 test-behavior-not-implementation**：测试断言对外行为与契约，不断言内部实现细节，重构不因实现变动而重写测试（pstack 原名 test-behavior-not-implementation）。
 - **F9 build-the-lever**：一次性验证沉淀为可复用的脚本、检查或看板，让同类验证自动完成，不重复手工操作（pstack 原名 build-the-lever）。
 - **F10 explain-the-number**：报数必须带口径（来源、算法、时间窗口、限制），解释不了的数字不进结论（pstack 原名 explain-the-number）。
-- **F11 guard-the-context-window**：主动管理上下文预算，长材料交子代理或脚本归纳只带回结论，到阈值按交接规则换舵，不在运行中压缩硬撑；读取量预算：交接必读 ≤32KB（含 `--handover` 输出与必读文件），超阈值先摘要/关键词 grep 再定向补读，`Decisions`/`Deviation`/`Backlog` 不整读（pstack 原名 guard-the-context-window）。
+- **F11 guard-the-context-window**：主动管理上下文预算，长材料交子代理或脚本归纳只带回结论，到阈值按交接规则换舵，不在运行中压缩硬撑；读取量预算：交接先读 `plan-status.py --brief` 一屏，看板仅按关键词 grep（不整读）；交接必读 ≤32KB（含 `--handover` 输出与必读文件），超阈值先摘要/关键词 grep，写明只读段，再定向补读，`Decisions`/`Deviation`/`Backlog` 不整读（pstack 原名 guard-the-context-window）。
 - **F12 never-block-on-the-human**：只有不可逆、超授权或需偏好判断的事项交人工，其余按红线自主推进并留里程（pstack 原名 never-block-on-the-human）。
 - **F13 意图前置**：评审开工先一句话复述「变更想干什么」（从工单/commit 提炼），钉死评审范围；范围外既有问题只报不审。
 - **F14 证据门槛分级**：阻断级发现必须附运行复现（失败测试/repro 脚本/错误输出）；仅有静态推断的发现自动降「建议」级。

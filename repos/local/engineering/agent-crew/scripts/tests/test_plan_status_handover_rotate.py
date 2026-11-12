@@ -231,7 +231,7 @@ class HandoverTest(_TmpRepoTest):
         self.assertIn("- 无", active)
 
     def test_structural_max_with_budget_lines_stays_under_limit(self):
-        # B2：8+ 活跃流 + 8+ C 行 + 3 条最近完成 + 看板超限（预算块 3 行全占）
+        # B2/FB-044：8+ 活跃流 + 8+ C 行 + 3 条最近完成 + feedback 超限（预算块 3 行全占）
         refs = [f".planning/stream-{i}/task_plan.md" for i in range(1, 10)]
         plans = {"portfolio": portfolio_body(
             refs,
@@ -243,14 +243,13 @@ class HandoverTest(_TmpRepoTest):
             plans[f"stream-{i}"] = stream_body(
                 [("阶段一", "complete"), ("阶段二", "in_progress")])
         repo = make_repo(self.tmp, plans, progress=progress_body(numbered_entries(3)))
-        board = repo / "docs/进度追踪.md"
-        board.parent.mkdir(parents=True, exist_ok=True)
-        board.write_bytes(b"x" * 40000)
+        feedback = repo / ".planning/portfolio/feedback.md"
+        feedback.write_text("- 待复盘 " + "x" * 40000 + "\n", encoding="utf-8")
         rc, out, err = self._run(repo)
         self.assertEqual(rc, 0, err)
         self.assertLessEqual(len(out.splitlines()), ps.HANDOVER_MAX_LINES)
         self.assertIn("## 交接必读预算", out)
-        self.assertIn("超预算", out)  # 看板 40KB：预算块 3 行（含提示）
+        self.assertIn("超预算", out)  # feedback 40KB：预算块 3 行（含提示）
         self.assertEqual(2, out.count("另有"))  # 活跃流/C 行各一条溢出注
 
     def test_empty_repo_degrades_readably(self):

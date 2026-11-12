@@ -3,7 +3,8 @@
 
 子命令：
   claim       占用文件/资产；同一文件同时只允许一个 owner，冲突立即失败并列出持有者
-  release     释放占用；同 owner 重复 release 无副作用
+  release     释放占用；同 owner 重复 release 无副作用；冲突仅按精确键判定，
+              后缀命中只用于清理同 owner 旧键（异 owner 后缀键不阻断、不删除）
   stage       只暂存回执/工单声明的文件；清单外有改动即拒绝，绝不使用 git add -A
   precommit   numstat + 未提交改动 + 清单外文件 + 本地 import 闭包提示（提示不阻断）
   close       numstat + git status --short + 证据清单 + 可选 ls-remote（默认关闭）
@@ -14,6 +15,7 @@
 
 存储（与 crew-msg 一致，取 git common dir，worktree 共享）：
   <git-common-dir>/crew/occupancy.json   {<path>: <owner>} 或 {"files": {...}}
+  占用键为仓库根相对路径（相对入参按进程 cwd 解析）；旧式子目录相对键按后缀匹配兼容读取
   <git-common-dir>/crew/inbox/*.json     回执（task、status、changed_files[]、evidence[]）
 
 声明来源（stage 必须至少一个；precommit/close 可选）：
@@ -133,6 +135,50 @@ def normalize_all(values) -> list[str]:
     return list(dict.fromkeys(normalize_rel(v) for v in values))
 
 
+def _within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def canonical_rel(value: str, root: Path) -> str:
+    """占用键：相对入参按进程 cwd 解析为绝对路径，再相对仓库根取 posix 路径。
+
+    cwd 不在仓库内（--root 指向其他仓）时沿用仓根相对语义。
+    """
+    raw = value.strip()
+    if not raw:
+        raise Rejected("empty file path")
+    if os.path.isabs(raw) or raw.startswith("~"):
+        raise Rejected(f"absolute path not allowed: {value}")
+    if not _within(Path.cwd().resolve(), root):
+        return normalize_rel(value)
+    try:
+        rel = Path(os.path.abspath(raw)).relative_to(root).as_posix()
+    except ValueError as exc:
+        raise Rejected(f"path escapes repo: {value}") from exc
+    if rel in (".", "") or rel == ".." or rel.startswith("../"):
+        raise Rejected(f"path escapes repo: {value}")
+    return rel
+
+
+def canonical_all(values, root: Path) -> list[str]:
+    return list(dict.fromkeys(canonical_rel(v, root) for v in values))
+
+
+def overlap_keys(occupancy: dict, key: str) -> list[str]:
+    """旧键兼容：精确相等，或一方以 `/<另一方>` 结尾视为同一资产。"""
+    return [
+        existing
+        for existing in occupancy
+        if existing == key
+        or existing.endswith("/" + key)
+        or key.endswith("/" + existing)
+    ]
+
+
 def load_occupancy(ctx: Context) -> tuple[dict, dict]:
     path = ctx.occupancy
     if not path.exists():
@@ -156,18 +202,26 @@ def cmd_claim(ctx: Context, args) -> int:
     owner = args.owner.strip()
     if not owner:
         raise Rejected("--owner is required")
-    files = normalize_all(args.files)
+    files = canonical_all(args.files, ctx.root)
     with ctx.locked():
         raw, occupancy = load_occupancy(ctx)
-        conflicts = [(f, occupancy[f]) for f in files if occupancy.get(f) not in (None, owner)]
+        conflicts: list[tuple[str, str]] = []
+        fresh: list[str] = []
+        for path in files:
+            matched = overlap_keys(occupancy, path)
+            others = sorted(
+                {occupancy[key] for key in matched if occupancy[key] != owner}
+            )
+            if others:
+                conflicts.append((path, ", ".join(others)))
+            elif not matched:
+                occupancy[path] = owner
+                fresh.append(path)
         if conflicts:
             raise Rejected("occupancy conflict: " + conflict_text(conflicts))
-        fresh = [f for f in files if f not in occupancy]
         if not fresh:
             print(f"claim: no-op ({len(files)} file(s) already held by {owner})")
             return EXIT_OK
-        for path in fresh:
-            occupancy[path] = owner
         write_json_atomic(ctx.occupancy, raw)
     print(f"claimed {len(fresh)} file(s) for {owner}")
     return EXIT_OK
@@ -177,18 +231,25 @@ def cmd_release(ctx: Context, args) -> int:
     owner = args.owner.strip()
     if not owner:
         raise Rejected("--owner is required")
-    files = normalize_all(args.files)
+    files = canonical_all(args.files, ctx.root)
     with ctx.locked():
         raw, occupancy = load_occupancy(ctx)
-        conflicts = [(f, occupancy[f]) for f in files if occupancy.get(f) not in (None, owner)]
+        conflicts: list[tuple[str, str]] = []
+        removed: list[str] = []
+        for path in files:
+            holder = occupancy.get(path)
+            if holder is not None and holder != owner:
+                conflicts.append((path, holder))
+                continue
+            removed += [key for key in overlap_keys(occupancy, path)
+                        if occupancy[key] == owner and key not in removed]
         if conflicts:
             raise Rejected("cannot release others' claims: " + conflict_text(conflicts))
-        removed = [f for f in files if occupancy.get(f) == owner]
         if not removed:
             print("release: no-op")
             return EXIT_OK
-        for path in removed:
-            del occupancy[path]
+        for key in removed:
+            del occupancy[key]
         write_json_atomic(ctx.occupancy, raw)
     print(f"released {len(removed)} file(s) for {owner}")
     return EXIT_OK
