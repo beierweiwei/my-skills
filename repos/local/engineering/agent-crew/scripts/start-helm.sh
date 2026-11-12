@@ -38,7 +38,7 @@ cleanup_tab() {
 }
 trap cleanup_tab EXIT
 
-"${DISPATCH[@]}" start --role helm --runtime qoder --pane "$PANE_ID" >/dev/null \
+"${DISPATCH[@]}" start --role helm --runtime qoder --permission-mode bypass_permissions --pane "$PANE_ID" >/dev/null \
   || die "启动总舵失败（dispatch.py start）。检查 herdr server、qodercli 与命名冲突后重试。"
 
 trap - EXIT

@@ -1249,6 +1249,7 @@ class HandoffTest(GuardTestBase):
             [["tab", "create", "--workspace", "wX", "--cwd", str(self.root),
               "--label", "总舵", "--no-focus"],
              ["start", "--role", "helm", "--pane", "wX:pNEW",
+              "--permission-mode", "bypass_permissions",
               "--name", "helm-1-2", "--json"],
              ["prompt", "--agent", "helm-1-2", "--message"]],
             [call[:4] if call[:1] == ["prompt"] else call
@@ -1690,6 +1691,132 @@ class HandoffTest(GuardTestBase):
         before = len(self.dispatch_calls)
         guard.run_once()
         self.assertEqual(before, len(self.dispatch_calls))
+
+
+class HandoffPaneCountTest(GuardTestBase):
+    """T45④ / FB-038：交接 tab create 后校验新 tab pane 数=1，多余空 pane 关闭。"""
+
+    OLD_PANE = "wX:pOLD"
+
+    def prepare_handoff(self, ctx_k: int = 650) -> None:
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
+        self.agents = [
+            {"name": "helm-1", "pane_id": self.OLD_PANE, "tab_id": "wX:tOLD",
+             "workspace_id": "wX", "agent_status": "working"}
+        ]
+        self.pane_outputs[self.OLD_PANE] = f"status line ctx ({ctx_k}k/1M) tail"
+
+    def set_new_tab_panes(self, *panes: dict) -> None:
+        self.panes = [
+            {"pane_id": self.OLD_PANE, "tab_id": "wX:tOLD", "focused": False},
+            *panes,
+        ]
+
+    def test_extra_empty_pane_closed_before_start(self):
+        self.prepare_handoff()
+        self.set_new_tab_panes(
+            {"pane_id": "wX:pNEW", "tab_id": "wX:tNEW", "agent_status": "unknown"},
+            {"pane_id": "wX:pEXTRA", "tab_id": "wX:tNEW", "agent_status": "unknown"},
+        )
+        self.make_guard().run_once()
+
+        close_calls = [c for c in self.dispatch_calls if c[:2] == ["pane", "close"]]
+        self.assertEqual([["pane", "close", "--pane", "wX:pEXTRA"]], close_calls)
+        close_index = self.dispatch_calls.index(
+            ["pane", "close", "--pane", "wX:pEXTRA"])
+        start_index = next(
+            index for index, call in enumerate(self.dispatch_calls)
+            if call[:1] == ["start"]
+        )
+        self.assertLess(close_index, start_index)
+        fields = self.handoff_fields()
+        self.assertEqual("started", fields["phase"])
+        self.assertTrue(any("多余 pane 已关闭" in line and "wX:pEXTRA" in line
+                            for line in self.logs), self.logs)
+
+    def test_working_extra_pane_not_closed(self):
+        self.prepare_handoff()
+        self.set_new_tab_panes(
+            {"pane_id": "wX:pNEW", "tab_id": "wX:tNEW", "agent_status": "unknown"},
+            {"pane_id": "wX:pBUSY", "tab_id": "wX:tNEW", "agent_status": "working"},
+        )
+        self.make_guard().run_once()
+
+        self.assertEqual([], [c for c in self.dispatch_calls if c[:2] == ["pane", "close"]])
+        self.assertEqual("started", self.handoff_fields()["phase"])
+        self.assertTrue(any("working" in line and "未关闭" in line for line in self.logs),
+                        self.logs)
+
+    def test_extra_agent_pane_not_closed(self):
+        self.prepare_handoff()
+        self.set_new_tab_panes(
+            {"pane_id": "wX:pNEW", "tab_id": "wX:tNEW", "agent_status": "unknown"},
+            {"pane_id": "wX:pTUI", "tab_id": "wX:tNEW",
+             "agent": "claude", "agent_status": "idle"},
+        )
+        self.make_guard().run_once()
+
+        self.assertEqual([], [c for c in self.dispatch_calls if c[:2] == ["pane", "close"]])
+        self.assertTrue(any("wX:pTUI" in line and "未关闭" in line for line in self.logs),
+                        self.logs)
+
+    def test_close_failure_warns_and_handoff_continues(self):
+        self.prepare_handoff()
+        self.set_new_tab_panes(
+            {"pane_id": "wX:pNEW", "tab_id": "wX:tNEW", "agent_status": "unknown"},
+            {"pane_id": "wX:pEXTRA", "tab_id": "wX:tNEW", "agent_status": "unknown"},
+        )
+
+        def override(args):
+            if args[:2] == ["pane", "close"]:
+                return 1, "", "close boom"
+            return None
+
+        self.dispatch_override = override
+        self.make_guard().run_once()
+
+        self.assertIn(["pane", "close", "--pane", "wX:pEXTRA"], self.dispatch_calls)
+        self.assertIn("start", [c[0] for c in self.dispatch_calls])
+        fields = self.handoff_fields()
+        self.assertEqual("started", fields["phase"])
+        self.assertNotEqual("failed", fields.get("result"))
+        self.assertTrue(any("关闭失败" in line and "继续交接" in line for line in self.logs),
+                        self.logs)
+
+    def test_pane_list_failure_fails_safe(self):
+        self.prepare_handoff()
+
+        def broken_list() -> list[dict]:
+            raise RuntimeError("pane list boom")
+
+        self.make_guard(list_panes=broken_list).run_once()
+
+        self.assertIn("start", [c[0] for c in self.dispatch_calls])
+        self.assertEqual("started", self.handoff_fields()["phase"])
+        self.assertTrue(any("pane 数校验失败" in line and "继续交接" in line
+                            for line in self.logs), self.logs)
+
+    def test_unidentified_new_tab_panes_warn_only(self):
+        self.prepare_handoff()  # 默认 pane list 无新 tab 条目 → 无法确认 pane 数
+        self.make_guard().run_once()
+
+        self.assertEqual([], [c for c in self.dispatch_calls if c[:2] == ["pane", "close"]])
+        self.assertEqual("started", self.handoff_fields()["phase"])
+        self.assertTrue(any("未返回" in line and "人工核查" in line for line in self.logs),
+                        self.logs)
+
+    def test_returned_pane_missing_from_pane_list_never_closes(self):
+        # tab create 返回 pane 与 pane list 对不上：不关闭任何 pane（防误杀唯一 pane）
+        self.prepare_handoff()
+        self.set_new_tab_panes(
+            {"pane_id": "wX:pOTHER", "tab_id": "wX:tNEW", "agent_status": "unknown"},
+        )
+        self.make_guard().run_once()
+
+        self.assertEqual([], [c for c in self.dispatch_calls if c[:2] == ["pane", "close"]])
+        self.assertEqual("started", self.handoff_fields()["phase"])
+        self.assertTrue(any("未包含新 pane wX:pNEW" in line for line in self.logs),
+                        self.logs)
 
 
 class Fb008CtxHandoffTest(GuardTestBase):

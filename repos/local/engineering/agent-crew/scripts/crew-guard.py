@@ -32,6 +32,8 @@ guard 不自动关闭/杀 agent；agent 不再 blocked 或消失即清除年龄�
 反查关系不可解释时 fail-safe），解析不到则 fail-safe 不动作。按 config
 `helm.ctxWarn`（默认 0.30）/`helm.ctxHandoff`（默认 0.50）写 <crew-dir>/guard.handoff
 并通知；≥交接阈值一次性新建 tab/继任/首报后关旧 pane 与旧 tab，失败只通知不循环；
+`tab create` 后按 pane list 校验新 tab pane 数=1，多出的明确空 pane 经
+`dispatch pane close` 关闭并记 guard.log（FB-038）；取数/关闭失败只告警不中断交接。
 旧舵一律按 handoff `old` 身份判定，working 不杀；继任缺失/blocked/idle 无首报或旧舵
 持续未收口连续 HANDOFF_STALL_ROUNDS 轮后记 failed 并通知人工。交接完成（phase=done）后
 继续监控继任总舵，不因 done 永久短路。交接启动前先执行
@@ -1053,6 +1055,58 @@ class Guard:
         else:
             self.log(f"交接前 progress rotate 失败（退出码 {code}，继续交接）：{detail}")
 
+    def _ensure_handoff_tab_single_pane(self, new_tab: str, new_pane: str) -> None:
+        """FB-038：`tab create` 后校验新 tab pane 数=1，多出的空 pane 关闭。
+
+        只关「非 new_pane、无 agent 字段、状态非 working/blocked」的明确空 pane；
+        pane list 取数/解析失败、多余 pane 非空或关闭失败一律只记 guard.log 告警，
+        不中断交接（fail-safe：宁可留告警，不误杀）。
+        """
+        try:
+            panes = self.list_panes()
+        except Exception as exc:  # noqa: BLE001 - 校验失败不得中断交接
+            self.log(f"交接 tab pane 数校验失败：{type(exc).__name__}: {exc}"
+                     f"（继续交接，请人工核查 tab {new_tab}）")
+            return
+        tab_panes = [
+            pane for pane in panes
+            if isinstance(pane, dict) and str(pane.get("tab_id") or "") == new_tab
+        ]
+        if not tab_panes:
+            self.log(f"交接 tab pane 数校验：pane list 未返回 tab {new_tab} 的 pane"
+                     "（继续交接，请人工核查）")
+            return
+        pane_ids_in_tab = {str(pane.get("pane_id") or "") for pane in tab_panes}
+        if new_pane not in pane_ids_in_tab:
+            # 返回的 new_pane 与 pane list 对不上（解析漂移）：无法判断哪个是继任 pane，
+            # 一律不关闭，避免误杀唯一 pane。
+            self.log(f"交接 tab pane 数校验：pane list 未包含新 pane {new_pane}"
+                     f"（tab {new_tab}），仅告警不关闭（继续交接，请人工核查）")
+            return
+        extras = [
+            pane for pane in tab_panes
+            if str(pane.get("pane_id") or "") != new_pane
+        ]
+        if not extras:
+            return
+        for pane in extras:
+            pane_id = str(pane.get("pane_id") or "?")
+            status = str(pane.get("agent_status") or "")
+            if pane.get("agent") or status in ("working", "blocked"):
+                self.log(f"交接 tab 多余 pane {pane_id} 非空或 {status or '有 agent'}，"
+                         f"未关闭（请人工核查 tab {new_tab}）")
+                continue
+            code, output, error = self.dispatch(
+                self.root, ["pane", "close", "--pane", pane_id]
+            )
+            if code == 0:
+                self.log(f"交接 tab 多余 pane 已关闭：{pane_id}（tab {new_tab}）")
+            else:
+                detail = (error or output).strip().splitlines()
+                reason = detail[0] if detail else f"退出码 {code}"
+                self.log(f"交接 tab 多余 pane {pane_id} 关闭失败（退出码 {code}）：{reason}"
+                         f"（继续交接，请人工核查 tab {new_tab}）")
+
     def _start_handoff(self, agents: list[dict], ctx_k: float, old_pane: str) -> dict:
         if self.handoff_attempted:
             return {"action": "wait", "reason": "交接已尝试，等待继任首报"}
@@ -1101,7 +1155,11 @@ class Guard:
         if not new_tab:
             return self._handoff_fail("tab create", f"未返回 tab：{output.strip()}", base)
 
-        start_args = ["start", "--role", "helm", "--pane", new_pane]
+        # FB-038：tab create 后确认新 tab 只有一个 pane（多出空 pane 关闭，失败只告警）。
+        self._ensure_handoff_tab_single_pane(new_tab, new_pane)
+
+        start_args = ["start", "--role", "helm", "--pane", new_pane,
+                      "--permission-mode", "bypass_permissions"]
         runtime = self._helm_runtime()
         if runtime:
             start_args.extend(["--runtime", runtime])

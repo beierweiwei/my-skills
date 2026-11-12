@@ -40,7 +40,7 @@
 
 ## R 回执
 
-- **R1 文件真源**：回执以 `<git-common-dir>/crew/inbox/` 下的文件为真源；先原子落盘（见 P3）再尝试推送，推送失败不影响回执成立。
+- **R1 文件真源**：回执以 `<git-common-dir>/crew/inbox/` 下的文件为真源；先原子落盘（见 P3）再尝试推送，推送失败不影响回执成立。读取用 `python3 scripts/crew-msg.py ls --unread` 取未读，处置后 `ls --mark-read <receipt_id>...`（或 `--all`）记已读游标（`<git-common-dir>/crew/inbox-read-cursor.json`）；游标只记读取进度，不改回执状态、不删回执文件，inbox 文件仍是唯一真源。**已读≠已处置：处置以回执 status + plan 为准**（游标只表示读过，不代表 blocked/⏸ 已处理）。
 - **R2 回执字段**：`receipt_id`、`from`、`runtime`、`task`、`status`（`done|blocked|captain`）、`commit`、`changed_files[]`、`evidence[]`、`work_slot`、`findings[]`、`summary`、`ts`；缺字段视为无效回执；⏸ 一律用 `status=captain`。返工/修复/升级类任务的 findings 首条必须写「根因：成立」或「根因：修正为…」，形成派单—回执闭环。
 - **R3 去重**：回执按 `receipt_id` 去重，同一 `receipt_id` 只处理一次。
 - **R4 触发器不是状态**：回执只触发收口与审计，任务状态只认 plan；回执与 plan 不一致时以 plan 为准并触发核对。
@@ -53,7 +53,7 @@
 - **W2 容量与来源**：每 tab 最多 6 个 pane（含 root），超出另开组 tab；不得从总舵或他人 worker 的 tab 分裂出工位；迁移失败即关 pane，不留残位。总舵 tab 只保留总舵自身 1 个 pane，不得 split；总舵换舵另开新 tab，继任首报后关旧 pane/旧 tab。
 - **W3 标签**：工位标签必须含「需求·任务」，禁用角色泛称；一个 pane 只跑一个 agent。
 - **W4 回收窗**：one-shot 工位收口即关；builder 仅在「同资产下一件」时保留，窗口 2 小时；空 tab 自动关闭；保留工位标签标「·保留至 HH:MM」。blocked 工位见 R6，不适用本窗。
-- **W5 巡检**：单 tab 超容、有 pane 无注册、有注册无 pane 均须告警；working 状态的 pane 不得关闭；白名单工位不自动清理。
+- **W5 巡检**：单 tab 超容、有 pane 无注册、有注册无 pane 均须告警；working 状态的 pane 不得关闭；白名单工位不自动清理。默认巡检与自检动作为 `python3 scripts/pane-audit.py --apply`：只自动关「非白名单、非 working 的明确空 pane / 空 tab / 完成流 tab」，个人 tab 不动；总舵 tab 只允许 1 个 pane，多余空 pane 自动关（交接后 pane 数=1）。
 
 ## O 占用
 

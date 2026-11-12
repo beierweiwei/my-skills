@@ -48,6 +48,8 @@
 - **看板结构**：（可选）业务链置顶 + 流表（当前阶段/完成数/健康/该流 Next Step）+ Deviation + Backlog（T\*）+ 待 Captain（C\*）。
 - **归档**：不内置；需要归档历史看板时以 `--archive <path>` 一次性显式执行。`board.archive` 配置为空时看板不写归档链接行。
 - **自检**：`python3 scripts/plan-status.py --selftest` 验证 T/C 分流与流表结构（核心契约），部署后先跑一次。
+- **一屏摘要**：`python3 scripts/plan-status.py --brief` 输出活跃流表（流｜阶段｜完成数/健康｜下一步｜待 Captain）+ 待 Captain 摘要 + 今日变化（≤40 行）；用于每轮汇报与交接速读，只读不落盘。
+- **卫生 lint**：`--lint` 的结构错误按 `文件:行号` 非零退出；内容卫生（Next Step 超长/含 ✅、🟡 无 owner、样板残留）默认不阻断（只提醒 rc=0），加 `--strict` 才升失败。
 
 ## 4. 业务链与看板写法规范（Captain 2026-10-30）
 
