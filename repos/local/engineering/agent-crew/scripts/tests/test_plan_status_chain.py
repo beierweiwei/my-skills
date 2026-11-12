@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-"""plan-status.py 业务链视图用例（S8-b1）：python3 scripts/tests/test_plan_status_chain.py
+"""plan-status.py 业务链视图用例（S8-b1；2.2.19 B 看板速读化后同步）。
 
-覆盖看板与 plan 写法四规则的看板侧落地（AGENTS 编排效率原则 11 增补 + Captain 2026-10-30 渲染细化）：
+覆盖：
 ① 业务链表解析：节名含「业务链」即命中（兼容「业务链节点（…）」带后缀形态），
    | 节点 | 状态 | 说明 | 表按位置取列（列头名宽松：说明/目标完成状态说明均兼容）；
    状态列 todo 三元 [x]/[ ]/[⏸]，其余值宽松映射 todo；说明列内嵌标记不翻转节点状态。
-② 看板顶部业务链总览：按流分节、行首标准 md todo 语法（- [x] / - [ ] / - [ ] ⏸ …（待 Captain）），
-   状态灯嵌行（[x]✅ / [ ]🟡 / ⏸🔴），链序=表序，附自解释图例。
+② 看板速读结构（2.2.19 B）：业务链不再逐节点导出；⏸ 节点仍进待 Captain 汇总，
+   同时现在状态/流表/最近完成/偏差/Backlog 计数/证据指针具备。
 ③ 待 Captain 汇总置顶：各 plan Backlog/业务链表 [⏸] 条目汇总（标准 todo + ⏸ 入文字），
    portfolio C 前缀行保留并同样置顶。
-④ 排序：业务链总览+待 Captain 在前，流表等工单细节置后；
-   流表只留概览列（流/当前阶段/阶段完成/健康），各流 todo 细节在流表下方按流分节渲染
-   （#### 流名 + 行首 todo 列表，[⏸] 转 - [ ] ⏸ …（待 Captain））。
-⑤ 降级与兼容：无业务链表不渲染该视图（零破坏）；plan checklist 与业务链表两种载体都解析；
+④ 排序：待 Captain 在流表前；流表与 --brief 同表头，每流只留 Next Step 首条一句话，
+   不展开各流 todo 分节。
+⑤ 降级与兼容：无业务链表不渲染额外视图（零破坏）；plan checklist 与业务链表两种载体都解析；
    与 S7-b1（Current Phase 推导 / Deviation 生命周期）共存。
 fixture 全部为中性占位内容，不含任何业务词（通用性红线：渲染后无业务词残留）。
 """
@@ -161,41 +160,44 @@ class ChainParseTest(_TmpRepoTest):
 
 
 class ChainRenderTest(_TmpRepoTest):
-    """契约②④：顶部总览（标准 todo 语法+状态灯+图例）、降级、多流多表。"""
+    """契约②④（2.2.19 B 看板速读化）：业务链不再逐节点导出；链状态只参与
+    待 Captain 汇总与流表健康；看板以现在状态/流表/指针组织。"""
 
-    def test_overview_at_top_with_legend(self):
+    def test_no_chain_overview_but_now_status_and_pointer(self):
         board = self._render({"x-portfolio": portfolio_body(), "stream-a": chain_body(SAMPLE_ROWS)})
-        self.assertLess(board.index("## 业务链总览"), board.index("## 当前目标"))
-        self.assertIn("图例：[x] ✅ 完成 · [ ] 🟡 未完成 · ⏸ 🔴 待 Captain", board)
+        self.assertNotIn("## 业务链总览", board)
+        self.assertNotIn("图例：[x] ✅ 完成", board)
+        self.assertIn("**现在：**", board)
+        self.assertIn("## 证据/plan 指针", board)
 
-    def test_node_lines_standard_todo_with_lights(self):
+    def test_non_captain_nodes_not_exported(self):
         board = self._render({"x-portfolio": portfolio_body(), "stream-a": chain_body(SAMPLE_ROWS)})
-        overview = board.split("## 业务链总览", 1)[1].split("## 待 Captain", 1)[0]
-        self.assertIn("- [x] ✅ **节点一** — 节点一已打通（真实数据）。", overview)
-        self.assertIn("- [ ] 🟡 **节点二** — 节点二待接：聚合视图未通。", overview)
-        # 待 Captain 项：标准 checkbox + ⏸ 入文字；说明列内嵌 [⏸] 过状态灯
-        self.assertIn("- [ ] ⏸ **节点三** — ⏸ 真实发送待放行（待 Captain）。", overview)
+        self.assertNotIn("**节点一**", board)
+        self.assertNotIn("**节点二**", board)
+        self.assertIn("**节点三**", board)  # ⏸ 节点仍进待 Captain 摘要
 
     def test_no_chain_section_degrades(self):
-        # 全 portfolio 无业务链表：无总览节，其余结构同现状（零破坏）
+        # 全 portfolio 无业务链表：新结构同现（零破坏）
         board = self._render({"x-portfolio": portfolio_body(), "stream-a": plain_body()})
         self.assertNotIn("## 业务链总览", board)
-        self.assertIn("## 当前目标", board)
+        self.assertIn("**现在：**", board)
         self.assertIn("## 流表", board)
-        self.assertIn("## 偏差明细", board)
+        self.assertIn("## 偏差", board)
         self.assertIn("## Backlog", board)
+        self.assertIn("## 证据/plan 指针", board)
 
-    def test_partial_chain_renders_only_chain_plans(self):
+    def test_all_streams_listed_in_table(self):
         board = self._render({
             "x-portfolio": portfolio_body(),
             "stream-a": chain_body(SAMPLE_ROWS, title="流 plan A"),
             "stream-b": plain_body("流 plan B"),
         })
-        overview = board.split("## 业务链总览", 1)[1].split("## 待 Captain", 1)[0]
-        self.assertIn("#### 流A", overview)  # 子块标题=流名（portfolio phase 名）优先
-        self.assertNotIn("#### 流 plan B", overview)  # 无业务链表的流不渲染
+        table = board.split("## 流表", 1)[1].split("## 最近完成", 1)[0]
+        self.assertIn("| 流A |", table)  # 仅列 portfolio 引用的流
+        self.assertNotIn("流 plan B", table)
+        self.assertNotIn("#### ", board)  # 不再按流展开 todo 分节
 
-    def test_multi_stream_tables_in_sorted_order(self):
+    def test_multi_stream_table_order(self):
         pbody = portfolio_body().replace(
             "**Status:** pending",
             "**Status:** pending\n\n### Phase 2: 流B\n"
@@ -205,16 +207,15 @@ class ChainRenderTest(_TmpRepoTest):
             "stream-a": chain_body(SAMPLE_ROWS, title="流 plan A"),
             "stream-b": chain_body([("节点九", "[x]", "。")], title="流 plan B"),
         })
-        overview = board.split("## 业务链总览", 1)[1].split("## 待 Captain", 1)[0]
-        self.assertLess(overview.index("#### 流A"), overview.index("#### 流B"))
-        self.assertIn("- [x] ✅ **节点九** — 。", overview)
+        table = board.split("## 流表", 1)[1].split("## 最近完成", 1)[0]
+        self.assertLess(table.index("| 流A |"), table.index("| 流B |"))
 
 
 class CaptainSummaryTest(_TmpRepoTest):
     """契约③：待 Captain 汇总置顶（标准 todo 语法，业务链 [⏸] 节点 + Backlog [⏸] 行 + C 行）。"""
 
     def _captain(self, board: str) -> str:
-        return board.split("## 待 Captain", 1)[1].split("## 当前目标", 1)[0]
+        return board.split("## 待 Captain", 1)[1].split("## 流表", 1)[0]
 
     def test_chain_captain_node_summarized(self):
         board = self._render({"x-portfolio": portfolio_body(), "stream-a": chain_body(SAMPLE_ROWS)})
@@ -236,9 +237,7 @@ class CaptainSummaryTest(_TmpRepoTest):
         # B1-fix：状态列裸 ⏸（b2 文档定稿简写）渲染 captain 灯语义并进待 Captain 汇总
         board = self._render({"x-portfolio": portfolio_body(),
                               "stream-a": chain_body([("节点四", "⏸", "真实发送待放行。")])})
-        overview = board.split("## 业务链总览", 1)[1].split("## 待 Captain", 1)[0]
-        self.assertIn("- [ ] ⏸ **节点四** — 真实发送待放行。", overview)
-        self.assertNotIn("🟡 **节点四**", overview)  # 不再静默降级为未完成
+        self.assertNotIn("## 业务链总览", board)
         captain = self._captain(board)
         self.assertIn("- [ ] ⏸ **节点四**（流A）— 真实发送待放行。", captain)
 
@@ -259,8 +258,9 @@ class CaptainSummaryTest(_TmpRepoTest):
         board = self._render({"x-portfolio": portfolio_body(
             ["| N3 | 服务进程内存储改造 | P3 | — | — |",
              "| C1 | 决策一 | P0 | — | 待定 |"])})
-        self.assertIn("| N3 | 服务进程内存储改造 | P3 | — | — |",
-                      board.split("## Backlog", 1)[1])
+        backlog = board.split("## Backlog", 1)[1]
+        self.assertIn("agent 待办 1 条", backlog)
+        self.assertNotIn("| N3 |", backlog)
         self.assertNotIn("**N3**", self._captain(board))
         self.assertIn("- [ ] ⏸ **C1** 决策一 — 待定（待 Captain）", self._captain(board))
 
@@ -281,49 +281,51 @@ class CaptainSummaryTest(_TmpRepoTest):
 
 
 class OrderCompatTest(_TmpRepoTest):
-    """契约④⑤：节排序、流表概览列+分节 todo、与 S7-b1 共存、selftest。"""
+    """契约④⑤（2.2.19 B）：节排序、流表一句话、与 S7-b1 共存、selftest。"""
 
     def test_section_order(self):
         board = self._render({"x-portfolio": portfolio_body(), "stream-a": chain_body(SAMPLE_ROWS)})
         seq = [board.index(s) for s in
-               ["## 业务链总览", "## 待 Captain", "## 当前目标", "## 流表", "## 偏差明细", "## Backlog"]]
+               ["## 今日变化", "## 待 Captain", "## 流表", "## 最近完成",
+                "## 偏差", "## Backlog", "## 证据/plan 指针"]]
         self.assertEqual(seq, sorted(seq), f"节顺序不对：{seq}")
+        self.assertLess(board.index("## 待 Captain"), board.index("## 流表"))
 
-    def test_stream_table_overview_only_columns(self):
-        # 流表只留概览列（流/当前阶段/阶段完成/健康），Next Step 不再塞格子
+    def test_stream_table_one_line_next_step_only(self):
+        # 流表与 --brief 同表头；Next Step 只留首条一句话，不塞多条 todo
         body = chain_body(SAMPLE_ROWS, title="流 plan A",
                           next_step="- [x] 件一完成（已推送）\n- [ ] 件二进行中")
         board = self._render({"x-portfolio": portfolio_body(), "stream-a": body})
-        table = board.split("## 流表", 1)[1].split("## 偏差明细", 1)[0]
-        self.assertIn("| 流 | 当前阶段 | 阶段完成 | 健康 |", table)
+        table = board.split("## 流表", 1)[1].split("## 最近完成", 1)[0]
+        self.assertIn(ps.BRIEF_TABLE_HEADER, table)
         self.assertIn("| 流A |", table)
-        self.assertNotIn("件一完成", table.split("\n\n")[0])  # 表格段无 todo 细节
+        self.assertIn("件一完成", table)
+        self.assertNotIn("件二进行中", table)  # 只留首条
 
-    def test_stream_todo_details_below_table_per_stream(self):
-        # 各流 todo 细节：流表下方按流分节（#### 流名 + 行首 todo 列表，[⏸] 转标准格式）
+    def test_stream_todo_details_not_exported(self):
+        # 各流 todo 全量 bullet 不再进看板；详情由证据/plan 指针承载
         body = chain_body(
             SAMPLE_ROWS, title="流 plan A",
             next_step="- [x] 件一完成（已推送）\n- [ ] 件二进行中\n- 件三普通行\n- [⏸] 件四放行")
         board = self._render({"x-portfolio": portfolio_body(), "stream-a": body})
-        table = board.split("## 流表", 1)[1].split("## 偏差明细", 1)[0]
-        self.assertIn("#### 流A", table)
-        self.assertIn("- [x] 件一完成（已推送）", table)
-        self.assertIn("- [ ] 件二进行中", table)
-        self.assertIn("- 件三普通行", table)
-        self.assertIn("- [ ] ⏸ 件四放行（待 Captain）", table)
-        self.assertNotIn("[x] 件一完成", table.replace("- [x] 件一完成（已推送）", ""))  # 无残留旧形态
-        self.assertNotIn("- [⏸] 件四放行", table)  # 非标 [⏸] checkbox 不原样透出
+        self.assertNotIn("#### ", board)
+        self.assertNotIn("件二进行中", board)
+        self.assertNotIn("件三普通行", board)
+        self.assertIn("件一完成", board)
+        self.assertIn("详情 grep", board)
 
     def test_deviation_lifecycle_coexists(self):
-        # S7-b1 已解决折叠（活跃行保留+尾注计数）与业务链总览共存
+        # S7-b1 已解决折叠（活跃/已解决计数）与新看板结构共存
         pbody = portfolio_body(["| C1 | 决策一 | P0 | — | 待定 |"]).replace(
             "## Backlog",
             "## Deviation\n\n| 预期 | 实际 | 原因 | 待决策 |\n|---|---|---|---|\n"
             "| 预期甲 | 实际甲 | 原因甲 | — |\n"
             "| 预期乙 | 实际乙 | 原因乙 | 已解决（2026-10-29） |\n\n## Backlog")
         board = self._render({"x-portfolio": pbody, "stream-a": chain_body(SAMPLE_ROWS)})
-        self.assertIn("## 业务链总览", board)
-        self.assertIn("已解决 1 条（折叠）", board)
+        deviation = board.split("## 偏差", 1)[1].split("## Backlog", 1)[0]
+        self.assertIn("活跃 1 条", deviation)
+        self.assertIn("已解决 1 条（折叠）", deviation)
+        self.assertNotIn("预期乙", deviation)
         self.assertIn("- [ ] ⏸ **C1** 决策一 — 待定（待 Captain）", board)
 
     def test_current_phase_derivation_coexists(self):
@@ -331,7 +333,7 @@ class OrderCompatTest(_TmpRepoTest):
         body = chain_body(SAMPLE_ROWS, title="流 plan A",
                           phases=[("阶段一", "complete"), ("阶段二", "pending")])
         board = self._render({"x-portfolio": portfolio_body(), "stream-a": body})
-        table = board.split("## 流表", 1)[1].split("## 偏差明细", 1)[0]
+        table = board.split("## 流表", 1)[1].split("## 最近完成", 1)[0]
         self.assertIn("| 阶段二 |", table)
         self.assertNotIn("| 阶段一 |", table)
 

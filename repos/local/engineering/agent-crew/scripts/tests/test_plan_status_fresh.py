@@ -169,6 +169,24 @@ class CheckFreshTest(_TmpRepoTest):
         self.assertIn("源指纹", err)
         self.assertIn("--write", err)
 
+    def test_old_generator_version_is_stale_then_write_refreshes(self):
+        # S3：看板结构升级（BOARD_VERSION）后，旧版本指纹的看板显式过期；
+        # --write 重渲后恢复新鲜。v1 为 2.2.18 及更早的结构版本。
+        root = self._repo()
+        self._write(root)
+        board = root / "docs/进度追踪.md"
+        text = board.read_text(encoding="utf-8")
+        self.assertIn(f"plan-sources: {ps.BOARD_VERSION} ", text)
+        self.assertNotEqual("v1", ps.BOARD_VERSION)  # 结构升级后不得仍为 v1
+        board.write_text(text.replace(f"plan-sources: {ps.BOARD_VERSION} ",
+                                      "plan-sources: v1 "), encoding="utf-8")
+        rc, _out, err = self._check(root)
+        self.assertEqual(rc, 1)
+        self.assertIn(f"看板生成器版本变化（v1 → {ps.BOARD_VERSION}）", err)
+        self._write(root)
+        rc, _out, err = self._check(root)
+        self.assertEqual(rc, 0, err)
+
 
 class LintTest(_TmpRepoTest):
     """契约②：create-time lint 规则与 文件:行号 报错格式。"""
@@ -295,7 +313,7 @@ class LintTest(_TmpRepoTest):
 
 
 class RecentCompletedTest(_TmpRepoTest):
-    """契约③：看板「最近完成」最多 10 条、标准 todo 语法、空节收口态。"""
+    """契约③（2.2.19 B）：看板「最近完成」最多 5 条一行摘要、标准 todo、空节收口态。"""
 
     def _board(self, recent: list[str] | None) -> str:
         root = make_repo(
@@ -304,24 +322,24 @@ class RecentCompletedTest(_TmpRepoTest):
         )
         return ps.render(plans=ps.load_plans(root), cfg=ps.load_config(root))
 
-    def test_recent_truncated_to_10(self):
+    def test_recent_truncated_to_5(self):
         recent = [f"- [x] 事项 {i:02d}" for i in range(1, 13)]
-        section = self._board(recent).split("## 最近完成", 1)[1].split("## 流表", 1)[0]
+        section = self._board(recent).split("## 最近完成", 1)[1].split("## 偏差", 1)[0]
         self.assertIn("- [x] 事项 01", section)
-        self.assertIn("- [x] 事项 10", section)
-        self.assertNotIn("事项 11", section)
+        self.assertIn("- [x] 事项 05", section)
+        self.assertNotIn("事项 06", section)
         self.assertNotIn("事项 12", section)
-        self.assertIn("仅显示最近 10 条", section)
+        self.assertIn("另有 7 条", section)
 
     def test_recent_standard_todo_and_order(self):
         board = self._board(["- [x] 事项甲", "- [x] 事项乙"])
-        section = board.split("## 最近完成", 1)[1].split("## 流表", 1)[0]
+        section = board.split("## 最近完成", 1)[1].split("## 偏差", 1)[0]
         self.assertIn("- [x] 事项甲", section)
         self.assertLess(section.index("事项甲"), section.index("事项乙"))
-        self.assertLess(board.index("## 最近完成"), board.index("## 流表"))
+        self.assertLess(board.index("## 流表"), board.index("## 最近完成"))
 
     def test_empty_recent_closed_state(self):
-        section = self._board(None).split("## 最近完成", 1)[1].split("## 流表", 1)[0]
+        section = self._board(None).split("## 最近完成", 1)[1].split("## 偏差", 1)[0]
         self.assertIn("—", section)
 
 

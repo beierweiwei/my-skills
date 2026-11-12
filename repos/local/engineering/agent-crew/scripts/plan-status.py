@@ -22,9 +22,11 @@
     python3 scripts/plan-status.py --archive docs/历史/进度追踪-截至20260101.md --write
                                               # 一次性在看板头部写入归档链接（显式动作）
     python3 scripts/plan-status.py --handover
-                                              # ≤49 行交接摘要到 stdout（只读：Goal/Next Step/
-                                              # 活跃流/待 Captain/未处理通知/最近 3 条 progress/
-                                              # 最近 3 条完成/证据入口/看板新鲜；progress 只读尾部）
+                                              # ≤49 行、≤32KB 交接摘要到 stdout（只读：Goal
+                                              # ≤2 行/Next Step/活跃流一行/待 Captain ≤3 条+
+                                              # 溢出/未处理通知/最近 3 条 progress 与完成/
+                                              # 证据入口/看板新鲜；超限确定性截断并标注；
+                                              # 预算封顶/超预算时另报封顶前原值，不低报必读）
     python3 scripts/plan-status.py --rotate [--keep N] [--apply]
                                               # portfolio progress 轮转：默认 dry-run 只打印
                                               # before/after、保留区间与归档路径；--apply 才写
@@ -55,14 +57,18 @@ backlog.captainBlocks（T→C 阻塞映射）。
 `**Status:** pending|in_progress|complete`；Phase 条目只允许 `- [ ]` / `- [x]` /
 `- owner:` / `- plan:`；错误按 `rel:line: [rule] message` 输出（rc 1），路径不存在 rc 3。
 
-看板布局（S8-b1，AGENTS 编排效率原则 11 增补「写法四规则」+ Captain 2026-10-30 渲染细化）：
-业务链总览与待 Captain 置顶（业务主线+人工决策先行），当前目标/总舵 Next Step 居中，
-流表只留概览列（流/当前阶段/阶段完成/健康），各流 todo 细节在流表下方按流分节
-（#### 流名 + 行首 todo 列表），偏差明细与 Backlog 置后。
-todo 条目一律标准 md 语法：行首 `- [x]` / `- [ ]`；待 Captain 项 `- [ ] ⏸ 文字（待 Captain）`
-（⏸ 入文字，保持 checkbox 标准性）；状态灯口径 [x]✅ / [ ]🟡 / ⏸🔴。
-各流 plan 的 `## 业务链…` 节（节名含「业务链」即命中）下 | 节点 | 状态 | 说明 | 表
-解析为业务链节点（状态列 todo 三元，链序=表序）；无该节的 plan 不渲染（零破坏）。
+看板布局（2.2.19 B「人类速读」）：现在状态一句（活跃流数/待立项数（无 plan、Backlog
+承载，不计入活跃）/最差健康/待 Captain/今日变化）+ 健康图例一行（🟢 完成/🟡 进行中/
+🔴 阻塞或偏差）+ 今日变化 ≤3 行 + 待 Captain 摘要
+≤5 条（与流表前置，selftest 守护）+ 流表（流/阶段/
+完成数+健康/下一步一句话/待 Captain 数，与 --brief 同表头；排序＝活跃 → 待立项 →
+已完成，已完成折叠为计数行，活跃/待立项不被体量上限挤出）+ 最近完成 ≤5 条 +
+偏差/Backlog 计数 + 证据/plan 指针；不整段导出总舵 Next Step、业务链逐节点、各流 todo
+与偏差/Backlog 明细（真源仍在各 plan，按指针 grep）；体量硬 ≤120 行/24KB，超限确定性
+截断并给指针。todo 条目一律标准 md 语法：行首 `- [x]` / `- [ ]`；待 Captain 项
+`- [ ] ⏸ 文字（待 Captain）`（⏸ 入文字，保持 checkbox 标准性）；状态灯口径
+[x]✅ / [ ]🟡 / ⏸🔴。各流 plan 的 `## 业务链…` 节仍解析（chain 状态参与待 Captain
+汇总与流表健康），但看板不再逐节点展开。
 """
 
 from __future__ import annotations
@@ -90,7 +96,9 @@ STATUS_RE = re.compile(r"\*\*Status:\*\*\s+(pending|in_progress|complete)")
 STATUS_MARK_RE = re.compile(r"\*\*Status:\s*\*\*")
 PLAN_REF_RE = re.compile(r"^\s*-\s*plan:\s*`([^`]+)`")
 # 派生看板源指纹（--check-fresh）：写入时把各 plan 内容哈希与配置哈希藏进 HTML 注释。
-BOARD_VERSION = "v1"
+# v2（2.2.19 B）：看板结构升级为一屏速读（R-1 流表排序 / S1 健康图例）；旧 v1 看板在
+# --check-fresh 下显式「过期」，--write 重渲后恢复新鲜。
+BOARD_VERSION = "v2"
 FINGERPRINT_RE = re.compile(r"^<!--\s*plan-sources:\s*(.*?)\s*-->$")
 CONFIG_REL = ".planning/orchestration.json"
 WRITE_HINT = "请运行 `python3 scripts/plan-status.py --write` 重刷看板"
@@ -98,21 +106,47 @@ WRITE_HINT = "请运行 `python3 scripts/plan-status.py --write` 重刷看板"
 # —— 交接瘦身（2.2.7）：--handover 摘要 / --rotate 归档 / --write 体量告警 ——
 # 阈值以常量落代码（--help 与模块 docstring 同步；单测直接构造边界夹具）：
 #   progress ≥ PROGRESS_WARN_BYTES 字节或 ≥ PROGRESS_WARN_ENTRIES 条 → --write stderr 告警；
-#   --handover 恒 ≤ HANDOVER_MAX_LINES 行（结构上限：活跃流/待 Captain 各 8 条 + 溢出注
-#   1 行 + 未处理通知 3 条 + 溢出注 1 行 + 预算块最多 3 行 = 48；上限 49 留 1 行余量）；
-#   --rotate 默认 dry-run；apply 走 flock + 临时文件 + os.replace，只归档不删除。
+#   --handover 恒 ≤ HANDOVER_MAX_LINES 行且输出 ≤ HANDOVER_MAX_BYTES 字节（2.2.19：
+#   Goal ≤2 行、活跃流一行/流、待 Captain 3 条+溢出、最近 progress 3 条；超限按
+#   「最近完成 → 最近 progress → 活跃流条数 → portfolio Next Step → Goal」确定性截断并
+#   追加「已截断，详情见 plan」）；--rotate 默认 dry-run；apply 走 flock + 临时文件 +
+#   os.replace，只归档不删除。
 HANDOVER_MAX_LINES = 49
 HANDOVER_MAX_STREAMS = 8
-HANDOVER_MAX_CAPTAIN = 8
+HANDOVER_MAX_CAPTAIN = 3
 HANDOVER_MAX_NOTIFICATIONS = 3
 HANDOVER_RECENT = 3
-# 交接必读字节预算（H1 / FB-044）：摘要 + brief 一屏（--brief 同口径渲染）+ 活跃流
-# Next Step/Status + feedback 待复盘命中 + guard.handoff；整看板不整读、不计入；
-# Decisions/Deviation/Backlog 不整读、不计入；超阈值只提示先摘要/grep。
+# 交接预算（V2 / D-2 + S-1）：摘要（不含活跃流行）+ brief 一屏（--brief 同口径渲染）+
+# 活跃流整行（流名/plan 路径/阶段/Next Step 首条 + 待 Captain 计数，S-1 起按整行字节
+# 计入）+ feedback 待复盘命中（最多计 10 行）+ guard.handoff；整看板/整 plan 不整读、
+# 不计入；超阈值只提示先摘要/grep。封顶/超预算时另输出封顶前原值（raw_total + 各分项
+# 原值，B-1：不得让报告数字低于真实必读），handoff 原值过大给清理提示。
+HANDOVER_MAX_BYTES = 32 * 1024
 HANDOVER_BUDGET_BYTES = 32 * 1024
 HANDOVER_BUDGET_HINT = (
     "- 超预算：先摘要/关键词 grep、写明只读段（Decisions/Deviation/Backlog 不整读），"
     "再按需定向补读")
+HANDOVER_READONLY_NOTE = (
+    "- 只读段：摘要 + brief + 活跃流一行（路径/阶段/Next Step 首条/待 Captain 计数）"
+    " + feedback 待复盘命中 + handoff；看板与整 plan 不整读")
+HANDOVER_STREAM_NEXT_STEP_MAX = 200  # 活跃流/portfolio Next Step 单条字符上限
+HANDOVER_CAPTAIN_LINE_MAX = 120     # 待 Captain 单条标题字符上限
+HANDOVER_GOAL_MAX_LINES = 2         # Goal 行数上限
+HANDOVER_FIELD_CLIP = 200           # Goal/最近完成 单行字符上限
+HANDOVER_PROGRESS_CLIP = 512        # 超限时最近 progress 单行字符上限
+HANDOVER_STREAM_NAME_MAX = 60       # 活跃流名/阶段名单行字符上限
+HANDOVER_FEEDBACK_MAX_LINES = 10    # feedback 待复盘命中最多计 10 行
+HANDOVER_FEEDBACK_MAX_BYTES = 8 * 1024  # feedback 分项计入字节上限（A1：保证 total 可硬 ≤32KB）
+HANDOVER_HANDOFF_WARN_BYTES = 4 * 1024  # guard.handoff 原值超过即提示先清理/精简再交接
+# 封顶归因（B-1）：按实际被截分项动态表述，不再固定只归因 feedback。
+HANDOVER_BUDGET_PART_NAMES = (
+    ("feedback", "feedback 待复盘命中"),
+    ("handoff", "handoff"),
+    ("brief", "brief"),
+    ("streams", "活跃流"),
+    ("summary", "摘要"),
+)
+HANDOVER_TRUNCATED_MARK = "- …已截断，详情见 plan"
 PROGRESS_TAIL_BYTES = 16384
 PROGRESS_RECENT_WINDOWS = (PROGRESS_TAIL_BYTES, 65536, None)  # 头窗不足 3 条时逐级扩大
 PROGRESS_SECTION = "自动驾驶里程"
@@ -135,7 +169,6 @@ RESOLVED_MARK = "已解决"
 
 # 业务链视图（S8-b1）：状态灯口径（Captain 2026-10-30 细化）[x]✅ / [ ]🟡 / ⏸🔴；
 # todo 条目一律标准 md 语法（行首 - [x] / - [ ]；待 Captain 项 - [ ] ⏸ 文字（待 Captain））。
-CHAIN_LEGEND = "> 图例：[x] ✅ 完成 · [ ] 🟡 未完成 · ⏸ 🔴 待 Captain"
 LIGHT_DONE, LIGHT_TODO, LIGHT_CAPTAIN = "✅", "🟡", "⏸"
 
 # 内置默认 = 通用默认值（与 templates/project.config.json 保持一致；两者同源同改）。
@@ -146,8 +179,20 @@ DEFAULT_CONFIG: dict = {
     "backlog": {"captainPrefix": "C", "agentPrefix": "T", "captainBlocks": {}},
 }
 
-# 流表只留概览列（S8-b1：Markdown 表格单元格不换行、不塞多条 todo）；细节按流分节渲染。
-STREAM_TABLE_HEADER = "| 流 | 当前阶段 | 阶段完成 | 健康 |"
+# —— 看板人类可读（2.2.19 B）：一屏结构与体量上限（D-4）——
+# 结构：现在状态一句 + 健康图例一行（S1）+ 今日变化 ≤3 行 + 待 Captain ≤5 条 +
+# 流表（与 --brief 同表头；R-1 排序＝活跃 → 待立项 → 已完成，已完成折叠为计数行）+
+# 最近完成 ≤5 条 + 偏差/Backlog 计数 + 证据/plan 指针；不整段导出 Next Step/业务链/明细。
+# 体量：≤BOARD_MAX_LINES 行且 ≤BOARD_MAX_BYTES 字节；超限按行保留前缀 + 指针（确定性）。
+BOARD_MAX_LINES = 120
+BOARD_MAX_BYTES = 24 * 1024
+BOARD_MAX_CAPTAIN = 5
+BOARD_CAPTAIN_LINE_MAX = 120
+BOARD_RECENT_MAX = 5
+BOARD_RECENT_LINE_MAX = 160
+BOARD_CELL_CLIP = 40
+# 健康图例（S1）：与 Plan.health 口径一致（🟢 全完成 / 🟡 进行中 / 🔴 有偏差或阻塞）。
+BOARD_HEALTH_LEGEND = "> 图例：🟢 完成 · 🟡 进行中 · 🔴 阻塞或偏差"
 
 # —— --brief 一屏摘要（2.2.16 T44）：活跃流表 + 待 Captain 摘要 + 今日变化 ——
 # 行数上限 40（流/待 Captain/今日变化各自截断并注溢出），单元格截断阈值见常量；
@@ -583,38 +628,105 @@ def _fresh_state(root: Path, cfg: dict, plans: list[Plan]) -> str:
     return f"新鲜（{board_rel}）"
 
 
-def _handover_budget(root: Path, cfg: dict, pdir: str, active_plans: list[Plan],
-                     summary_bytes: int, plans: list[Plan]) -> dict[str, int]:
-    """交接必读量估算（UTF-8 字节）：摘要本身 + brief 一屏 + 活跃流 Next Step/Status +
-    feedback 待复盘行 + guard.handoff。整看板不整读、不计入（board 恒 0 仅作分项占位）；
-    Decisions/Deviation/Backlog 不整读、不计入；估算不含预算行自身（差异 < 一行）。"""
+def _handover_budget(root: Path, cfg: dict, pdir: str, stream_bytes: int,
+                     summary_bytes: int, plans: list[Plan]) -> dict:
+    """交接必读量估算（UTF-8 字节，V2/D-2 + A1 + S-1）：摘要（不含活跃流行）+ brief
+    一屏 + 活跃流整行（流名/路径/阶段/Next Step 首条/待 Captain 计数）+ feedback 待复盘
+    命中（最多计 10 行且 ≤HANDOVER_FEEDBACK_MAX_BYTES）+ guard.handoff。整看板/整 plan
+    不整读、不计入；Decisions/Deviation/Backlog 不整读、不计入；total 硬
+    ≤HANDOVER_MAX_BYTES（超出按 handoff → feedback → brief → streams → summary
+    确定性封顶并置 capped）。
+
+    B-1：另返回封顶前原值 raw_total / raw 分项 / 被截分项 clipped——封顶只保证输出可行，
+    不用于把「实际要求读的段」报少；报告行必须同时给出原值。估算不含预算行自身
+    （差异 < 两行）。"""
     brief_lines, _exceeded = _render_brief(root, cfg, plans)
     brief = len(("\n".join(brief_lines) + "\n").encode("utf-8"))
-    streams = 0
-    for plan in active_plans:
-        next_step = "\n".join(_next_step_lines(plan)).encode("utf-8")
-        statuses = "\n".join(f"{name} {status}" for name, status in plan.phases).encode("utf-8")
-        streams += len(next_step) + len(statuses)
     feedback = 0
+    feedback_raw = 0
+    feedback_clipped = False
     feedback_path = root / pdir / "feedback.md"
     try:
         feedback_text = feedback_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         feedback_text = ""
+    matched = 0
     for line in feedback_text.splitlines():
-        if "待复盘" in line:
-            feedback += len(line.encode("utf-8")) + 1
-    handoff = 0
+        if "待复盘" not in line:
+            continue
+        matched += 1
+        if matched > HANDOVER_FEEDBACK_MAX_LINES:
+            feedback_clipped = True
+            break
+        cost = len(line.encode("utf-8")) + 1
+        feedback_raw += cost  # 原始必读（未封顶）用于 over_budget 与原值输出
+        remaining = HANDOVER_FEEDBACK_MAX_BYTES - feedback
+        if remaining <= 0:
+            feedback_clipped = True
+            continue  # 已封顶仍继续累计 raw，保证「原始必读超预算」判定准确
+        if cost > remaining:
+            feedback += remaining
+            feedback_clipped = True
+            continue
+        feedback += cost
+    handoff_raw = 0
     try:
         handoff_path = crew_dir(root) / "guard.handoff"
         if handoff_path.is_file():
-            handoff = len(handoff_path.read_bytes())
+            handoff_raw = len(handoff_path.read_bytes())
     except (CrewPathsError, OSError):
         pass
+    handoff = handoff_raw
+    summary = summary_bytes
+    streams = stream_bytes
+    total = summary + brief + streams + feedback + handoff
+    raw_total = summary_bytes + brief + stream_bytes + feedback_raw + handoff_raw
+    clipped = ["feedback"] if feedback_clipped else []
+    if total > HANDOVER_MAX_BYTES:
+        # 最小收缩档下理论不可达；确定性封顶，保证 total 硬 ≤32KB（A1）。
+        # 每次收缩记录被截分项，供报告归因（B-1）。
+        shrunk = max(0, min(handoff, HANDOVER_MAX_BYTES - (
+            summary + brief + streams + feedback)))
+        if shrunk != handoff:
+            handoff = shrunk
+            clipped.append("handoff")
+        total = summary + brief + streams + feedback + handoff
+        if total > HANDOVER_MAX_BYTES:
+            shrunk = max(0, min(feedback, HANDOVER_MAX_BYTES - (
+                summary + brief + streams + handoff)))
+            if shrunk != feedback:
+                feedback = shrunk
+                if "feedback" not in clipped:
+                    clipped.append("feedback")
+            total = summary + brief + streams + feedback + handoff
+        if total > HANDOVER_MAX_BYTES:
+            shrunk = max(0, min(brief, HANDOVER_MAX_BYTES - (summary + streams)))
+            if shrunk != brief:
+                brief = shrunk
+                clipped.append("brief")
+            total = summary + brief + streams + feedback + handoff
+        if total > HANDOVER_MAX_BYTES:
+            shrunk = max(0, min(streams, HANDOVER_MAX_BYTES - summary))
+            if shrunk != streams:
+                streams = shrunk
+                clipped.append("streams")
+            total = summary + brief + streams + feedback + handoff
+        if total > HANDOVER_MAX_BYTES:
+            shrunk = max(0, min(summary, HANDOVER_MAX_BYTES))
+            if shrunk != summary:
+                summary = shrunk
+                clipped.append("summary")
+            total = summary + brief + streams + feedback + handoff
     return {
-        "total": summary_bytes + brief + streams + feedback + handoff,
-        "summary": summary_bytes, "brief": brief, "board": 0,
+        "total": total,
+        "summary": summary, "brief": brief, "board": 0,
         "streams": streams, "feedback": feedback, "handoff": handoff,
+        "capped": int(bool(clipped)),
+        "over_budget": int(raw_total > HANDOVER_MAX_BYTES),
+        "raw_total": raw_total,
+        "raw": {"summary": summary_bytes, "brief": brief, "streams": stream_bytes,
+                "feedback": feedback_raw, "handoff": handoff_raw},
+        "clipped": clipped,
     }
 
 
@@ -669,53 +781,87 @@ def _notification_lines(root: Path, items: list[tuple[Path, dict]]) -> list[str]
     return lines
 
 
-def handover(root: Path, cfg: dict, plans: list[Plan]) -> int:
-    """≤HANDOVER_MAX_LINES 行交接摘要到 stdout；只读 .planning 与 crew inbox，
-    不写任何文件。末尾附「交接必读预算」（H1/FB-044：本次必读字节 + 阈值 32768，
-    brief 一屏替代整看板计入，超限提示先摘要/grep）。"""
-    pattern = cfg["portfolioMatch"]
-    portfolio = next((p for p in plans if fnmatch.fnmatch(p.path.parent.name, pattern)), None)
-    pdir = str(cfg.get("portfolioDir") or ".planning/portfolio").rstrip("/")
+def _handover_goal_lines(portfolio: Plan | None, count: int) -> list[str]:
+    """Goal ≤count 行（每条压成单行并截断）；缺 plan/Goal 时降级为「—」。"""
+    if portfolio is None:
+        return ["—"]
+    lines = [_clip(line, HANDOVER_FIELD_CLIP)
+             for line in portfolio.sections.get("Goal", []) if line.strip()]
+    return (lines or ["—"])[:count]
 
+
+def _handover_streams(portfolio: Plan | None, plans: list[Plan],
+                      max_streams: int) -> tuple[list[str], dict[str, str]]:
+    """活跃流行（每流一行：plan 路径 + 当前阶段 + Next Step 首条 ≤200 字符 + 待 Captain
+    计数）与流名映射；超出 max_streams 时截断并注溢出。"""
     active: list[str] = []
-    active_plans: list[Plan] = []
+    name_by_rel: dict[str, str] = {}
+    if portfolio is None:
+        return active, name_by_rel
+    index = {p.rel: p for p in plans}
+    for name, lines in _iter_streams(portfolio):
+        ref = next((PLAN_REF_RE.match(l).group(1) for l in lines if PLAN_REF_RE.match(l)), "")
+        target = index.get(ref.split("#")[0])
+        if target is None or target.complete >= target.total:
+            continue
+        name_by_rel[target.rel] = name
+        next_step = (_next_step_lines(target) or ["—"])[0]
+        active.append(
+            f"- **{_clip(cell(name), HANDOVER_STREAM_NAME_MAX)}**（`{ref or target.rel}`）"
+            f"— 当前阶段：{_clip(cell(current_phase(target)), HANDOVER_STREAM_NAME_MAX)}；"
+            f"Next Step：{_clip(next_step, HANDOVER_STREAM_NEXT_STEP_MAX)}；"
+            f"待 Captain：{_stream_captain_count(target)}"
+        )
+    if len(active) > max_streams:
+        more = len(active) - max_streams
+        active = active[:max_streams] + [f"- …另有 {more} 个活跃流（见看板流表）"]
+    return active, name_by_rel
+
+
+def _handover_lines(root: Path, cfg: dict, plans: list[Plan], portfolio: Plan | None,
+                    pdir: str, *, max_streams: int, drop_recent_done: bool,
+                    progress_clip: int | None, include_next_step: bool,
+                    goal_lines_count: int) -> tuple[list[str], int, int]:
+    """渲染交接摘要主体（不含预算块）；返回 (行, 活跃流内容起始下标, 内容行数)，
+    供预算剔除活跃流整行后单列计算（S-1：活跃流整行计入 streams）。"""
+    active, name_by_rel = _handover_streams(portfolio, plans, max_streams)
     captain: list[str] = []
     if portfolio is not None:
-        index = {p.rel: p for p in plans}
-        name_by_rel: dict[str, str] = {}
-        for name, lines in _iter_streams(portfolio):
-            ref = next((PLAN_REF_RE.match(l).group(1) for l in lines if PLAN_REF_RE.match(l)), "")
-            target = index.get(ref.split("#")[0])
-            if target is None or target.complete >= target.total:
-                continue
-            name_by_rel[target.rel] = name
-            next_step = (_next_step_lines(target) or ["—"])[0]
-            active.append(
-                f"- **{cell(name)}**（`{ref or target.rel}`）— 当前阶段："
-                f"{cell(current_phase(target))}；Next Step：{next_step}"
-            )
-            active_plans.append(target)
-        cap_prefix = cfg["backlog"]["captainPrefix"]
-        captain = _captain_lines(plans, portfolio, cap_prefix, name_by_rel)
-    if len(active) > HANDOVER_MAX_STREAMS:
-        more = len(active) - HANDOVER_MAX_STREAMS
-        active = active[:HANDOVER_MAX_STREAMS] + [f"- …另有 {more} 个活跃流（见看板流表）"]
-        active_plans = active_plans[:HANDOVER_MAX_STREAMS]
-    if len(captain) > HANDOVER_MAX_CAPTAIN:
-        more = len(captain) - HANDOVER_MAX_CAPTAIN
-        captain = captain[:HANDOVER_MAX_CAPTAIN] + [f"- …另有 {more} 条待 Captain（见看板）"]
+        all_captain = _captain_lines(
+            plans, portfolio, cfg["backlog"]["captainPrefix"], name_by_rel)
+        captain = [_clip(line, HANDOVER_CAPTAIN_LINE_MAX)
+                   for line in all_captain[:HANDOVER_MAX_CAPTAIN]]
+        hidden = len(all_captain) - HANDOVER_MAX_CAPTAIN
+        if hidden > 0:
+            captain.append(f"- …另有 {hidden} 条待 Captain（见看板）")
 
-    recent_done: list[str] = []
-    if portfolio is not None:
-        recent_done = [_todo_line(l.strip())
-                       for l in portfolio.sections.get("最近完成", []) if l.strip()]
-    out = ["## Goal", _one_line(portfolio.sections.get("Goal", [])) if portfolio else "—"]
-    out += ["## Next Step", _one_line(portfolio.sections.get("Next Step", [])) if portfolio else "—"]
-    out += ["## 活跃流"] + (active or ["- 无"])
+    if drop_recent_done or portfolio is None:
+        recent_done = ["—"]
+    else:
+        recent_done = [_clip(_todo_line(line.strip()), HANDOVER_FIELD_CLIP)
+                       for line in portfolio.sections.get("最近完成", []) if line.strip()
+                       ][:HANDOVER_RECENT] or ["—"]
+
+    recent_progress = _recent_progress(_progress_path(root, cfg))
+    if progress_clip is not None:
+        recent_progress = [_clip(line, progress_clip) for line in recent_progress]
+
+    if include_next_step and portfolio is not None:
+        next_step = _clip(_one_line(portfolio.sections.get("Next Step", [])),
+                          HANDOVER_STREAM_NEXT_STEP_MAX) or "—"
+    else:
+        next_step = "—"
+
+    out = ["## Goal"] + _handover_goal_lines(portfolio, goal_lines_count)
+    out += ["## Next Step", next_step]
+    out.append("## 活跃流")
+    stream_start = len(out)
+    out += active or ["- 无"]
+    stream_count = len(active) or 1
     out += ["## 待 Captain"] + (captain or ["无"])
     out += _notification_lines(root, _pending_notifications(root))
-    out += ["## 最近 progress（顶部最新 3 条）"] + _recent_progress(_progress_path(root, cfg))
-    out += ["## 最近完成（最近 3 条）"] + (recent_done[:HANDOVER_RECENT] or ["—"])
+    out += ["## 最近 progress（顶部最新 3 条）"] + recent_progress
+    out += ["## 最近完成（最近 3 条）"] + recent_done
     out += [
         "## 证据入口",
         f"- task_plan: `{pdir}/task_plan.md`",
@@ -725,20 +871,122 @@ def handover(root: Path, cfg: dict, plans: list[Plan]) -> int:
         "## 看板",
         _fresh_state(root, cfg, plans),
     ]
-    budget = _handover_budget(root, cfg, pdir, active_plans,
-                              len(("\n".join(out) + "\n").encode("utf-8")), plans)
-    out += [
+    return out, stream_start, stream_count
+
+
+def _handover_capped_note(clipped: list[str]) -> str:
+    """封顶说明（B-1）：按实际被截分项归因，不再固定只归因 feedback。"""
+    names = "、".join(name for key, name in HANDOVER_BUDGET_PART_NAMES
+                     if key in clipped) or "超出分项"
+    return (f"- 预算已封顶：{names} 按上限截计（封顶前原值见上），"
+            "超出的部分不计入必读、其余按需 grep")
+
+
+def _handover_budget_lines(budget: dict) -> list[str]:
+    out = [
         "## 交接必读预算",
         f"- 本次必读字节：{budget['total']}（阈值 {HANDOVER_BUDGET_BYTES}；"
         f"摘要 {budget['summary']} / brief {budget['brief']} / "
         f"看板（不整读）{budget['board']} / 活跃流 {budget['streams']} / "
         f"feedback {budget['feedback']} / handoff {budget['handoff']}）",
     ]
-    if budget["total"] > HANDOVER_BUDGET_BYTES:
+    if budget.get("capped") or budget.get("over_budget"):
+        raw = budget["raw"]
+        out.append(
+            f"- 封顶前实际必读：{budget['raw_total']}（摘要 {raw['summary']} / "
+            f"brief {raw['brief']} / 活跃流 {raw['streams']} / "
+            f"feedback {raw['feedback']} / handoff {raw['handoff']}）")
+    out.append(HANDOVER_READONLY_NOTE)
+    if budget.get("over_budget"):
         out.append(HANDOVER_BUDGET_HINT)
+    if budget.get("capped"):
+        out.append(_handover_capped_note(budget["clipped"]))
+    if budget["raw"]["handoff"] > HANDOVER_HANDOFF_WARN_BYTES:
+        out.append(
+            f"- guard.handoff 过大（{budget['raw']['handoff']} B）：交接者需实读该文件，"
+            "先清理/精简再交接；其余按需 grep")
+    return out
+
+
+def _text_bytes(lines: list[str]) -> int:
+    return len(("\n".join(lines) + "\n").encode("utf-8"))
+
+
+def _hard_truncate(lines: list[str], marker: str, limit: int) -> list[str]:
+    """最后兜底：按行保留前缀 + 截断标记，保证输出 ≤limit 字节（段头在前优先保留）。"""
+    kept: list[str] = []
+    used = 0
+    marker_bytes = len(marker.encode("utf-8")) + 1
+    for line in lines:
+        cost = len(line.encode("utf-8")) + 1
+        if used + cost + marker_bytes > limit:
+            break
+        kept.append(line)
+        used += cost
+    return kept + [marker]
+
+
+# 超限确定性截断顺序（V3/D-3）：最近完成 → 最近 progress → 活跃流条数 →
+# portfolio Next Step → Goal；最后仍超才按字节硬截断（必备段标题/首条在前）。
+HANDOVER_SHRINK_STEPS: tuple[dict, ...] = (
+    {},
+    {"drop_recent_done": True},
+    {"drop_recent_done": True, "progress_clip": HANDOVER_PROGRESS_CLIP},
+    {"drop_recent_done": True, "progress_clip": HANDOVER_PROGRESS_CLIP, "max_streams": 1},
+    {"drop_recent_done": True, "progress_clip": HANDOVER_PROGRESS_CLIP,
+     "max_streams": 1, "include_next_step": False},
+    {"drop_recent_done": True, "progress_clip": HANDOVER_PROGRESS_CLIP,
+     "max_streams": 1, "include_next_step": False, "goal_lines_count": 1},
+)
+
+
+def handover(root: Path, cfg: dict, plans: list[Plan]) -> int:
+    """≤HANDOVER_MAX_LINES 行、≤HANDOVER_MAX_BYTES 字节交接摘要到 stdout；只读 .planning
+    与 crew inbox，不写任何文件。末尾附「交接必读预算」（V2/D-2 + S-1：摘要不含活跃流行 +
+    brief 一屏 + 活跃流整行 + feedback 待复盘命中 + handoff，整看板/整 plan 不计入），
+    必读总量与输出均硬 ≤32KB（A1：超限封顶并标注，其余按需 grep；B-1：封顶/超预算时
+    同时输出封顶前原值，不让报告数字低于真实必读）；输出超硬上限按 HANDOVER_SHRINK_STEPS
+    确定性截断并标注「已截断，详情见 plan」。"""
+    pattern = cfg["portfolioMatch"]
+    portfolio = next((p for p in plans if fnmatch.fnmatch(p.path.parent.name, pattern)), None)
+    pdir = str(cfg.get("portfolioDir") or ".planning/portfolio").rstrip("/")
+
+    out: list[str] = []
+    for index, overrides in enumerate(HANDOVER_SHRINK_STEPS):
+        params = {
+            "max_streams": HANDOVER_MAX_STREAMS,
+            "drop_recent_done": False,
+            "progress_clip": None,
+            "include_next_step": True,
+            "goal_lines_count": HANDOVER_GOAL_MAX_LINES,
+        }
+        params.update(overrides)
+        lines, stream_start, stream_count = _handover_lines(
+            root, cfg, plans, portfolio, pdir, **params)
+        summary_bytes = sum(
+            len(line.encode("utf-8")) + 1
+            for position, line in enumerate(lines)
+            if not stream_start <= position < stream_start + stream_count)
+        stream_bytes = sum(
+            len(line.encode("utf-8")) + 1
+            for line in lines[stream_start:stream_start + stream_count])
+        budget = _handover_budget(root, cfg, pdir, stream_bytes, summary_bytes, plans)
+        out = lines + _handover_budget_lines(budget)
+        if index > 0:
+            out.append(HANDOVER_TRUNCATED_MARK)
+        if (_text_bytes(out) <= HANDOVER_MAX_BYTES
+                and budget["total"] <= HANDOVER_MAX_BYTES):
+            break
+    else:
+        out = _hard_truncate(out, HANDOVER_TRUNCATED_MARK, HANDOVER_MAX_BYTES)
+
     # 结构上限已保证 ≤HANDOVER_MAX_LINES（见常量注释）；防御性兜底不静默丢块。
     assert len(out) <= HANDOVER_MAX_LINES, f"交接摘要超行数上限：{len(out)}"
-    sys.stdout.write("\n".join(out) + "\n")
+    text = "\n".join(out) + "\n"
+    if len(text.encode("utf-8")) > HANDOVER_MAX_BYTES:  # 硬上限兜底（正常路径不可达）
+        text = "\n".join(_hard_truncate(out, HANDOVER_TRUNCATED_MARK,
+                                        HANDOVER_MAX_BYTES)) + "\n"
+    sys.stdout.write(text)
     return 0
 
 
@@ -774,6 +1022,40 @@ def _today_changes(root: Path, cfg: dict, today: str) -> list[str]:
     return lines
 
 
+def _stream_table_row(name: str, target: Plan | None, fallback_health: str = "") -> str:
+    """流表一行（看板与 --brief 同口径）：流/阶段/完成数+健康/下一步一句话 ≤60 字符/
+    待 Captain 数；无 plan 的流按「Backlog 承载」占位。"""
+    if target is None:
+        return f"| {_clip(cell(name), BOARD_CELL_CLIP)} | — | —（Backlog 承载） | — | 0 |"
+    next_step = (_next_step_lines(target) or ["—"])[0]
+    return (
+        f"| {_clip(cell(name), BOARD_CELL_CLIP)} "
+        f"| {_clip(cell(current_phase(target)), BOARD_CELL_CLIP)} "
+        f"| {target.complete}/{target.total} {target.health or fallback_health} "
+        f"| {cell(_clip(_todo_body(next_step), BRIEF_NEXT_STEP_CELL_MAX))} "
+        f"| {_stream_captain_count(target)} |"
+    )
+
+
+def _fit_board(lines: list[str], pdir: str) -> list[str]:
+    """看板体量硬上限（D-4）：超 120 行/24KB 时按行保留前缀 + 截断指针（确定性）；
+    头部（标题/生成说明/指纹行）优先保留，`--check-fresh` 指纹机制不受影响。"""
+    if len(lines) <= BOARD_MAX_LINES and _text_bytes(lines) <= BOARD_MAX_BYTES:
+        return lines
+    hint = (f"> 已截断：超出 {BOARD_MAX_LINES} 行/{BOARD_MAX_BYTES}B 上限，"
+            f"详情见 `{pdir}/task_plan.md` 或 `--handover`。")
+    limit = BOARD_MAX_BYTES - len(hint.encode("utf-8")) - 1
+    kept: list[str] = []
+    used = 0
+    for line in lines:
+        cost = len(line.encode("utf-8")) + 1
+        if len(kept) >= BOARD_MAX_LINES - 2 or used + cost > limit:
+            break
+        kept.append(line)
+        used += cost
+    return kept + ["", hint]
+
+
 def _render_brief(root: Path, cfg: dict, plans: list[Plan]) -> tuple[list[str], int]:
     """一屏摘要行（--brief 与 --handover 预算共用同一渲染口径）：活跃流表（流/阶段/
     完成数+健康/下一步/待 Captain 计数）+ 待 Captain 摘要（portfolio C 前缀与 ⏸ 项 +
@@ -807,13 +1089,7 @@ def _render_brief(root: Path, cfg: dict, plans: list[Plan]) -> tuple[list[str], 
         captain = _captain_lines(plans, portfolio, cfg["backlog"]["captainPrefix"], name_by_rel)
         out += [BRIEF_TABLE_HEADER, "|---|---|---|---|---|"]
         for name, target in streams[:BRIEF_MAX_STREAMS]:
-            next_step = (_next_step_lines(target) or ["—"])[0]
-            out.append(
-                f"| {cell(name)} | {cell(current_phase(target))} "
-                f"| {target.complete}/{target.total} {target.health} "
-                f"| {cell(_clip(_todo_body(next_step), BRIEF_NEXT_STEP_CELL_MAX))} "
-                f"| {_stream_captain_count(target)} |"
-            )
+            out.append(_stream_table_row(name, target))
         if len(streams) > BRIEF_MAX_STREAMS:
             out.append(f"- …另有 {len(streams) - BRIEF_MAX_STREAMS} 个活跃流"
                        "（见看板流表 / --handover）")
@@ -1387,111 +1663,113 @@ def render(plans: list[Plan], cfg: dict, archive: str | None = None) -> str:
         out += [f"> 未找到 portfolio plan（`.planning/{pattern}/task_plan.md`），看板不完整。", ""]
         return "\n".join(out) + "\n"
 
-    rows, streams = [], []
+    pdir = str(cfg.get("portfolioDir") or ".planning/portfolio").rstrip("/")
+    streams: list[tuple[str, Plan | None, str]] = []
     for phase, lines in _iter_streams(portfolio):
         ref = next((PLAN_REF_RE.match(l).group(1) for l in lines if PLAN_REF_RE.match(l)), "")
-        target = index.get(ref.split("#")[0])
-        if target:
-            done, health = f"{target.complete}/{target.total}", target.health
-            now_at = current_phase(target)
-        else:
-            done, health = "—（Backlog 承载）", HEALTH_BLOCKED if portfolio.deviations else HEALTH_WIP
-            now_at = "—"
-        streams.append((phase, target, ref))
-        # 流表只留概览列（S8-b1：表格单元格不塞多条 todo），细节在流表下方按流分节
-        rows.append(f"| {cell(phase)} | {cell(now_at)} | {done} | {health} |")
-
-    backlog = _tables(portfolio.sections.get("Backlog", []))
-    captain_ids = {row[0] for row in backlog if len(row) >= 5 and row[0].startswith(cap_prefix)}
-    name_by_rel = {t.rel: name for name, t, _ in streams if t}  # plan 路径→流名（标注统一用流名）
+        streams.append((phase, index.get(ref.split("#")[0]), ref))
+    name_by_rel = {t.rel: name for name, t, _ in streams if t}  # plan 路径→流名
     captain = _captain_lines(plans, portfolio, cap_prefix, name_by_rel)
 
-    # —— 前部：业务链总览 + 待 Captain（业务主线与人工决策先行，工单细节置后）——
-    chain_plans = [p for p in plans if p.chain]
-    if chain_plans:
-        out += ["## 业务链总览", "", CHAIN_LEGEND, ""]
-        for p in chain_plans:
-            out += [f"#### {name_by_rel.get(p.rel) or p.title}", ""]
-            for node, mark, desc in p.chain:
-                if mark == "done":
-                    line = f"- [x] {LIGHT_DONE} **{cell(node)}**"
-                elif mark == "captain":
-                    line = f"- [ ] {LIGHT_CAPTAIN} **{cell(node)}**"
-                else:
-                    line = f"- [ ] {LIGHT_TODO} **{cell(node)}**"
-                if desc:
-                    line += f" — {_todo_lights(cell(desc))}"
-                    if mark == "captain":
-                        line += _cap_suffix(desc)
-                out.append(line)
-            out.append("")
-
-    out += ["## 待 Captain（人工决策/动作）", ""]
-    out += captain or ["—"]
-
-    out += ["", "## 当前目标", "", _section(portfolio, "Goal") or "—", "", "## 总舵 Next Step", ""]
-    top = _section(portfolio, "Next Step")
-    if top:
-        out.append(_todo_lights(top))
+    # 现在状态一句：活跃流数（有 plan 且未完成）+ 待立项数（无 plan，Backlog 承载）
+    # + 最差健康 + 待 Captain 数 + 今日是否有变化（与 --brief 同源）。
+    fallback_health = HEALTH_BLOCKED if portfolio.deviations else HEALTH_WIP
+    active = [(name, target) for name, target, _ in streams
+              if target is not None and target.complete < target.total]
+    pending = [(name, target) for name, target, _ in streams if target is None]
+    healths = [target.health for _, target in active if target is not None]
+    if HEALTH_BLOCKED in healths:
+        worst = HEALTH_BLOCKED
+    elif HEALTH_WIP in healths:
+        worst = HEALTH_WIP
+    elif healths:
+        worst = HEALTH_DONE
     else:
-        # 回退：逐流列出仍在推进的流，不合并（stream 无语义 P 字段，P0 以"仍有未完成阶段"近似）。
-        derived = [s for s in streams if s[1] and s[1].complete < s[1].total and _next_step_lines(s[1])]
-        out += [f"- 自动推导：{name}" for name, _, _ in derived] or ["—"]
+        worst = "—"
+    today = datetime.now().strftime("%Y-%m-%d")
+    today_lines = _today_changes(root, cfg, today)
+    has_today = any(line.startswith(f"- {today}") for line in today_lines)
 
-    # 最近完成（写法规约 ≤10 条，新的在上）：只渲染 portfolio 节，超出截断并注明总数。
-    recent = [l.strip() for l in portfolio.sections.get("最近完成", []) if l.strip()]
-    out += ["", "## 最近完成", ""]
-    if recent:
-        out += [_todo_line(l) for l in recent[:10]]
-        if len(recent) > 10:
-            out += ["", f"> 共 {len(recent)} 条，仅显示最近 10 条。"]
+    out += [
+        f"> **现在：** {len(active)} 条活跃流 · {len(pending)} 条待立项（Backlog 承载） · "
+        f"最差健康 {worst} · "
+        f"待 Captain {len(captain)} 条 · 今日{'有变化' if has_today else '无变化'}",
+        BOARD_HEALTH_LEGEND,
+        "",
+        f"## 今日变化（{today}）",
+    ]
+    out += today_lines
+
+    out += ["", f"## 待 Captain（{len(captain)} 条，人工决策/动作）"]
+    if captain:
+        out += [_clip(line, BOARD_CAPTAIN_LINE_MAX) for line in captain[:BOARD_MAX_CAPTAIN]]
+        hidden = len(captain) - BOARD_MAX_CAPTAIN
+        if hidden > 0:
+            # S-2：⏸ 条目可能在各流 plan（流内 Backlog/业务链），指针必须覆盖两处。
+            out.append(f"> …另有 {hidden} 条（见 `{pdir}/task_plan.md` Backlog 与各流 plan）")
     else:
         out.append("—")
 
-    out += ["", "## 流表", "", STREAM_TABLE_HEADER, "|---|---|---|---|"]
-    out += rows
-    # 各流 todo 细节：流表下方按流分节（#### 流名 + 行首 todo 列表；S8-b1 表格不塞多条）
-    for name, target, ref in streams:
-        if not target:
-            continue
-        todos = [_todo_line(l) for l in _next_step_lines(target)]
-        if not todos:
-            continue
-        out += ["", f"#### {cell(name)}（`{ref or target.rel}`）", ""]
-        out += todos
+    # R-1：流表排序＝活跃（未完成）→ 待立项（无 plan/Backlog 承载）→ 已完成；
+    # 活跃/待立项永不因体量上限被已完成流挤掉；已完成折叠为一行计数 + 指针
+    # （明细见各流 plan / --handover）。
+    done = [(name, target) for name, target, _ in streams
+            if target is not None and target.complete >= target.total]
+    visible = active + pending
+    out += ["", "## 流表", "", BRIEF_TABLE_HEADER, "|---|---|---|---|---|"]
+    for name, target in visible:
+        out.append(_stream_table_row(name, target, fallback_health))
+    if done:
+        out.append(f"> …已完成 {len(done)} 条（见各流 plan / --handover）")
+    elif not visible:
+        out.append("> 无活跃流（portfolio Phases 全部完成或未引用 plan）。")
 
-    out += ["", "## 偏差明细", ""]
+    # 最近完成：只留最近 ≤5 条一行摘要；超出给指针，不导出全文。
+    recent = [l.strip() for l in portfolio.sections.get("最近完成", []) if l.strip()]
+    out += ["", f"## 最近完成（最近 {BOARD_RECENT_MAX} 条）"]
+    if recent:
+        out += [_clip(_todo_line(l), BOARD_RECENT_LINE_MAX)
+                for l in recent[:BOARD_RECENT_MAX]]
+        hidden = len(recent) - BOARD_RECENT_MAX
+        if hidden > 0:
+            out.append(f"> …另有 {hidden} 条（见 `{pdir}/task_plan.md`）")
+    else:
+        out.append("—")
+
     deviations_all = _tables(portfolio.sections.get("Deviation", []))
     deviations = [r for r in deviations_all if not _row_resolved(r)]
     resolved_count = len(deviations_all) - len(deviations)
-    backlog = _tables(portfolio.sections.get("Backlog", []))
-    captain_ids = {row[0] for row in backlog if len(row) >= 5 and row[0].startswith(cap_prefix)}
+    out += ["", "## 偏差"]
     if deviations:
-        out += ["| 预期 | 实际 | 原因 | 待决策 |", "|---|---|---|---|"]
-        for row in deviations:
-            if len(row) >= 4 and row[3].split()[0] in captain_ids:
-                row = row[:3] + [f"见 {row[3].split()[0]}"]
-            out.append("| " + " | ".join(cell(c) for c in row) + " |")
+        out.append(f"- 活跃 {len(deviations)} 条（详情见 `{pdir}/task_plan.md`）")
         if resolved_count:
-            out += ["", f"> 已解决 {resolved_count} 条（折叠）"]
+            out.append(f"- 已解决 {resolved_count} 条（折叠）")
     elif resolved_count:
         out.append(f"—（{resolved_count} 条已解决，全部折叠）")
     else:
         out.append("—")
 
-    out += ["", "## Backlog（agent 可执行）", ""]
-    # 分流（S8-hotfix）：C 前缀 OR ⏸ → 待 Captain 汇总；其余（T/N 等非 ⏸）→ Backlog，互斥
+    # 分流（S8-hotfix）：C 前缀 OR ⏸ → 待 Captain 汇总；其余（T/N 等非 ⏸）→ Backlog 计数
+    backlog = _tables(portfolio.sections.get("Backlog", []))
     todo = [row for row in backlog if len(row) >= 5
             and not row[0].startswith(cap_prefix) and not _row_has_pause(row)]
+    blocked = sum(1 for row in todo if row[0] in blocks)
+    out += ["", "## Backlog（agent 可执行）"]
     if todo:
-        out += ["| # | 目标 | P | 依赖 | 阻塞 |", "|---|---|---|---|---|"]
-        for row in todo:
-            if row[0] in blocks:
-                row = row[:4] + [f"待 {blocks[row[0]]}"]
-            out.append("| " + " | ".join(cell(c) for c in row) + " |")
+        out.append(f"- agent 待办 {len(todo)} 条（待 {cap_prefix} 阻塞 {blocked} 条）；"
+                   f"详情见 `{pdir}/task_plan.md`")
     else:
         out.append("—")
-    return "\n".join(out) + "\n"
+
+    out += [
+        "", "## 证据/plan 指针",
+        f"- task_plan: `{pdir}/task_plan.md`",
+        f"- progress: `{pdir}/progress.md`",
+        f"- feedback: `{pdir}/feedback.md`",
+        "- 详情 grep：逐流 plan `.planning/*/task_plan.md`；历史/全文用 `--handover`"
+        f" 或 `{ARCHIVE_DIR}/`",
+    ]
+    return "\n".join(_fit_board(out, pdir)) + "\n"
 
 
 def _iter_streams(portfolio: Plan):
@@ -1518,25 +1796,41 @@ def selftest(plans: list[Plan], cfg: dict) -> None:
     assert all(s in ("pending", "in_progress", "complete") for p in plans for _, s in p.phases)
     board = render(plans, cfg)
     assert "## 流表" in board and "## Backlog" in board and "## 待 Captain" in board
-    assert STREAM_TABLE_HEADER in board
+    assert BRIEF_TABLE_HEADER in board, "流表须与 --brief 同表头"
+    assert "**现在：**" in board and "## 证据/plan 指针" in board, "看板缺一屏速读结构"
     assert board.index("## 待 Captain") < board.index("## 流表"), "待 Captain 应置顶于流表"
-    cap, agt = cfg["backlog"]["captainPrefix"], cfg["backlog"]["agentPrefix"]
+    cap = cfg["backlog"]["captainPrefix"]
+    portfolio = next(
+        (p for p in plans if fnmatch.fnmatch(p.path.parent.name, cfg["portfolioMatch"])), None
+    )
+    assert portfolio is not None, "缺少 portfolio plan（无法校验 T/C 分流）"
     # captain 切片止于紧邻 ## 节（S8-hotfix）：待 Captain 与 Backlog 间还隔着
     # 当前目标/总舵 Next Step/流表等节，旧口径切到 ## Backlog 会误吞中间节行
     captain = board.split("## 待 Captain", 1)[1].split("\n## ", 1)[0]
     backlog = board.split("## Backlog", 1)[1]
-    backlog_full = re.findall(rf"^\| ([{cap}{agt}]+\d+) \|", backlog, re.M)
-    # S8-hotfix 分流口径：待 Captain 合法成员 = C 前缀行 + 任意前缀 ⏸ 行（T/N+⏸ 合法，
-    # 不再断言全 C 前缀）；守门改为——①Backlog 表不混入 ⏸ 行（⏸ 语义应进待 Captain）；
-    # ②待 Captain 节条目行均标准 `- [ ] ⏸` 语法（渲染格式回退检测）。
-    backlog_pause = [l for l in backlog.splitlines() if l.startswith("|") and "⏸" in l]
     captain_stray = [l for l in captain.splitlines()
                      if l.startswith("- ") and not l.startswith("- [ ] ⏸")]
-    # 空表=无混入即通过（阻断1：init 全新产物仓 Backlog 为空，selftest 必须首跑即绿；
-    # 不在骨架预置示例数据行——那会进真实看板）
-    assert (not backlog_full) or all(not i.startswith(cap) for i in backlog_full), "Backlog 混入 Captain 项"
-    assert not backlog_pause, "Backlog 混入 ⏸ 行（应进待 Captain）"
     assert not captain_stray, "待 Captain 节混入非 ⏸ 条目行"
+    # S4（2.2.19 B）：看板只输出 Backlog 计数、不再输出明细行，分流断言直接对
+    # portfolio 解析结果——①C 前缀行与任意前缀 ⏸ 行不进 agent 待办（看板计数须与
+    # 解析一致）；②它们必须进待 Captain 汇总；③渲染条目仍是标准 `- [ ] ⏸` 语法。
+    rows = _tables(portfolio.sections.get("Backlog", []))
+    todo_rows = [r for r in rows
+                 if len(r) >= 5 and not r[0].startswith(cap) and not _row_has_pause(r)]
+    blocks = cfg["backlog"].get("captainBlocks") or {}
+    count = re.search(r"- agent 待办 (\d+) 条（待 .+? 阻塞 (\d+) 条）", backlog)
+    if todo_rows:
+        assert count, "看板 Backlog 计数行缺失"
+        assert int(count.group(1)) == len(todo_rows), \
+            "Backlog 计数与 portfolio 解析不一致（C/⏸ 行混入 agent 待办）"
+        assert int(count.group(2)) == sum(1 for r in todo_rows if r[0] in blocks), \
+            "Backlog 阻塞计数与解析不一致"
+    else:
+        assert count is None, "agent 待办为空时看板不应输出计数行"
+    captain_all = "\n".join(_captain_lines(plans, portfolio, cap, {}))
+    for row in rows:
+        if len(row) >= 5 and (row[0].startswith(cap) or _row_has_pause(row)):
+            assert row[0] in captain_all, f"{row[0]} 未进待 Captain 汇总（C 前缀/⏸ 分流）"
     print(f"selftest ok: {len(plans)} plans, {sum(p.total for p in plans)} phases")
 
 
@@ -1597,8 +1891,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--handover",
         action="store_true",
-        help="打印 ≤40 行交接摘要（Goal/Next Step/活跃流/待 Captain/最近 3 条 progress 与完成/"
-             "证据入口/看板新鲜）；只读 .planning，不写文件，progress 只读尾部",
+        help="打印 ≤49 行、≤32KB 交接摘要（Goal ≤2 行/Next Step/活跃流一行/待 Captain ≤3 条/"
+             "未处理通知/最近 3 条 progress 与完成/证据入口/看板新鲜；超限确定性截断标注）；"
+             "只读 .planning，不写文件，progress 只读尾部",
     )
     parser.add_argument(
         "--rotate",
