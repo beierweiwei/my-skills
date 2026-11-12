@@ -24,6 +24,16 @@
 - 审计：投递成功后把 `delivery` 写回本地回执副本（`herdr` / `inbox_fallback` /
   `sendmessage-delegate` 等）；收件方副本不含该字段。
 
+已读游标（T42）：
+- 游标文件：`<git-common-dir>/crew/inbox-read-cursor.json`，格式
+  `{"version": 1, "read": {"<receipt_id>": "<标记时间 ISO8601>"}}`；
+  flock 串行化 + tmp/rename 原子写（锁文件 `inbox-read-cursor.lock`）。
+- inbox 文件仍是唯一真源（R1）：游标只记读者已读到哪里，不改回执状态、不删回执文件。
+- `ls --unread` 只列未读；`ls --mark-read <receipt_id>...` 或 `ls --mark-read --all`
+  标记已读；游标按 crew-dir 持久化，换舵/新会话/新进程读同一游标。
+- fail-safe：游标损坏/不可读 → `--unread` 按全量未读处理并告警；游标不可写 →
+  标记失败退出码 1，`--unread` 退化为全量并告警。
+
 推送失败不回滚回执。退出码：0 成功；1 参数/注册表/回执错误；3 回执成立但投递失败。
 
 示例：
@@ -32,6 +42,9 @@
       --changed-file scripts/foo.py --evidence "python3 -m unittest ..." \\
       --work-slot "builder·T-1" --to helm
   python3 scripts/crew-msg.py ls --status blocked
+  python3 scripts/crew-msg.py ls --unread
+  python3 scripts/crew-msg.py ls --mark-read <receipt-id> [<receipt-id> ...]
+  python3 scripts/crew-msg.py ls --mark-read --all
   python3 scripts/crew-msg.py read <receipt-id>
   python3 scripts/crew-msg.py push <receipt-id> --to helm
 
@@ -50,6 +63,7 @@ registry.json 结构：
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -72,6 +86,9 @@ VIA_MODES = ("auto", "herdr", "sendmessage")
 QODER_APPROVAL_WARNING = "需接收方人工确认（Qoder 跨会话审批），inbox 为真源"
 HERDR_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 STATUSES = ("done", "blocked", "captain")
+CURSOR_FILENAME = "inbox-read-cursor.json"
+CURSOR_LOCK_FILENAME = "inbox-read-cursor.lock"
+CURSOR_VERSION = 1
 RECEIPT_FIELDS = (
     "receipt_id",
     "from",
@@ -241,6 +258,79 @@ def list_receipts(crew_dir: Path, status: str | None = None) -> list[dict]:
         receipts.append(data)
     receipts.sort(key=lambda item: (str(item.get("ts", "")), str(item.get("receipt_id", ""))))
     return receipts
+
+
+def read_cursor_path(crew_dir: Path) -> Path:
+    return Path(crew_dir) / CURSOR_FILENAME
+
+
+def load_read_cursor(crew_dir: Path) -> tuple[set[str], str | None]:
+    """已读游标 → 已读 receipt_id 集合；缺失/损坏/不可读一律 fail-safe。
+
+    返回 (read_ids, warning)。游标只是读取便利、不是真源：损坏或不可读时按
+    「全量未读」处理并返回诊断（宁可重复列，不误漏读），不崩、不阻塞 ls。
+    """
+    path = read_cursor_path(crew_dir)
+    if not path.exists():
+        if Path(crew_dir).is_dir() and not os.access(crew_dir, os.W_OK):
+            return set(), (
+                f"已读游标目录不可写（{crew_dir}）：--unread 退化为全量列出，"
+                "可能重复显示已读回执；修复权限后可重新标记"
+            )
+        return set(), None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return set(), f"已读游标损坏或不可读（{path}）：{exc}；--unread 按全量未读处理"
+    read = data.get("read") if isinstance(data, dict) else None
+    if not isinstance(read, dict):
+        return set(), f"已读游标格式非法（{path}）：缺 read 对象；--unread 按全量未读处理"
+    return {str(key) for key in read}, None
+
+
+def mark_receipts_read(crew_dir: Path, receipt_ids: list[str]) -> dict:
+    """把 receipt_id 标记为已读；只写游标，不改回执文件与状态（R1 文件仍为真源）。
+
+    显式 id 中有不存在的回执时整体拒绝、不标任何一条。游标损坏时按空游标重建并在
+    返回值 warning 中说明。flock 串行化读改写，tmp+rename 原子替换（P2/P3）。
+    """
+    crew = Path(crew_dir)
+    ids = list(dict.fromkeys(receipt_ids))
+    for receipt_id in ids:
+        validate_receipt_id(receipt_id)
+    missing = [rid for rid in ids if not (inbox_dir(crew) / f"{rid}.json").exists()]
+    if missing:
+        raise CrewMsgError("回执不存在，未标记任何回执: " + ", ".join(missing))
+    cursor = read_cursor_path(crew)
+    result: dict = {"marked": [], "already_read": [], "cursor": str(cursor), "warning": None}
+    if not ids:
+        return result
+    crew.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(crew / CURSOR_LOCK_FILENAME, "a+", encoding="utf-8") as handle:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                current, warning = load_read_cursor(crew)
+                result["warning"] = warning
+                result["marked"] = [rid for rid in ids if rid not in current]
+                result["already_read"] = [rid for rid in ids if rid in current]
+                if result["marked"]:
+                    now = utc_now()
+                    current.update(result["marked"])
+                    atomic_write_json(
+                        cursor,
+                        {
+                            "version": CURSOR_VERSION,
+                            "read": {rid: now for rid in sorted(current)},
+                        },
+                    )
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError as exc:
+        raise CrewMsgError(
+            f"已读游标不可写（{cursor}）：{exc}；本次未标记任何回执"
+        ) from exc
+    return result
 
 
 def _route_error(path: Path, errors: list[str]) -> RegistryError:
@@ -932,12 +1022,57 @@ def _cmd_write(args, crew_dir: Path) -> int:
 
 
 def _cmd_ls(args, crew_dir: Path) -> int:
+    warnings: list[str] = []
+    mark_result = None
+    if args.mark_read:
+        if args.all and args.receipt_ids:
+            raise CrewMsgError("--mark-read 的 --all 与显式 receipt_id 不能同时使用")
+        if args.all:
+            ids = [
+                item["receipt_id"]
+                for item in list_receipts(crew_dir, status=args.status)
+            ]
+        elif args.receipt_ids:
+            ids = list(args.receipt_ids)
+        else:
+            raise CrewMsgError(
+                "ls --mark-read 需要 receipt_id 或 --all"
+                "（例：ls --mark-read r-1 / ls --mark-read --all）"
+            )
+        mark_result = mark_receipts_read(crew_dir, ids)
+        if mark_result["warning"]:
+            warnings.append(mark_result["warning"])
+    elif args.receipt_ids or args.all:
+        raise CrewMsgError("receipt_id / --all 只配合 --mark-read 使用（例：ls --mark-read r-1）")
+
     receipts = list_receipts(crew_dir, status=args.status)
+    if args.unread:
+        read_ids, cursor_warning = load_read_cursor(crew_dir)
+        if cursor_warning and cursor_warning not in warnings:
+            warnings.append(cursor_warning)
+        receipts = [item for item in receipts if item.get("receipt_id") not in read_ids]
+    for warning in warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+
     if args.json:
-        print(json.dumps(receipts, ensure_ascii=False, indent=2))
+        if mark_result is not None:
+            payload = dict(mark_result)
+            payload["receipts"] = receipts
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(json.dumps(receipts, ensure_ascii=False, indent=2))
         return EXIT_OK
+    if mark_result is not None:
+        line = f"已读游标：标记 {len(mark_result['marked'])} 条"
+        if mark_result["marked"]:
+            line += f"（{', '.join(mark_result['marked'])}）"
+        line += (
+            f"，此前已读 {len(mark_result['already_read'])} 条；"
+            f"游标 {mark_result['cursor']}"
+        )
+        print(line)
     if not receipts:
-        print("(无回执)")
+        print("(无未读回执)" if args.unread else "(无回执)")
         return EXIT_OK
     for receipt in receipts:
         if "error" in receipt:
@@ -1010,6 +1145,12 @@ status=captain 表示 ⏸ 待 Captain。回执先原子落盘，推送失败不�
 - 审计：投递通道写回本地回执副本 delivery（herdr / inbox_fallback /
   sendmessage-delegate 等）。
 
+已读游标：`<git-common-dir>/crew/inbox-read-cursor.json`
+（`{"version": 1, "read": {"<receipt_id>": "<标记时间>"}}`，flock + tmp/rename 原子写）。
+`ls --unread` 只列未读；`ls --mark-read <receipt_id>...` / `ls --mark-read --all` 标记已读；
+游标只记读取进度，不改回执状态、不删回执文件（inbox 文件仍是真源 R1）。
+游标损坏/不可读 → `--unread` 按全量未读告警处理；游标不可写 → 标记失败 rc=1。
+
 注册表 .git/crew/registry.json 只存 Herdr 不知道的路由，默认不创建；非法路由明确报错。
 退出码：0 成功；1 参数/注册表/回执错误；3 回执成立但投递失败。
 """
@@ -1060,8 +1201,27 @@ status=captain 表示 ⏸ 待 Captain。回执先原子落盘，推送失败不�
     )
     write.add_argument("--timeout", type=float, default=10.0, help="HTTP/herdr 推送超时秒数")
 
-    ls = subparsers.add_parser("ls", parents=[common], help="列回执")
+    ls = subparsers.add_parser(
+        "ls", parents=[common], help="列回执；--unread 只看未读，--mark-read 标记已读"
+    )
     ls.add_argument("--status", choices=STATUSES, help="按状态过滤")
+    ls.add_argument("--unread", action="store_true", help="只列未读回执（按已读游标）")
+    ls.add_argument(
+        "--mark-read",
+        action="store_true",
+        help="把 receipt_id（位置参数）或 --all 标记为已读；只写游标，不改回执",
+    )
+    ls.add_argument(
+        "--all",
+        action="store_true",
+        help="配合 --mark-read：标记 --status 范围内全部回执",
+    )
+    ls.add_argument(
+        "receipt_ids",
+        nargs="*",
+        metavar="RECEIPT_ID",
+        help="配合 --mark-read 的回执 id（可多个）",
+    )
 
     read = subparsers.add_parser("read", parents=[common], help="读取单条回执（JSON）")
     read.add_argument("receipt_id")

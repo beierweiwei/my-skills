@@ -6,7 +6,14 @@
     python3 scripts/plan-status.py --write    # 同时写入看板文件（默认 docs/进度追踪.md，可配置）
     python3 scripts/plan-status.py --check-fresh
                                               # 校验看板是否落后于 plan/配置（过期列明来源并非零退出）
-    python3 scripts/plan-status.py --lint     # create-time lint（Phase 标题/单 Status/Next Step/裸编号）
+    python3 scripts/plan-status.py --lint [--strict]
+                                              # create-time lint（Phase 标题/单 Status/Next Step/裸编号；
+                                              # 另附内容卫生提醒：Next Step 超长/含 ✅ 或 [x]、
+                                              # 🟡 无 owner、样板占位残留；默认只提醒 rc=0，
+                                              # --strict 才把卫生提醒升为失败）
+    python3 scripts/plan-status.py --brief    # 一屏摘要（≤40 行）：活跃流表（流/阶段/完成数+健康/
+                                              # 下一步/待 Captain）+ 待 Captain 摘要 + 今日变化
+                                              # （progress 今日条目 ≤3 行）；只读不写
     python3 scripts/plan-status.py --playbooks <path>
                                               # 剧本库结构校验：path 为文件或目录（目录取 *.md、
                                               # 跳过 README.md）；每剧本 ≥1 个 ### Phase N:，
@@ -139,6 +146,19 @@ DEFAULT_CONFIG: dict = {
 
 # 流表只留概览列（S8-b1：Markdown 表格单元格不换行、不塞多条 todo）；细节按流分节渲染。
 STREAM_TABLE_HEADER = "| 流 | 当前阶段 | 阶段完成 | 健康 |"
+
+# —— --brief 一屏摘要（2.2.16 T44）：活跃流表 + 待 Captain 摘要 + 今日变化 ——
+# 行数上限 40（流/待 Captain/今日变化各自截断并注溢出），单元格截断阈值见常量；
+# 只读 .planning，不写文件；看板新鲜度与 lint 提醒各占一行。
+BRIEF_MAX_LINES = 40
+BRIEF_MAX_STREAMS = 8
+BRIEF_MAX_CAPTAIN = 3
+BRIEF_MAX_TODAY = 3
+BRIEF_TODAY_SCAN = 20  # 今日变化最多回看的 progress 条目数（顶部最新）
+BRIEF_NEXT_STEP_CELL_MAX = 60  # 表内「下一步」单元格字符上限
+BRIEF_CAPTAIN_CELL_MAX = 120   # 待 Captain 摘要单行字符上限
+BRIEF_TODAY_CELL_MAX = 120     # 今日变化单行字符上限
+BRIEF_TABLE_HEADER = "| 流 | 阶段 | 完成数/健康 | 下一步 | 待 Captain |"
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -721,6 +741,105 @@ def handover(root: Path, cfg: dict, plans: list[Plan]) -> int:
     return 0
 
 
+def _clip(text: str, limit: int) -> str:
+    """压成单行并按字符截断（超限加 …）。"""
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _stream_captain_count(plan: Plan) -> int:
+    """该流自身待 Captain 条目数：Backlog 含 ⏸ 行 + 业务链状态列 ⏸ 节点。"""
+    count = sum(1 for row in _tables(plan.sections.get("Backlog", []))
+                if len(row) >= 2 and _row_has_pause(row))
+    return count + sum(1 for _, mark, _ in plan.chain if mark == "captain")
+
+
+def _today_changes(root: Path, cfg: dict, today: str) -> list[str]:
+    """今日变化：progress 顶部带今日日期的条目（≤BRIEF_MAX_TODAY 条 + 溢出注）；
+    无今日条目时给出最近日期或缺失提示，保证该节恒有可读输出。"""
+    entries = _recent_progress(_progress_path(root, cfg), count=BRIEF_TODAY_SCAN)
+    dated = [entry for entry in entries if PROGRESS_ENTRY_RE.match(entry)]
+    today_entries = [entry for entry in dated if entry.startswith(f"- {today}")]
+    if not today_entries:
+        if not dated:
+            return [entries[0] if entries and entries[0].startswith("无")
+                    else "无（progress 无日期条目）"]
+        return [f"无（今日无 progress 记录；最近：{dated[0][2:12]}）"]
+    lines = [f"- {_clip(entry[2:], BRIEF_TODAY_CELL_MAX)}"
+             for entry in today_entries[:BRIEF_MAX_TODAY]]
+    hidden = len(today_entries) - BRIEF_MAX_TODAY
+    if hidden > 0:
+        lines.append(f"- …另有 {hidden} 条（见 progress）")
+    return lines
+
+
+def brief(root: Path, cfg: dict, plans: list[Plan]) -> int:
+    """一屏摘要（≤BRIEF_MAX_LINES 行）：活跃流表（流/阶段/完成数+健康/下一步/待 Captain
+    计数）+ 待 Captain 摘要（portfolio C 前缀与 ⏸ 项 + 各流 Backlog/业务链 ⏸）+ 今日变化
+    （progress 今日条目 ≤3 行）；末尾附卫生 lint 提醒计数。只读 .planning，不写文件。"""
+    pattern = cfg["portfolioMatch"]
+    portfolio = next((p for p in plans if fnmatch.fnmatch(p.path.parent.name, pattern)), None)
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    out = [f"# 进度速览（{now.strftime('%Y-%m-%d %H:%M')}） · 看板"
+           f"{_fresh_state(root, cfg, plans)}", ""]
+
+    if portfolio is None:
+        out += [f"> 未找到 portfolio plan（`.planning/{pattern}/task_plan.md`）；"
+                "仅显示今日变化。", ""]
+        streams: list[tuple[str, Plan]] = []
+        captain: list[str] = []
+    else:
+        index = {p.rel: p for p in plans}
+        name_by_rel: dict[str, str] = {}
+        streams = []
+        for name, lines in _iter_streams(portfolio):
+            ref = next((PLAN_REF_RE.match(l).group(1) for l in lines if PLAN_REF_RE.match(l)), "")
+            target = index.get(ref.split("#")[0])
+            if target is None:
+                continue
+            name_by_rel[target.rel] = name
+            if target.complete < target.total:
+                streams.append((name, target))
+        name_by_rel.setdefault(portfolio.rel, "portfolio")  # portfolio 自身条目标注简名
+        captain = _captain_lines(plans, portfolio, cfg["backlog"]["captainPrefix"], name_by_rel)
+        out += [BRIEF_TABLE_HEADER, "|---|---|---|---|---|"]
+        for name, target in streams[:BRIEF_MAX_STREAMS]:
+            next_step = (_next_step_lines(target) or ["—"])[0]
+            out.append(
+                f"| {cell(name)} | {cell(current_phase(target))} "
+                f"| {target.complete}/{target.total} {target.health} "
+                f"| {cell(_clip(_todo_body(next_step), BRIEF_NEXT_STEP_CELL_MAX))} "
+                f"| {_stream_captain_count(target)} |"
+            )
+        if len(streams) > BRIEF_MAX_STREAMS:
+            out.append(f"- …另有 {len(streams) - BRIEF_MAX_STREAMS} 个活跃流"
+                       "（见看板流表 / --handover）")
+        elif not streams:
+            out.append("无活跃流（portfolio Phases 全部完成或未引用 plan）。")
+        out += ["", f"## 待 Captain（{len(captain)} 条）"]
+        if captain:
+            out += [_clip(line, BRIEF_CAPTAIN_CELL_MAX)
+                    for line in captain[:BRIEF_MAX_CAPTAIN]]
+            hidden = len(captain) - BRIEF_MAX_CAPTAIN
+            if hidden > 0:
+                out.append(f"- …另有 {hidden} 条（见看板 / --handover）")
+        else:
+            out.append("无")
+        out.append("")
+
+    out.append(f"## 今日变化（{today}）")
+    out += _today_changes(root, cfg, today)
+    hygiene = hygiene_issues(plans)
+    if hygiene:
+        out += ["",
+                f"> lint 提醒 {len(hygiene)} 条"
+                "（`python3 scripts/plan-status.py --lint` 查看，不阻断）。"]
+    assert len(out) <= BRIEF_MAX_LINES, f"一屏摘要超行数上限：{len(out)}"
+    sys.stdout.write("\n".join(out) + "\n")
+    return 0
+
+
 def _atomic_write(path: Path, text: str, mode: int | None = None) -> None:
     """同目录临时文件 + fsync + os.replace 原子替换；失败清理临时文件后原样抛出。
     mode 缺省沿用目标现有权限（新建归档由调用方显式传源 progress 的 mode）。"""
@@ -1062,15 +1181,144 @@ def lint_plans(plans: list[Plan]) -> list[LintIssue]:
     return issues
 
 
-def run_lint(plans: list[Plan]) -> int:
+def run_lint(plans: list[Plan], strict: bool = False) -> int:
+    """结构 lint（rc=1）+ 内容卫生提醒（默认 rc=0，--strict 才 rc=1）。"""
     issues = lint_plans(plans)
+    hygiene = hygiene_issues(plans)
+    for issue in issues:
+        print(issue.format(), file=sys.stderr)
+    for issue in hygiene:
+        print(f"[提醒] {issue.format()}", file=sys.stderr)
     if issues:
-        for issue in issues:
-            print(issue.format(), file=sys.stderr)
         print(f"lint 失败：{len(issues)} 处问题（{len(plans)} 个 plan）。", file=sys.stderr)
         return 1
-    print(f"lint ok：{len(plans)} 个 plan 无结构问题。")
+    if strict and hygiene:
+        print(f"lint 严格模式失败：{len(hygiene)} 处卫生提醒（默认仅提醒，不阻断）。",
+              file=sys.stderr)
+        return 1
+    suffix = (f"（另有 {len(hygiene)} 条卫生提醒，不阻断；--strict 可升为失败）"
+              if hygiene else "")
+    print(f"lint ok：{len(plans)} 个 plan 无结构问题{suffix}。")
     return 0
+
+
+# —— 内容卫生 lint（2.2.16 T44）：--lint 附带提醒，不改默认退出码；--lint --strict 才阻断 ——
+# 规则（命中按 文件:行号: [规则] 建议 输出）：
+#   ① NextStep 超长：未完成流（含无 Phase 的骨架）Next Step 单行 > HYGIENE_NEXT_STEP_MAX
+#      字符。
+#   ② NextStep 完成标记：Next Step 行含 ✅ / [x] / [X]（完成项应迁入「最近完成」）。
+#   ③ 🟡 无 owner：未完成 Phase（pending/in_progress）含 `- [ ]` 项，整段无 `- owner:` 行。
+#   ④ 样板残留：Phase 标题 / Phase 项 / Next Step 以「示例|样例|占位|待填|TODO|TBD」开头，
+#      或整体为 `<...>` 占位（≤40 字符），且未标 ⏸。
+# 完成流（有 Phase 且全部 complete）整体豁免：收口型 Next Step 与历史残留不再提醒（防误报）。
+# HTML 注释与 ``` fenced code 整段跳过；结构错误仍 rc=1（既有契约不变）。
+HYGIENE_NEXT_STEP_MAX = 200
+PLACEHOLDER_RE = re.compile(
+    r"^(?:示例|样例|占位|待填|TODO(?:\s|[:：]|$)|TBD(?:\s|[:：]|$)|<[^>]{1,40}>$)")
+PHASE_ANY_RE = re.compile(r"^###\s+[Pp]hase")
+OWNER_LINE_RE = re.compile(r"^-\s*owner:\s*\S")
+CHECKBOX_RE = re.compile(r"^-\s*\[( |x|X|⏸)\]\s*(.*)$")
+
+
+def _hygiene_file(path: Path, root: Path) -> list[LintIssue]:
+    rel = path.relative_to(root).as_posix()
+    issues: list[LintIssue] = []
+
+    def add(line_no: int, rule: str, message: str) -> None:
+        issues.append(LintIssue(rel, line_no, rule, message))
+
+    section = None
+    phase: dict | None = None
+    in_comment = in_fence = False
+
+    def close_phase() -> None:
+        nonlocal phase
+        if phase is None:
+            return
+        if (phase["status"] in ("pending", "in_progress")
+                and phase["items"] and not phase["owner"]):
+            add(phase["line"], "🟡 无 owner",
+                f"未完成阶段「{phase['name']}」有未勾选项但缺少 `- owner:` 行；"
+                "补 owner 或标 ⏸（待 Captain）")
+        phase = None
+
+    for line_no, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        stripped = raw.strip()
+        if in_fence:
+            if stripped.startswith("```"):
+                in_fence = False
+            continue
+        if stripped.startswith("```"):
+            in_fence = True
+            continue
+        if in_comment:
+            if "-->" in stripped:
+                in_comment = False
+            continue
+        if stripped.startswith("<!--"):
+            if "-->" not in stripped:
+                in_comment = True
+            continue
+        if stripped.startswith("## "):
+            close_phase()
+            section = stripped[3:].strip()
+            continue
+        if PHASE_ANY_RE.match(stripped):
+            close_phase()
+            head = PHASE_RE.match(stripped)
+            if head:
+                phase = {"name": head.group(1), "line": line_no, "status": None,
+                         "owner": False, "items": False}
+                if PLACEHOLDER_RE.match(head.group(1)):
+                    add(line_no, "样板残留",
+                        f"阶段标题疑似样板占位「{_clip(head.group(1), 30)}」；删除或改真实阶段名")
+            continue
+        if not stripped:
+            continue
+        if section == "Next Step":
+            body = _todo_body(stripped)
+            if "✅" in stripped or re.search(r"\[[xX]\]", stripped):
+                add(line_no, "NextStep 完成标记",
+                    "Next Step 混入完成标记（✅/[x]）；完成项迁入「最近完成」，"
+                    "Next Step 只留未做动作")
+            if len(body) > HYGIENE_NEXT_STEP_MAX:
+                add(line_no, "NextStep 超长",
+                    f"Next Step 单行 {len(body)} 字符（阈值 {HYGIENE_NEXT_STEP_MAX}）；"
+                    "压成一行可执行动作")
+            if PLACEHOLDER_RE.match(body):
+                add(line_no, "样板残留",
+                    f"Next Step 疑似样板占位「{_clip(body, 30)}」；未标 ⏸ 或应替换为真实动作")
+            continue
+        if phase is None:
+            continue
+        status = STATUS_RE.search(stripped)
+        if status:
+            phase["status"] = status.group(1)
+            continue
+        if OWNER_LINE_RE.match(stripped):
+            phase["owner"] = True
+            continue
+        box = CHECKBOX_RE.match(stripped)
+        if box:
+            if box.group(1) == " ":
+                phase["items"] = True
+            body = box.group(2).strip()
+            if PLACEHOLDER_RE.match(body):
+                add(line_no, "样板残留",
+                    f"Phase 项疑似样板占位「{_clip(body, 30)}」；删除或改 "
+                    "`- [ ] ⏸ …（待 Captain）`")
+    close_phase()
+    return issues
+
+
+def hygiene_issues(plans: list[Plan]) -> list[LintIssue]:
+    """各 plan 的内容卫生提醒（不阻断）；完成流整体豁免（含收口型 Next Step）。"""
+    issues: list[LintIssue] = []
+    for plan in plans:
+        if plan.phases and plan.complete >= plan.total:
+            continue
+        issues.extend(_hygiene_file(plan.path, plan.root))
+    return issues
 
 
 def _section(plan: Plan, name: str) -> str:
@@ -1299,7 +1547,19 @@ def main(argv: list[str] | None = None) -> int:
         "--lint",
         action="store_true",
         help="create-time lint：Phase 标题格式/单 Status 行/Next Step ≤10/Phase 项格式/裸编号"
-             "（失败按 文件:行号 列出并非零退出）",
+             "（结构错误按 文件:行号 列出并非零退出）；另附内容卫生提醒（Next Step 超长/含 ✅ 或"
+             " [x]、🟡 无 owner、样板残留），默认只提醒 rc=0，--strict 才升为失败",
+    )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="与 --lint 连用：把内容卫生提醒升为失败（rc=1；结构 lint 契约不变）",
+    )
+    parser.add_argument(
+        "--brief",
+        action="store_true",
+        help=f"一屏摘要（≤{BRIEF_MAX_LINES} 行）：活跃流表（流/阶段/完成数+健康/下一步/待 Captain）"
+             "+ 待 Captain 摘要 + 今日变化（progress 今日条目 ≤3 行）；只读 .planning，不写文件",
     )
     parser.add_argument(
         "--playbooks",
@@ -1344,6 +1604,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.apply and not args.rotate:
         print("--apply 只能与 --rotate 一起使用（progress 轮转落盘）。", file=sys.stderr)
         return 1
+    if args.strict and not args.lint:
+        print("--strict 只能与 --lint 一起使用（把内容卫生提醒升为失败）。", file=sys.stderr)
+        return 1
     root = resolve_root(args.root)
     if args.playbooks:
         target = Path(args.playbooks).expanduser()
@@ -1357,11 +1620,13 @@ def main(argv: list[str] | None = None) -> int:
     plans = load_plans(root)
     if args.handover:
         return handover(root, cfg, plans)
+    if args.brief:
+        return brief(root, cfg, plans)
     if args.selftest:
         selftest(plans, cfg)
         return 0
     if args.lint:
-        return run_lint(plans)
+        return run_lint(plans, strict=args.strict)
     if args.check_fresh:
         return check_fresh(root, cfg, plans)
 

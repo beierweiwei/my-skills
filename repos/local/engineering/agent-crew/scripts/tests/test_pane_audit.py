@@ -37,10 +37,13 @@ def tab(tab_id: str, label: str, workspace: str | None = None) -> dict:
     return item
 
 
-def pane(pane_id: str, tab_id: str, status: str | None = None) -> dict:
+def pane(pane_id: str, tab_id: str, status: str | None = None,
+         agent_name: str | None = None) -> dict:
     item = {"pane_id": pane_id, "tab_id": tab_id}
     if status:
         item["agent_status"] = status
+    if agent_name:
+        item["agent"] = agent_name
     return item
 
 
@@ -433,7 +436,8 @@ class _MainTest(unittest.TestCase):
         self.tmp = Path(self._tmp.name)
 
     def _run(self, data: dict, extra: list[str] | None = None,
-             close_tab_ok: bool = True) -> tuple[int, str, str, dict]:
+             close_tab_ok: bool = True,
+             empty_panes: set[str] | None = None) -> tuple[int, str, str, dict]:
         path = self.tmp / "snapshot.json"
         path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         recorded = {"panes": [], "tabs": []}
@@ -446,9 +450,14 @@ class _MainTest(unittest.TestCase):
             recorded["tabs"].append(tab_id)
             return close_tab_ok
 
+        def fake_probe(pane_id: str) -> bool | None:
+            # 未声明的 pane 一律「无法判定」，保持既有用例的只报告口径
+            return pane_id in empty_panes if empty_panes is not None else None
+
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(pa, "close_pane", fake_close_pane), \
-                mock.patch.object(pa, "close_tab", fake_close_tab):
+                mock.patch.object(pa, "close_tab", fake_close_tab), \
+                mock.patch.object(pa, "probe_empty_pane", fake_probe):
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 rc = pa.main(["--snapshot", str(path)] + (extra or []))
         return rc, out.getvalue(), err.getvalue(), recorded
@@ -604,7 +613,8 @@ class BlockedOverdueMainTest(unittest.TestCase):
 
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(pa, "close_pane", fake_close_pane), \
-                mock.patch.object(pa, "close_tab", fake_close_tab):
+                mock.patch.object(pa, "close_tab", fake_close_tab), \
+                mock.patch.object(pa, "probe_empty_pane", lambda pane_id: None):
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 rc = pa.main(["--snapshot", str(path)] + (extra or []))
         return rc, out.getvalue(), err.getvalue(), recorded
@@ -678,6 +688,580 @@ class CliTest(unittest.TestCase):
         for token in ("--snapshot", "--apply", "--whitelist-prefix", "--helm-pane",
                       "--blocked-grace", "--crew-dir", "blocked", "R6",
                       "白名单", "working", "dry-run", "≤6", "总舵"):
+            self.assertIn(token, text)
+
+
+class T45EmptyPaneTest(unittest.TestCase):
+    """T45①③：多余空 pane 自动关（含总舵 tab / FB-038）；working 永不关；白名单跳过。"""
+
+    def test_crew_tab_empty_pane_is_actionable(self):
+        data = snapshot(
+            [tab("t1", "需求·任务")],
+            [pane("p1", "t1"), pane("p2", "t1")],
+            [agent("a1", "p1", tab_id="t1")],
+        )
+        findings = pa.audit(data, empty_probe=lambda pane_id: pane_id == "p2")
+        self.assertIn(("empty-pane", "p2"), kinds(findings))
+        finding = next(f for f in findings if f.kind == "empty-pane")
+        self.assertEqual("pane", finding.action)
+        self.assertIn("空闲 shell", finding.detail)
+        self.assertNotIn(("orphan-pane", "p2"), kinds(findings))
+
+    def test_working_pane_never_closed(self):
+        data = snapshot(
+            [tab("t1", "需求·任务")],
+            [pane("p1", "t1"), pane("p2", "t1", status="working")],
+            [agent("a1", "p1", tab_id="t1")],
+        )
+        findings = pa.audit(data, empty_probe=lambda _pane_id: True)
+        self.assertEqual([], [f for f in findings if f.action])
+        self.assertIn(("orphan-pane", "p2"), kinds(findings))
+
+    def test_tab_without_registry_agent_report_only(self):
+        # 纯人工 tab（无 registry 工位）：不接管，只报告
+        data = snapshot([tab("t1", "普通")], [pane("p1", "t1")], [])
+        findings = pa.audit(data, empty_probe=lambda _pane_id: True)
+        self.assertIn(("orphan-pane", "p1"), kinds(findings))
+        self.assertIsNone(findings[0].action)
+
+    def test_whitelisted_tab_empty_pane_skipped(self):
+        for label in ("Captain·甲", "流程优化·乙"):
+            with self.subTest(label=label):
+                data = snapshot([tab("t1", label)], [pane("p1", "t1")], [])
+                self.assertEqual([], pa.audit(data, empty_probe=lambda _p: True))
+
+    def test_helm_tab_extra_empty_pane_actionable_fb038(self):
+        # FB-038：交接后总舵 tab 2 pane（继任总舵 + 空 shell）
+        data = snapshot(
+            [tab("t3", "总舵")],
+            [pane("p1", "t3", status="idle"), pane("p2", "t3")],
+            [agent("helm-1", "p1", tab_id="t3", status="idle")],
+        )
+        findings = pa.audit(data, empty_probe=lambda pane_id: pane_id == "p2")
+        self.assertIn(("empty-pane", "p2"), kinds(findings))
+        self.assertIn(("helm-tab-multi-pane", "t3"), kinds(findings))
+        empty = next(f for f in findings if f.kind == "empty-pane")
+        self.assertEqual("pane", empty.action)
+        multi = next(f for f in findings if f.kind == "helm-tab-multi-pane")
+        self.assertIsNone(multi.action)  # 多 pane 报告口径保持
+
+    def test_helm_tab_without_identifiable_helm_pane_report_only(self):
+        data = snapshot(
+            [tab("t3", "总舵")],
+            [pane("p1", "t3"), pane("p2", "t3")],
+            [],
+        )
+        findings = pa.audit(data, empty_probe=lambda _pane_id: True)
+        self.assertEqual([], [f for f in findings if f.action])
+        self.assertIn(("helm-tab-multi-pane", "t3"), kinds(findings))
+
+    def test_helm_pane_option_never_closed(self):
+        data = snapshot(
+            [tab("t3", "总舵")],
+            [pane("p1", "t3", status="idle"), pane("p2", "t3")],
+            [agent("helm-1", "p1", tab_id="t3", status="idle")],
+        )
+        findings = pa.audit(
+            data, helm_panes=frozenset({"p2"}), empty_probe=lambda _pane_id: True)
+        self.assertEqual([], [f for f in findings if f.action])
+
+    def test_probe_unknown_report_only(self):
+        data = snapshot(
+            [tab("t1", "需求·任务")],
+            [pane("p1", "t1"), pane("p2", "t1")],
+            [agent("a1", "p1", tab_id="t1")],
+        )
+        findings = pa.audit(data, empty_probe=lambda _pane_id: None)
+        self.assertIn(("orphan-pane", "p2"), kinds(findings))
+        self.assertEqual([], [f for f in findings if f.action])
+
+    def test_unnamed_runtime_tui_tab_report_only(self):
+        # 个人 tab：无名 runtime TUI（claude/qodercli）不算工位，空 pane 不自动关
+        data = snapshot(
+            [tab("t1", "个人")],
+            [pane("p1", "t1", agent_name="claude"), pane("p2", "t1")],
+            [{"name": None, "pane_id": "p1", "tab_id": "t1", "agent_status": "idle"}],
+        )
+        findings = pa.audit(data, empty_probe=lambda pane_id: pane_id == "p2")
+        self.assertEqual([], [f for f in findings if f.action])
+        self.assertIn(("orphan-pane", "p2"), kinds(findings))
+
+    def test_agent_tui_pane_not_treated_as_empty(self):
+        # pane 自带 agent 字段（未进 registry 的 TUI）→ 非空，不自动关
+        data = snapshot(
+            [tab("t1", "需求·任务")],
+            [pane("p1", "t1"), pane("p2", "t1", agent_name="claude")],
+            [agent("a1", "p1", tab_id="t1")],
+        )
+        findings = pa.audit(data, empty_probe=lambda _pane_id: True)
+        self.assertEqual([], [f for f in findings if f.action])
+
+
+def process_info(pgid: int | None, shell_pid: int | None,
+                 processes: list[dict]) -> dict:
+    """herdr `pane process-info` 真实结构包装（result.process_info）。"""
+    info: dict = {"foreground_processes": processes}
+    if pgid is not None:
+        info["foreground_process_group_id"] = pgid
+    if shell_pid is not None:
+        info["shell_pid"] = shell_pid
+    return {"result": {"process_info": info, "type": "pane_process_info"}}
+
+
+def proc(pid: int, name: str, *argv: str) -> dict:
+    return {"pid": pid, "name": name, "argv": list(argv),
+            "cmdline": " ".join((name, *argv))}
+
+
+class ProbeEmptyPaneRealStructureTest(unittest.TestCase):
+    """X-1/S-1/S-4：真实 process-info 结构驱动 probe_empty_pane（含跑脚本的 shell）。"""
+
+    def _probe(self, payload: dict) -> bool | None:
+        with mock.patch.object(pa, "herdr_json", lambda _args: payload):
+            return pa.probe_empty_pane("p1")
+
+    def test_idle_interactive_zsh_is_empty(self):
+        payload = process_info(100, 100, [proc(100, "zsh", "/usr/bin/zsh")])
+        self.assertIs(True, self._probe(payload))
+
+    def test_idle_bash_login_shell_is_empty(self):
+        payload = process_info(100, 100, [proc(100, "bash", "bash", "-l")])
+        self.assertIs(True, self._probe(payload))
+
+    def test_bash_running_script_is_not_empty(self):
+        payload = process_info(200, 100, [proc(200, "bash", "bash", "build.sh")])
+        self.assertIs(False, self._probe(payload))
+
+    def test_bash_wizard_waiting_read_is_not_empty(self):
+        payload = process_info(200, 100, [proc(200, "bash", "bash", "wizard.sh")])
+        self.assertIs(False, self._probe(payload))
+
+    def test_bash_command_string_is_not_empty(self):
+        payload = process_info(200, 100, [proc(200, "bash", "bash", "-lc", "make")])
+        self.assertIs(False, self._probe(payload))
+
+    def test_non_shell_foreground_is_not_empty(self):
+        payload = process_info(300, 100, [proc(300, "yazi", "yazi")])
+        self.assertIs(False, self._probe(payload))
+
+    def test_non_shell_group_leader_with_shell_in_chain_is_not_empty(self):
+        payload = process_info(
+            300, 100,
+            [proc(100, "sh", "sh", "-c", "vi notes.md"),
+             proc(300, "yazi", "yazi")],
+        )
+        self.assertIs(False, self._probe(payload))
+
+    def test_key_drift_returns_unknown(self):
+        payload = {"result": {"process_info": {"foreground_procs": []}}}
+        self.assertIsNone(self._probe(payload))
+
+    def test_missing_argv_returns_unknown(self):
+        payload = process_info(100, 100, [{"pid": 100, "name": "zsh"}])
+        self.assertIsNone(self._probe(payload))
+
+    def test_group_leader_absent_returns_unknown(self):
+        payload = process_info(999, 100, [proc(100, "zsh", "zsh")])
+        self.assertIsNone(self._probe(payload))
+
+
+class FlowStatusParsingTest(unittest.TestCase):
+    """X-2：Status 按 Phase 分段、非法值/缺失默认 pending、注释剥离。"""
+
+    def test_all_complete_flow_is_complete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_flow_plan(root, "flow-a", ["complete", "complete"])
+            self.assertEqual({"flow-a": True}, pa.load_flow_plans(root))
+
+    def test_invalid_status_done_makes_flow_incomplete_and_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_flow_plan(root, "flow-a", ["complete"] * 9 + ["done"])
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                flows = pa.load_flow_plans(root)
+            self.assertEqual({"flow-a": False}, flows)
+            self.assertIn("非法 Status", err.getvalue())
+            self.assertIn("done", err.getvalue())
+
+    def test_capitalized_status_or_missing_space_is_invalid(self):
+        for status in ("Complete", "complete"):
+            with self.subTest(status=status):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    write_flow_plan(root, "flow-a", ["complete"] * 9 + [status])
+                    if status == "complete":
+                        plan = root / ".planning/flow-a/task_plan.md"
+                        plan.write_text(
+                            plan.read_text(encoding="utf-8").replace(
+                                "**Status:** complete", "**Status:**complete"),
+                            encoding="utf-8")
+                    flows = pa.load_flow_plans(root)
+                    self.assertEqual({"flow-a": False}, flows)
+
+    def test_phase_without_status_defaults_pending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_flow_plan(root, "flow-a", ["complete", "complete"])
+            plan = root / ".planning/flow-a/task_plan.md"
+            plan.write_text(plan.read_text(encoding="utf-8").replace(
+                "**Status:** complete", "", 1), encoding="utf-8")
+            self.assertEqual({"flow-a": False}, pa.load_flow_plans(root))
+
+    def test_status_with_trailing_annotation_is_valid(self):
+        """真实 plan 的 `**Status:** complete（说明…）` 仍按 complete（与 guard 同口径）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_flow_plan(root, "flow-a", ["complete（收口说明）", "complete"])
+            self.assertEqual({"flow-a": True}, pa.load_flow_plans(root))
+
+    def test_status_in_html_comment_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_flow_plan(root, "flow-a", ["pending"])
+            plan = root / ".planning/flow-a/task_plan.md"
+            plan.write_text(
+                plan.read_text(encoding="utf-8")
+                + "<!--\n**Status:** complete\n-->\n",
+                encoding="utf-8")
+            self.assertEqual({"flow-a": False}, pa.load_flow_plans(root))
+
+    def test_status_outside_phase_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_flow_plan(root, "flow-a", ["complete"])
+            plan = root / ".planning/flow-a/task_plan.md"
+            plan.write_text(
+                plan.read_text(encoding="utf-8")
+                + "## Notes\n\n**Status:** done\n",
+                encoding="utf-8")
+            self.assertEqual({"flow-a": True}, pa.load_flow_plans(root))
+
+    def test_no_phase_plan_not_complete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = root / ".planning/flow-a/task_plan.md"
+            plan.parent.mkdir(parents=True)
+            plan.write_text("# Task Plan\n\n**Status:** complete\n", encoding="utf-8")
+            self.assertEqual({"flow-a": False}, pa.load_flow_plans(root))
+
+
+class FlowReclaimApplyGuardTest(unittest.TestCase):
+    """X-2 端到端：非法 Status 的活跃流不得被 --apply 关 tab。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+
+    def _run(self, project: Path, data: dict) -> tuple[int, str, str, list[str]]:
+        path = self.tmp / "snapshot.json"
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        closed: list[str] = []
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(pa, "close_tab", lambda tab_id: closed.append(tab_id) or True), \
+                mock.patch.object(pa, "close_pane", lambda _pane_id: True), \
+                mock.patch.object(pa, "probe_empty_pane", lambda _pane_id: None):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = pa.main(["--snapshot", str(path), "--apply", "--root", str(project)])
+        return rc, out.getvalue(), err.getvalue(), closed
+
+    def _fixture(self) -> dict:
+        return snapshot(
+            [tab("t1", "副舵·flow-a")],
+            [pane("p1", "t1")],
+            [agent("flow-a-builder", "p1", tab_id="t1", status="idle")],
+        )
+
+    def test_nine_complete_plus_done_not_closed(self):
+        project = self.tmp / "proj"
+        write_flow_plan(project, "flow-a", ["complete"] * 9 + ["done"])
+        rc, _out, err, closed = self._run(project, self._fixture())
+        self.assertEqual(0, rc, err)
+        self.assertEqual([], closed, "非法 Status 的流不得自动关 tab")
+        self.assertIn("非法 Status", err)
+
+    def test_all_complete_still_closed(self):
+        project = self.tmp / "proj"
+        write_flow_plan(project, "flow-a", ["complete", "complete"])
+        rc, out, err, closed = self._run(project, self._fixture())
+        self.assertEqual(0, rc, err)
+        self.assertEqual(["t1"], closed)
+        self.assertIn("已关闭 tab t1", out)
+
+
+class ApplyRealProcessFixtureTest(unittest.TestCase):
+    """X-1 负向断言：真实 process-info 结构下，跑脚本的 shell 不被 --apply 关闭。"""
+
+    def test_apply_does_not_close_shell_running_script(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "snapshot.json"
+            data = snapshot(
+                [tab("t1", "需求·任务")],
+                [pane("p1", "t1"), pane("p2", "t1")],
+                [agent("a1", "p1", tab_id="t1")],
+            )
+            path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            payload = process_info(
+                200, 100, [proc(200, "bash", "bash", "build.sh")])
+            closed: list[str] = []
+            out = io.StringIO()
+            with mock.patch.object(pa, "herdr_json", lambda _args: payload), \
+                    mock.patch.object(pa, "close_pane",
+                                      lambda pane_id: closed.append(pane_id) or True), \
+                    mock.patch.object(pa, "close_tab", lambda _tab_id: True):
+                with contextlib.redirect_stdout(out):
+                    rc = pa.main(["--snapshot", str(path), "--apply"])
+            self.assertEqual(0, rc)
+            self.assertEqual([], closed, "跑脚本的 shell pane 不得被 --apply 关闭")
+            self.assertNotIn("已关闭 pane p2", out.getvalue())
+            self.assertIn("前台进程非空闲 shell", out.getvalue())
+
+
+class ApplyReprobeTest(unittest.TestCase):
+    """S-2：pane 关闭前复检一次，复检不通过则跳过关闭。"""
+
+    def test_reprobe_mismatch_skips_close(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            path = tmp_path / "snapshot.json"
+            data = snapshot(
+                [tab("t1", "需求·任务")],
+                [pane("p1", "t1"), pane("p2", "t1")],
+                [agent("a1", "p1", tab_id="t1")],
+            )
+            path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            closed: list[str] = []
+            calls: list[str] = []
+
+            def flaky_probe(pane_id: str) -> bool | None:
+                if pane_id != "p2":
+                    return None
+                calls.append(pane_id)
+                return True if len(calls) == 1 else False
+
+            out = io.StringIO()
+            with mock.patch.object(pa, "probe_empty_pane", flaky_probe), \
+                    mock.patch.object(pa, "close_pane",
+                                      lambda pane_id: closed.append(pane_id) or True), \
+                    mock.patch.object(pa, "close_tab", lambda _tab_id: True):
+                with contextlib.redirect_stdout(out):
+                    rc = pa.main(["--snapshot", str(path), "--apply"])
+            self.assertEqual(0, rc)
+            self.assertEqual([], closed, "复检不通过不得关闭 pane")
+            self.assertEqual(2, len(calls), "audit 一次 + 关闭前复检一次")
+            self.assertIn("[跳过] pane p2", out.getvalue())
+
+
+def write_flow_plan(root: Path, flow: str, statuses: list[str]) -> Path:
+    lines = [f"# Task Plan: {flow}", ""]
+    for index, status in enumerate(statuses):
+        lines.extend([f"### Phase {index}", f"**Status:** {status}", ""])
+    path = root / ".planning" / flow / "task_plan.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+class T45FlowCompleteTest(unittest.TestCase):
+    """T45②：流 plan 全 complete 且 agent 全 idle/done → 提议/关闭 tab（纯函数）。"""
+
+    def _fixture(self, agent_statuses=("idle", "done"), focused: bool = False) -> dict:
+        t1 = tab("t1", "副舵·flow-a")
+        t1["focused"] = focused
+        return snapshot(
+            [t1],
+            [pane("p1", "t1"), pane("p2", "t1")],
+            [agent("flow-a-builder", "p1", tab_id="t1", status=agent_statuses[0]),
+             agent("flow-a-firstmate", "p2", tab_id="t1", status=agent_statuses[1])],
+        )
+
+    def test_complete_flow_tab_actionable(self):
+        findings = pa.audit(self._fixture(), flows={"flow-a": True})
+        self.assertIn(("flow-complete-tab", "t1"), kinds(findings))
+        finding = next(f for f in findings if f.kind == "flow-complete-tab")
+        self.assertEqual("tab", finding.action)
+
+    def test_incomplete_flow_not_flagged(self):
+        self.assertEqual(
+            [], pa.audit(self._fixture(), flows={"flow-a": False}))
+
+    def test_working_or_blocked_agent_blocks_reclaim(self):
+        for status in ("working", "blocked"):
+            with self.subTest(status=status):
+                data = self._fixture(agent_statuses=("idle", status))
+                self.assertEqual([], pa.audit(data, flows={"flow-a": True}))
+
+    def test_agent_without_matching_flow_not_flagged(self):
+        data = snapshot(
+            [tab("t1", "副舵·无计划")],
+            [pane("p1", "t1")],
+            [agent("unmatched-agent", "p1", tab_id="t1", status="idle")],
+        )
+        self.assertEqual([], pa.audit(data, flows={"flow-a": True}))
+
+    def test_mixed_complete_and_incomplete_flows_not_flagged(self):
+        data = snapshot(
+            [tab("t1", "副舵·混合")],
+            [pane("p1", "t1"), pane("p2", "t1")],
+            [agent("flow-a-builder", "p1", tab_id="t1", status="idle"),
+             agent("flow-b-builder", "p2", tab_id="t1", status="idle")],
+        )
+        findings = pa.audit(data, flows={"flow-a": True, "flow-b": False})
+        self.assertEqual([], [f for f in findings if f.kind == "flow-complete-tab"])
+
+    def test_focused_tab_report_only(self):
+        findings = pa.audit(self._fixture(focused=True), flows={"flow-a": True})
+        finding = next(f for f in findings if f.kind == "flow-complete-tab")
+        self.assertIsNone(finding.action)
+        self.assertIn("聚焦", finding.detail)
+
+    def test_non_empty_unknown_pane_blocks_reclaim(self):
+        data = self._fixture()
+        data["panes"].append(pane("p3", "t1", agent_name="claude"))
+        findings = pa.audit(
+            data, flows={"flow-a": True},
+            empty_probe=lambda pane_id: pane_id != "p3")
+        self.assertEqual([], [f for f in findings if f.kind == "flow-complete-tab"])
+
+    def test_whitelisted_and_helm_tabs_never_reclaimed(self):
+        for label in ("Captain·甲", "总舵"):
+            with self.subTest(label=label):
+                data = snapshot(
+                    [tab("t1", label)],
+                    [pane("p1", "t1")],
+                    [agent("flow-a-builder", "p1", tab_id="t1", status="idle")],
+                )
+                findings = pa.audit(data, flows={"flow-a": True})
+                self.assertEqual(
+                    [], [f for f in findings if f.kind == "flow-complete-tab"])
+
+
+class T45MainApplyTest(unittest.TestCase):
+    """T45 CLI：--apply 关闭明确空 pane / 完成流 tab；dry-run 只报告。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+
+    def _run(self, data: dict, extra: list[str] | None = None,
+             empty_panes: set[str] | None = None) -> tuple[int, str, str, dict]:
+        path = self.tmp / "snapshot.json"
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        recorded = {"panes": [], "tabs": []}
+
+        def fake_close_pane(pane_id: str) -> bool:
+            recorded["panes"].append(pane_id)
+            return True
+
+        def fake_close_tab(tab_id: str) -> bool:
+            recorded["tabs"].append(tab_id)
+            return True
+
+        def fake_probe(pane_id: str) -> bool | None:
+            return pane_id in empty_panes if empty_panes is not None else None
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(pa, "close_pane", fake_close_pane), \
+                mock.patch.object(pa, "close_tab", fake_close_tab), \
+                mock.patch.object(pa, "probe_empty_pane", fake_probe):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = pa.main(["--snapshot", str(path)] + (extra or []))
+        return rc, out.getvalue(), err.getvalue(), recorded
+
+    def _empty_pane_fixture(self) -> dict:
+        return snapshot(
+            [tab("t1", "需求·任务"), tab("t3", "总舵")],
+            [pane("p1", "t1"), pane("p2", "t1"),
+             pane("h1", "t3", status="idle"), pane("h2", "t3")],
+            [agent("a1", "p1", tab_id="t1"),
+             agent("helm-1", "h1", tab_id="t3", status="idle")],
+        )
+
+    def test_apply_closes_extra_empty_panes_keeps_agent_panes(self):
+        rc, out, err, recorded = self._run(
+            self._empty_pane_fixture(), ["--apply"], empty_panes={"p2", "h2"})
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(["h2", "p2"], sorted(recorded["panes"]))
+        self.assertEqual([], recorded["tabs"])
+        self.assertIn("已关闭 pane p2", out)
+        self.assertIn("已关闭 pane h2", out)
+
+    def test_dry_run_reports_empty_pane_without_closing(self):
+        rc, out, err, recorded = self._run(
+            self._empty_pane_fixture(), empty_panes={"p2", "h2"})
+        self.assertEqual(rc, 0, err)
+        self.assertEqual({"panes": [], "tabs": []}, recorded)
+        self.assertIn("[告警] 多余空 pane", out)
+        self.assertIn("dry-run", out)
+
+    def test_apply_closes_complete_flow_tab(self):
+        project = self.tmp / "proj"
+        write_flow_plan(project, "flow-a", ["complete", "complete"])
+        data = snapshot(
+            [tab("t1", "副舵·flow-a")],
+            [pane("p1", "t1"), pane("p2", "t1")],
+            [agent("flow-a-builder", "p1", tab_id="t1", status="idle"),
+             agent("flow-a-firstmate", "p2", tab_id="t1", status="done")],
+        )
+        rc, out, err, recorded = self._run(
+            data, ["--apply", "--root", str(project)])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(["t1"], recorded["tabs"])
+        self.assertIn("已关闭 tab t1", out)
+
+    def test_incomplete_flow_tab_not_closed(self):
+        project = self.tmp / "proj"
+        write_flow_plan(project, "flow-a", ["complete", "pending"])
+        data = snapshot(
+            [tab("t1", "副舵·flow-a")],
+            [pane("p1", "t1")],
+            [agent("flow-a-builder", "p1", tab_id="t1", status="idle")],
+        )
+        rc, _out, err, recorded = self._run(
+            data, ["--apply", "--root", str(project)])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual([], recorded["tabs"])
+
+    def test_blocked_agent_tab_not_closed(self):
+        project = self.tmp / "proj"
+        write_flow_plan(project, "flow-a", ["complete"])
+        data = snapshot(
+            [tab("t1", "副舵·flow-a")],
+            [pane("p1", "t1")],
+            [agent("flow-a-builder", "p1", tab_id="t1", status="blocked")],
+        )
+        rc, _out, err, recorded = self._run(
+            data, ["--apply", "--root", str(project)])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual([], recorded["tabs"])
+
+    def test_whitelisted_tab_empty_pane_not_closed(self):
+        data = snapshot(
+            [tab("t1", "Captain·甲")],
+            [pane("p1", "t1"), pane("p2", "t1")],
+            [agent("a1", "p1", tab_id="t1")],
+        )
+        rc, _out, err, recorded = self._run(
+            data, ["--apply", "--root", str(self.tmp)], empty_panes={"p2"})
+        self.assertEqual(rc, 0, err)
+        self.assertEqual({"panes": [], "tabs": []}, recorded)
+
+
+class T45HelpTest(unittest.TestCase):
+    """T45⑤：帮助文本写明自检默认 --apply、working 永不关、白名单跳过。"""
+
+    def test_help_documents_self_check_contract(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            with self.assertRaises(SystemExit) as cm:
+                pa.main(["--help"])
+        self.assertEqual(cm.exception.code, 0)
+        text = out.getvalue()
+        for token in ("自检", "--apply", "working", "白名单", "空 pane",
+                      "完成流", "总舵 tab", "FB-038"):
             self.assertIn(token, text)
 
 

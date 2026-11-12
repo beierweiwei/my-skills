@@ -8,6 +8,8 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 import urllib.parse
@@ -45,6 +47,12 @@ class CrewDirTestBase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.crew = Path(self._tmp.name) / ".git" / "crew"
+
+    def _run(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = cm.main(argv)
+        return code, out.getvalue(), err.getvalue()
 
     def write_registry(self, routes: dict) -> None:
         self.crew.mkdir(parents=True, exist_ok=True)
@@ -401,12 +409,6 @@ class DeliveryBoundaryTest(CrewDirTestBase):
 
 
 class CliTest(CrewDirTestBase):
-    def _run(self, argv):
-        out, err = io.StringIO(), io.StringIO()
-        with redirect_stdout(out), redirect_stderr(err):
-            code = cm.main(argv)
-        return code, out.getvalue(), err.getvalue()
-
     def test_write_no_push_json(self):
         code, out, _ = self._run(
             [
@@ -512,8 +514,189 @@ class CliTest(CrewDirTestBase):
             "registry.json",
             "--via",
             "herdr agent prompt",
+            "--unread",
+            "--mark-read",
+            "inbox-read-cursor.json",
         ):
             self.assertIn(token, text)
+
+
+class ReadCursorTest(CrewDirTestBase):
+    """T42：inbox 已读游标（ls --unread / ls --mark-read）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.cursor_file = self.crew / "inbox-read-cursor.json"
+
+    def _write_receipts(self, *receipt_ids):
+        for index, receipt_id in enumerate(receipt_ids):
+            cm.write_receipt(
+                self.crew,
+                make_receipt(receipt_id=receipt_id, ts=f"2026-11-09T00:00:{index:02d}Z"),
+                push=False,
+            )
+
+    def _ls(self, *extra):
+        return self._run(["ls", "--crew-dir", str(self.crew), *extra])
+
+    def _unread_ids(self):
+        code, out, err = self._ls("--unread", "--json")
+        self.assertEqual(code, 0, err)
+        return [item["receipt_id"] for item in json.loads(out)]
+
+    def test_unread_mark_cycle_keeps_inbox_files(self):
+        self._write_receipts("r-1", "r-2", "r-3")
+        self.assertEqual(self._unread_ids(), ["r-1", "r-2", "r-3"])
+
+        code, out, err = self._ls("--mark-read", "r-2", "--json")
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertEqual(payload["marked"], ["r-2"])
+        self.assertEqual(payload["already_read"], [])
+        self.assertEqual(
+            [item["receipt_id"] for item in payload["receipts"]], ["r-1", "r-2", "r-3"]
+        )
+        self.assertEqual(payload["cursor"], str(self.cursor_file))
+
+        cursor = json.loads(self.cursor_file.read_text(encoding="utf-8"))
+        self.assertEqual(cursor["version"], 1)
+        self.assertEqual(set(cursor["read"]), {"r-2"})
+
+        # 已读不回删回执原文件（R1 inbox 文件仍是真源）
+        self.assertTrue((cm.inbox_dir(self.crew) / "r-2.json").exists())
+        self.assertEqual(self._unread_ids(), ["r-1", "r-3"])
+
+        code, out, err = self._ls("--mark-read", "--all", "--json")
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertEqual(payload["marked"], ["r-1", "r-3"])
+        self.assertEqual(payload["already_read"], ["r-2"])
+        self.assertEqual(self._unread_ids(), [])
+
+        code, out, err = self._ls("--unread")
+        self.assertEqual(code, 0, err)
+        self.assertIn("(无未读回执)", out)
+
+        # 默认 ls 契约不变：仍列出全部回执（含已读）
+        code, out, err = self._ls("--json")
+        self.assertEqual(code, 0, err)
+        listing = json.loads(out)
+        self.assertIsInstance(listing, list)
+        self.assertEqual(len(listing), 3)
+
+    def test_unread_text_output_excludes_read_receipts(self):
+        self._write_receipts("r-1", "r-2")
+        code, _, err = self._ls("--mark-read", "r-1")
+        self.assertEqual(code, 0, err)
+        code, out, err = self._ls("--unread")
+        self.assertEqual(code, 0, err)
+        self.assertIn("\tr-2\t", out)
+        self.assertNotIn("\tr-1\t", out)
+
+    def test_mark_unknown_receipt_rejected_without_side_effect(self):
+        self._write_receipts("r-1")
+        code, _, err = self._ls("--mark-read", "r-1", "missing")
+        self.assertEqual(code, 1)
+        self.assertIn("missing", err)
+        self.assertFalse(self.cursor_file.exists())
+        self.assertEqual(self._unread_ids(), ["r-1"])
+
+    def test_mark_read_argument_errors(self):
+        cases = [
+            ("--mark-read",),  # 缺 receipt_id / --all
+            ("--all",),  # --all 只配合 --mark-read
+            ("r-1",),  # 位置参数只配合 --mark-read
+            ("--mark-read", "--all", "r-1"),  # 互斥
+        ]
+        for argv in cases:
+            with self.subTest(argv=argv):
+                code, _, err = self._ls(*argv)
+                self.assertEqual(code, 1)
+                self.assertIn("error:", err)
+
+    def test_cursor_shared_across_processes(self):
+        self._write_receipts("r-1", "r-2")
+        proc = subprocess.run(
+            [sys.executable, str(_SPEC_PATH), "ls", "--crew-dir", str(self.crew),
+             "--mark-read", "r-1"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        # 新进程（模拟换舵/新会话）读同一游标：不再列出已读
+        proc = subprocess.run(
+            [sys.executable, str(_SPEC_PATH), "ls", "--crew-dir", str(self.crew),
+             "--unread", "--json"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual([item["receipt_id"] for item in json.loads(proc.stdout)], ["r-2"])
+        self.assertEqual(self._unread_ids(), ["r-2"])
+
+    def test_corrupt_cursor_degrades_to_full_list_then_rebuilds(self):
+        self._write_receipts("r-1", "r-2")
+        self.cursor_file.write_text("{不是 JSON", encoding="utf-8")
+
+        code, out, err = self._ls("--unread", "--json")
+        self.assertEqual(code, 0)
+        self.assertEqual([item["receipt_id"] for item in json.loads(out)], ["r-1", "r-2"])
+        self.assertIn("游标", err)
+
+        code, out, err = self._ls("--mark-read", "r-1", "--json")
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        self.assertIn("游标", payload["warning"])
+        cursor = json.loads(self.cursor_file.read_text(encoding="utf-8"))
+        self.assertEqual(set(cursor["read"]), {"r-1"})
+        self.assertEqual(self._unread_ids(), ["r-2"])
+
+    def test_cursor_atomic_write_failure_keeps_previous_cursor(self):
+        self._write_receipts("r-1", "r-2")
+        code, _, err = self._ls("--mark-read", "r-1")
+        self.assertEqual(code, 0, err)
+
+        with mock.patch.object(cm.os, "replace", side_effect=OSError("simulated crash")):
+            code, _, err = self._ls("--mark-read", "r-2")
+        self.assertEqual(code, 1)
+        self.assertIn("不可写", err)
+
+        cursor = json.loads(self.cursor_file.read_text(encoding="utf-8"))
+        self.assertEqual(set(cursor["read"]), {"r-1"})
+        self.assertEqual(list(self.crew.glob("*.tmp")), [])
+
+    @unittest.skipIf(os.geteuid() == 0, "root 无视目录权限，无法模拟不可写")
+    def test_unwritable_cursor_failsafe(self):
+        self._write_receipts("r-1")
+        os.chmod(self.crew, 0o555)
+        try:
+            code, out, err = self._ls("--unread", "--json")
+            self.assertEqual(code, 0)
+            self.assertEqual([item["receipt_id"] for item in json.loads(out)], ["r-1"])
+            self.assertIn("不可写", err)
+
+            code, _, err = self._ls("--mark-read", "r-1")
+            self.assertEqual(code, 1)
+            self.assertIn("不可写", err)
+            self.assertFalse(self.cursor_file.exists())
+        finally:
+            os.chmod(self.crew, 0o755)
+
+    def test_concurrent_marks_serialize_without_partial_file(self):
+        receipt_ids = ["r-1", "r-2", "r-3", "r-4"]
+        self._write_receipts(*receipt_ids)
+        procs = [
+            subprocess.Popen(
+                [sys.executable, str(_SPEC_PATH), "ls", "--crew-dir", str(self.crew),
+                 "--mark-read", receipt_id],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            for receipt_id in receipt_ids
+        ]
+        for proc in procs:
+            _, err = proc.communicate(timeout=60)
+            self.assertEqual(proc.returncode, 0, err)
+        cursor = json.loads(self.cursor_file.read_text(encoding="utf-8"))
+        self.assertEqual(set(cursor["read"]), set(receipt_ids))
+        self.assertEqual(list(self.crew.glob("*.tmp")), [])
 
 
 if __name__ == "__main__":

@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.2.16 — 2026-11-12
+
+交接/总舵启动 YOLO 补参（T46）、证据采集器（T40）、轮次预检（T41）、回执已读游标（T42）、发布检查汇总（T43）、看板一屏化与 plan lint（T44）、pane-audit 自动收敛（T45）、文档/模板接线，以及互检修复、独立评审与终验。
+
+### 新增
+
+- **T46/FB-037 交接与总舵启动 YOLO 补参**：`scripts/crew-guard.py` 自动交接与 `scripts/start-helm.sh` 的 `dispatch start` 均显式传 `--permission-mode bypass_permissions`；新增双路径参数断言（guard 注入 dispatch 断言 argv、start-helm 脚本结构化断言）；guard 以修复后代码重启并通过 `doctor --only runtime.guard`（pass 带 pid），当前总舵未重启。
+- **T40 证据采集器 `crew-evidence.py`**：一条命令执行校验并把「command/rc/stdout/stderr/时间/git status」按固定标记原子落盘，rc 镜像被采命令；缺参 rc=2、写失败 `WRITE_FAILED` rc=1；纳入 `SCRIPT_MANIFEST`。
+- **T41 轮次预检 `crew-preflight.py`**：一次输出 wake 新鲜度、未读回执（复用 T42 游标）、agent 状态 + ctx、看板新鲜度、guard pid 五项；单项不可用 fail-safe 标注不崩，人读 + `--json`，仅 `--strict` 非 0；纳入 `SCRIPT_MANIFEST`。
+- **T42 回执已读游标**：`crew-msg.py ls --unread` / `ls --mark-read <id>...` / `--mark-read --all`；游标落 `<git-common-dir>/crew/inbox-read-cursor.json`（id 映射 + flock 原子写），inbox 文件仍为唯一真源、不改不删；游标缺失/损坏/不可写偏重复读不误漏。
+- **T43 发布检查 `release-check.py`**：版本（源 frontmatter/标题/CHANGELOG/init fallback、项目 `skillVersion`、用户已装副本）、源↔用户副本↔项目安装 diff、upgrade/init/doctor、guard lock 与 `--helm` 现役舵一致性、源/my-skills 工作区干净度汇总为 pass/fail/skip 表；支持 `--json`/`--dry-run`，rc 0/1/2/3；纳入 `SCRIPT_MANIFEST`。
+- **T44 看板一屏化 + plan lint**：`plan-status.py --brief` 输出活跃流一屏表（流｜阶段｜完成数/健康｜下一步｜待 Captain）+ 待 Captain 摘要 + 今日变化（≤40 行）；新增内容卫生 lint（Next Step 超长/含 ✅、🟡 无 owner、样板残留）默认只提醒（rc=0），`--strict` 才升 rc=1；既有命令契约未动。
+- **T45 pane-audit 自动收敛**：`--apply` 自动关多余空 pane（非白名单、working 永不关；前台进程组组长是 shell + shell_pid 兜底 + argv 无脚本/-c 三重判空）、完成流回收 tab（非聚焦/白名单/总舵 tab）、总舵 tab 单 pane 检查；guard 交接 `tab create` 后断言 pane 数=1 并关闭多余空 pane（FB-038 根因修，失败只告警不中断）。
+- **文档与模板接线**：qoder/opencode 的 helm/firstmate/runner 接入每轮预检、inbox 游标、自检默认 `pane-audit --apply`、证据用 `crew-evidence.py` 采集；`crew-rules.md`（R1 游标与「已读≠已处置」、W5 自动收敛）、`plan-discipline.md`（`--brief`/`--lint`）、release/maintain 剧本（release-check 汇总门、证据采集器）、ticket 模板同步，并补 grep 防回退断言。
+
+### 修复
+
+- **互检阻断 X-1/X-2/X-3**：X-1 空 pane 判空改三重判定（进程组组长/argv/shell_pid 兜底），argv 缺失或组长缺席一律只报告不关闭；X-2 新增流 Status 保守解析（`### Phase` 分段、缺省 pending、非法值告警且不回收，与 guard 口径 0 差异）；X-3 release-check 校验 guard `--helm` 与 registry 现役舵一致（不一致 fail，解析不到 skip）。
+- **互检建议 S-1..S-9 处置**：guard 交接残余窗口如实声明只报告、跨模块 PHASE 解析口径统一、release-check 新增 `source.git-clean`、证据器写失败标记、hygiene 豁免口径、preflight 游标未初始化口径等按安全/口径分流落地。
+
+### 测试
+
+- 新增 `test_2216_t46_helm_yolo.py`、`test_2216_t40_t41_tools.py`、`test_2216_t43_release_check.py`、`test_2216_t44_brief_lint.py`、`test_2216_docs_integration.py`；补 `test_crew_guard.py`、`test_crew_msg.py`、`test_pane_audit.py`、`test_2215_upgrade_new_scripts.py` 用例。
+- 全量 pytest 0 fail（本版 1141 passed + 959 subtests）；`crew-lint`（含 `--purity`）、`plan-status --selftest`/`--playbooks` 绿。
+- 版本 2.2.16：`SKILL.md` frontmatter 与标题、`init.py` fallback、本段、`test_crew_lint.py`、`test_220_final.py`、`test_224_retro.py`、`test_225_patch.py`、`test_2214_guard_presence.py` 版本断言同步。
+
 ## 2.2.15 — 2026-11-12
 
 报告落盘方式（T32）、AGENTS 块模板漂移（T35）、跨项目消息落点（T28）、升级安装源新增脚本（T34）、update-all 代理回退（T36）、回执/通知聚焦守卫（T37）、firstmate 写权口径（T38）、claude 后端包装（T39）、互检修复（A/B）与发布。

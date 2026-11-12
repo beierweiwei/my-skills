@@ -269,7 +269,9 @@ class UpgradeNewScriptTest(unittest.TestCase):
         self.assertEqual(0, doctor.returncode, doctor.stdout + doctor.stderr)
         item = json.loads(doctor.stdout)["items"][0]
         self.assertEqual("pass", item["status"], item["detail"])
-        self.assertIn("核对 19 项", item["detail"])
+        # 受管脚本数随清单增长（2.2.16 新增受管脚本），按源清单动态核对，不写死数字
+        expected = len(upgrade_mod.source_script_manifest(self.skill))
+        self.assertIn(f"核对 {expected} 项", item["detail"])
 
     def test_doctor_sees_source_new_script_with_stale_project_init(self):
         # 未运行 upgrade：项目内 init 清单滞后一代；doctor 必须读源侧 AST 清单，

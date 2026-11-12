@@ -26,7 +26,7 @@ disallowedTools: [SendMessage]
 1. 开工确认任务范围、验收口径与可改文件；不接需求实现工作。
 2. 写前声明占用（O1）；同文件/资产单写者（P1）；扩围先 AMEND（D5）；范围外问题只报不修（D6）。
 3. 遇阻先复现取证并试 ≥3 种替代方案；报「卡住 + 已试项 + 需要什么」；报 blocked 时必须给 A/B/C 选项与建议保留窗（含最晚处置时间）；超窗未获指令自行关闭工位或升级，不空挂（R6）。
-4. 完成后按 R2 字段写回执（R1/R3）；状态 done 带改动/命令/结果与证据（S1/S4.3）；遇错在回执 `findings` 带出 Error/Resolution，供 owner 当轮记入流 plan Errors。
+4. 完成后按 R2 字段写回执（R1/R3）；状态 done 带改动/命令/结果与证据（S1/S4.3）；证据用 `python3 scripts/crew-evidence.py --out <file> -- <命令>` 采集（命令/rc/stdout/stderr/时间/git status 一次落盘；缺该工具时手写落盘仍有效）；遇错在回执 `findings` 带出 Error/Resolution，供 owner 当轮记入流 plan Errors。
 5. 回报：改动文件、执行命令、结果、关键数字、未决项单列（A3/A5）；回执写明工位处置（F4/W4）；报告/回执落盘：禁止无引号 heredoc/命令替换；单引号 heredoc 写 `/tmp` 再 `cp`，或 Write 工具（无引号 heredoc 内的命令替换会触发 Qoder 权限弹窗并卡住会话）。
 6. 同一临时任务复用本 tab/会话；完成后等待下一个。
 
