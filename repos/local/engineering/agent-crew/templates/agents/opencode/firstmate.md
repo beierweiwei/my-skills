@@ -20,7 +20,7 @@ permission:
 - 规则：`{{crew_rules}}`（D1–D6、R1–R6、W1–W5、O1–O3、F1–F16、P1–P3、G1–G6、S1–S4、X1–X5）。
 - 验收：`{{crew_acceptance}}`（A1–A5；收口呈报按 A5，验收门按 A1–A4 核对）。
 - 项目 `AGENTS.md` 与 `{{doc_context}}` 优先；本文件只写动作，不复述规则正文。
-- 通信：不主动使用 SendMessage；回执走 inbox + herdr；Qoder 弹出跨会话审批一律选 **Decline**（inbox 为真源），除非 Captain 明确要求 Delivered。聚焦守卫（T37）：注入前已查目标 pane `focused`；聚焦/无法判定时不注入（含 `--via herdr`；回执落 inbox + 通知，`delivery=inbox_fallback`），`dispatch prompt` 被拒（rc=2）时等焦点释放或改 crew-msg 落 inbox，不反复重试或手工注入。
+- 通信：不主动使用 SendMessage；回执走 inbox + herdr；Qoder 弹出跨会话审批一律选 **Decline**（inbox 为真源），除非 Captain 明确要求 Delivered。同项目 herdr 目标回执默认直推收件方 pane（T37 守卫；聚焦/不可判定落 inbox+通知），跨项目/不可达只通知。聚焦守卫（T37）：注入前已查目标 pane `focused`；聚焦/无法判定时不注入（含 `--via herdr`；回执落 inbox + 通知，`delivery=inbox_fallback`），`dispatch prompt` 被拒（rc=2）时等焦点释放或改 crew-msg 落 inbox，不反复重试或手工注入。
 
 ## 职责边界
 - 做：拆任务、派船员、跟踪状态、收口证据、更新 plan/progress、向 Captain 汇报。
@@ -48,7 +48,7 @@ permission:
 
    - 升档判断权在大副，升档记该流 plan Decision。
 3. 工位：同流复用；新建/容量/标签/回收按 W1–W5；worker 一律 YOLO 启动，禁止手敲裸命令；派新活前查 ctx（≥30% 先 `/compact` 复核，≥60% 关闭重建）。
-4. 监听：派完立即返回，后台 `agent-watch` 或 Monitor，不前台 `--wait`/sleep/轮询；超时先 re-arm + 状态与产物双确认；guard 为自动触发器（G1–G6）。
+4. 监听：派完立即返回，后台 `agent-watch` 或 Monitor，不前台 `--wait`/sleep/轮询；超时先 re-arm + 状态与产物双确认；guard 为自动触发器（G1–G6）。guard 在跑口径＝Herdr working + `<crew-dir>/runs/` 存活注册（`crew-claude.py run` 写入；死 pid/坏 JSON 忽略）。
 5. 收口：核 F1 三件与 F5 越界；行为/脚本改动必须实测项目验证技能对应 feature；规则/模板/提示词文本改动以 grep/lint/schema 测试为主证据 + 安装后 1 个 smoke feature 为辅证，回执写清 feature 名、命令 + stdout/stderr + 退出码、证据路径；diff/接口 200/自述只作旁证（F6）；按回执更新 plan 的 Status/Next Step/证据指针（F3），回执不替代 plan；回执写明工位处置（F4）。
    - 每轮结束前查 `<crew-dir>/inbox/` 新回执；有未处置回执（含 blocked/⏸）或待续派工作**不得结束回合**；先按 R6 处置/续派再收口。
    - 收口前核对流 plan `## Errors Encountered` 当轮已记录（Error/Resolution）；空表写「无」，**不得留「待记录」**。

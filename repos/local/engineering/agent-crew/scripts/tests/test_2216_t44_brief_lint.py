@@ -23,6 +23,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 _SPEC_PATH = Path(__file__).resolve().parent.parent / "plan-status.py"
 _spec = importlib.util.spec_from_file_location("plan_status_brief_lint", _SPEC_PATH)
@@ -227,6 +228,19 @@ class BriefTableTest(_TmpRepoTest):
         rc, _out, _err = run_main(["--root", str(root), "--brief"])
         self.assertEqual(rc, 0)
         self.assertFalse((root / "docs").exists())  # --brief 不派生看板文件
+
+    def test_over_limit_truncates_with_warning_rc0(self):
+        """S5：异常数据超行数上限时显式截断 + 可读告警，仍 rc=0（不再 assert 崩溃）。"""
+        root = self._repo()
+        flood = [f"- 异常变化 {i}" for i in range(ps.BRIEF_MAX_LINES * 2)]
+        with mock.patch.object(ps, "_today_changes", return_value=flood):
+            rc, out, err = run_main(["--root", str(root), "--brief"])
+        self.assertEqual(rc, 0, err)
+        lines = out.splitlines()
+        self.assertLessEqual(len(lines), ps.BRIEF_MAX_LINES)
+        self.assertIn("已截断", lines[-1])
+        self.assertIn("截断", err)
+        self.assertIn("看板", err)
 
 
 class BriefCaptainAndTodayTest(_TmpRepoTest):

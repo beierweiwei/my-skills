@@ -196,8 +196,17 @@ def preview(names: list[str], limit: int = 5) -> str:
 
 
 def pid_alive(pid: int) -> bool:
+    """pid 存活判定：ProcessLookupError=死；PermissionError=活（进程存在但无权限，
+    与 crew-preflight._pid_alive 一致）；OverflowError（超出 pid_t 范围）按无效/死
+    处理；其余 OSError 保持历史行为按死处理。"""
     try:
         os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OverflowError:
+        return False
     except OSError:
         return False
     return True

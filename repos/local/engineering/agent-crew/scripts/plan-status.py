@@ -835,7 +835,16 @@ def brief(root: Path, cfg: dict, plans: list[Plan]) -> int:
         out += ["",
                 f"> lint 提醒 {len(hygiene)} 条"
                 "（`python3 scripts/plan-status.py --lint` 查看，不阻断）。"]
-    assert len(out) <= BRIEF_MAX_LINES, f"一屏摘要超行数上限：{len(out)}"
+    if len(out) > BRIEF_MAX_LINES:
+        exceeded = len(out)
+        out = out[: BRIEF_MAX_LINES - 1] + [
+            "- …（已截断：完整内容见看板 / --handover）"
+        ]
+        print(
+            f"warning: --brief 输出 {exceeded} 行，超过 {BRIEF_MAX_LINES} 行上限，"
+            "已截断；完整内容见看板 / --handover",
+            file=sys.stderr,
+        )
     sys.stdout.write("\n".join(out) + "\n")
     return 0
 

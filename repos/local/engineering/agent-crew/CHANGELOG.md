@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.2.17 — 2026-11-12
+
+回执到达直推唤醒（FB-039，T37 延伸）、crew-claude 运行注册与 guard 在跑口径（FB-040）、评审建议 S3–S13、维护 map 补齐与发布。
+
+### 新增
+
+- **FB-039 回执到达直推唤醒**：`scripts/crew-msg.py write` 对同项目 herdr agent 目标默认直推收件方 pane（复用 `deliver_qoder`，`delivery=herdr`），收件方回合已结束也能到达；保持 T37 聚焦守卫——目标聚焦/无法判定时只落 inbox + 通知（`delivery=inbox_fallback`）；跨项目/不可达/显式 `--via herdr` 保持 `notification`（T28 语义不变）；S3 `ls --mark-read` 重写游标改为 `{id: 时间}` 映射 + `setdefault`，不覆写历史标记时间；`--help`/docstring 写明 A-1 情形③界定。
+- **FB-040 crew-claude 运行注册 + guard 在跑口径**：`scripts/crew-claude.py run` 期间在 `<crew-dir>/runs/` 原子写存活注册（pid/role/backend/model/started_at/out_dir/root），正常/非零/超时/异常统一清理，注册失败只 stderr 告警不阻断运行；`scripts/crew-guard.py` 每轮把存活注册计入在跑 worker（`--once --json` 增 `claudeRuns`；有待办也不叫醒），死 pid 删除并记日志、坏 JSON 忽略；**pid 复用核验**——argv 不含 `crew-claude` 按死删除、cmdline 不可读 24h 超龄忽略、缺 `started_at` fail-safe；S4 `pid_alive` 捕获 `PermissionError`/`OverflowError`，与 preflight 同口径。
+- **评审建议 S5–S9/S12/S13**：S5 `plan-status.py --brief` 改显式行数上限（截断+告警，替代 `assert`）；S6 opencode helm 反向断言（防旧双口径回归）；S7 `crew-preflight.py` `_lock_held` 只读探测不留空锁；S8 preflight agent 口径纳入 linked worktree（与 guard `_in_project` 一致）；S9 `crew-evidence.py` 新增 `--timeout` 并清未使用常量；S12 `pane-audit.py` 固化 pane 内后台 job SIGHUP 语义；S13 `crew-msg.py ls --mark-read --all` 跳过 legacy 文件名（stderr 汇总，rc=0），显式 id 缺失仍整体拒绝；S10/S11 记不适用（Decisions D-3）。
+- **维护 map 补齐 5 条**：verify-crew 新增 `crew-evidence` / `crew-preflight` / `release-check` / `crew-msg-cursor` 4 个 feature；`plan-status-freshness` 补 `--brief`/`--lint`、`pane-audit` 补 `--blocked-grace`、`guard-wake` 补 `guard.wake generated_at:`/2h 过期与 FB-040 runs 口径；`features/README.md` 索引与 `guard_probe.py` source wave 同步；修 HEAD 既有红测试（`test_2214` 期待已废弃的 `skill-src` 字面）。
+- **文档与模板同步**：`references/crew-rules.md` R1 投递语义 + G4 在跑口径；`references/herdr-cheatsheet.md` 回执三情形与 guard 行；`references/orchestration-guide.md` registry 行与 §7.5 G4 引用；qoder/opencode 的 helm/firstmate/runner 6 个角色模板同步新行为（职责不变）。
+
+### 修复
+
+- **互检建议-1/2/4**：cheatsheet A-1 三情形限定；guard pid 复用永久静默（并入 FB-040 身份核验/超龄/fail-safe）；legacy 回执未读噪音处置行 + feature Gotchas；建议-3（多 workspace 同名 agent 路由取第一条）记 backlog（D-9，本批不修）。
+- **评审 R-1–R-5**：R-1 verify-crew guard-wake 配方改用含 `crew-claude` 的标记子进程并重驱证据；R-2 证据重驱/注记；R-3 R1 与 `crew-msg.py` docstring 补 A-1 情形③ + docs 位置断言；R-4 guard/preflight/release-check 三处 `pid_alive` 加固 `OverflowError`（超范围 pid 删注册并记日志）；R-5 第 10 条测试先红日志注记；文字级残留 2 条（`--help` 情形③、证据计数口径）顺手修。
+
+### 测试
+
+- 新增 `test_2217_fb039_wake_on_receipt.py`、`test_2217_fb040_claude_runs.py`、`test_2217_docs_delivery_runs.py`；补 `test_crew_msg.py`、`test_pane_audit.py`、`test_2214_guard_presence.py`、`test_2216_docs_integration.py`、`test_2216_t40_t41_tools.py`、`test_2216_t44_brief_lint.py` 用例（先红后绿）。
+- 全量 pytest 0 fail（本版 1195 passed + 975 subtests）；`crew-lint`（含 `--purity`）、`plan-status --selftest`/`--playbooks` 绿。
+- 版本 2.2.17：`SKILL.md` frontmatter 与标题、`init.py` fallback、本段、`test_crew_lint.py`、`test_220_final.py`、`test_224_retro.py`、`test_225_patch.py`、`test_2214_guard_presence.py` 版本断言同步。
+
 ## 2.2.16 — 2026-11-12
 
 交接/总舵启动 YOLO 补参（T46）、证据采集器（T40）、轮次预检（T41）、回执已读游标（T42）、发布检查汇总（T43）、看板一屏化与 plan lint（T44）、pane-audit 自动收敛（T45）、文档/模板接线，以及互检修复、独立评审与终验。

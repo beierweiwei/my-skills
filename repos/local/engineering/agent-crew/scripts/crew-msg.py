@@ -6,7 +6,7 @@
 「未落收件方 inbox」不阻断推送（T28）。
 注册表：<git-common-dir>/crew/registry.json，只存 Herdr 不知道的路由；默认不创建。
 
-推送边界（2.1.7）：
+推送边界（2.2.17）：
 - opencode→opencode：POST /api/session/{id}/prompt，请求体 delivery=queue；
 - qoder→qoder：默认 `herdr agent prompt <目标名>` 直推（非交互、无跨会话审批）；
   `--via sendmessage` 显式回到 DELEGATE（需接收方人工确认，inbox 为真源）；
@@ -15,14 +15,19 @@
   回执落 inbox + Herdr 通知，投递结果记 `delivery=inbox_fallback`；
   `herdr pane list` 不可用/字段缺失按 fail-safe 同样不注入（`--via herdr` 同此口径，
   不注入、落 inbox + 通知，结果字段与 note 显式标注）；
-- 可达性（A-1）：目标不在本机 `herdr agent list`，或 agent list 调用失败/不可解析时，
-  按「目标不可达」处理——不注入、`ok=False`、退出码 3，不冒充 inbox_fallback 成功；
+- 可达性（A-1）：显式 qoder 直推时目标不在本机 `herdr agent list`，或 agent list
+  调用失败/不可解析，按「目标不可达」处理——不注入、`ok=False`、退出码 3，
+  不冒充 inbox_fallback 成功；
 - claude / codex：本期只做路由校验与接口占位，不真实投递；
-- 跨产品 / Herdr 目标：只写文件 + Herdr 通知；`--via` 只作用于同 runtime=qoder 的推送。
-- `--target-runtime auto` 只查 registry；无路由按 Herdr 目标处理（文件+通知）。需要 qoder
-  直推时显式传 `--target-runtime qoder`。
+- 跨产品：只写文件 + Herdr 通知；
+- `--target-runtime auto`（默认）：先查 registry；无路由时，若 `--to` 是本机 herdr
+  agent 且与发送方同一项目（收件方 inbox 即本地 inbox），按 qoder 直推（含 T37
+  聚焦守卫），回执到达即唤醒收件方（FB-039）；跨项目、目标不可达、发送方非 qoder
+  或显式 `--target-runtime herdr` 时只写文件 + Herdr 通知（`delivery=notification`，
+  note 写明未注入）。auto 已判定同项目后，二次 `herdr agent list` 失败或目标从列表
+  消失按 cheatsheet A-1 情形③处理（`delegate ok=false` + 退出码 3，note 写明原因）。
 - 审计：投递成功后把 `delivery` 写回本地回执副本（`herdr` / `inbox_fallback` /
-  `sendmessage-delegate` 等）；收件方副本不含该字段。
+  `sendmessage-delegate` / `notification` 等）；收件方副本不含该字段。
 
 已读游标（T42）：
 - 游标文件：`<git-common-dir>/crew/inbox-read-cursor.json`，格式
@@ -31,6 +36,8 @@
 - inbox 文件仍是唯一真源（R1）：游标只记读者已读到哪里，不改回执状态、不删回执文件。
 - `ls --unread` 只列未读；`ls --mark-read <receipt_id>...` 或 `ls --mark-read --all`
   标记已读；游标按 crew-dir 持久化，换舵/新会话/新进程读同一游标。
+- `ls --mark-read --all` 只标记 inbox 中 `<receipt_id>.json` 实际存在的回执；文件名与
+  receipt_id 不一致的历史外部条目跳过并在 stderr 汇总告警（rc=0，不整体失败，S13）。
 - fail-safe：游标损坏/不可读 → `--unread` 按全量未读处理并告警；游标不可写 →
   标记失败退出码 1，`--unread` 退化为全量并告警。
 
@@ -264,45 +271,61 @@ def read_cursor_path(crew_dir: Path) -> Path:
     return Path(crew_dir) / CURSOR_FILENAME
 
 
-def load_read_cursor(crew_dir: Path) -> tuple[set[str], str | None]:
-    """已读游标 → 已读 receipt_id 集合；缺失/损坏/不可读一律 fail-safe。
+def load_read_cursor(crew_dir: Path) -> tuple[dict[str, str], str | None]:
+    """已读游标 → {receipt_id: 标记时间}；缺失/损坏/不可读一律 fail-safe。
 
-    返回 (read_ids, warning)。游标只是读取便利、不是真源：损坏或不可读时按
+    返回 (read_map, warning)。游标只是读取便利、不是真源：损坏或不可读时按
     「全量未读」处理并返回诊断（宁可重复列，不误漏读），不崩、不阻塞 ls。
+    保留既有 id 的历史标记时间，供 mark_receipts_read 增量补键（S3）。
     """
     path = read_cursor_path(crew_dir)
     if not path.exists():
         if Path(crew_dir).is_dir() and not os.access(crew_dir, os.W_OK):
-            return set(), (
+            return {}, (
                 f"已读游标目录不可写（{crew_dir}）：--unread 退化为全量列出，"
                 "可能重复显示已读回执；修复权限后可重新标记"
             )
-        return set(), None
+        return {}, None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        return set(), f"已读游标损坏或不可读（{path}）：{exc}；--unread 按全量未读处理"
+        return {}, f"已读游标损坏或不可读（{path}）：{exc}；--unread 按全量未读处理"
     read = data.get("read") if isinstance(data, dict) else None
     if not isinstance(read, dict):
-        return set(), f"已读游标格式非法（{path}）：缺 read 对象；--unread 按全量未读处理"
-    return {str(key) for key in read}, None
+        return {}, f"已读游标格式非法（{path}）：缺 read 对象；--unread 按全量未读处理"
+    return {str(key): str(value) for key, value in read.items()}, None
 
 
-def mark_receipts_read(crew_dir: Path, receipt_ids: list[str]) -> dict:
+def mark_receipts_read(crew_dir: Path, receipt_ids: list[str],
+                       skip_missing: bool = False) -> dict:
     """把 receipt_id 标记为已读；只写游标，不改回执文件与状态（R1 文件仍为真源）。
 
-    显式 id 中有不存在的回执时整体拒绝、不标任何一条。游标损坏时按空游标重建并在
-    返回值 warning 中说明。flock 串行化读改写，tmp+rename 原子替换（P2/P3）。
+    显式 id 中有不存在的回执时整体拒绝、不标任何一条。`skip_missing=True`
+    （`ls --mark-read --all`）时改为跳过 inbox 中不存在 `<receipt_id>.json` 的历史
+    条目（文件名与 receipt_id 不一致），跳过项计入返回值 skipped，不整体失败（S13）。
+    游标损坏时按空游标重建并在返回值 warning 中说明。重写游标时保留既有 id 的历史
+    标记时间，只补新增键（S3）。flock 串行化读改写，tmp+rename 原子替换（P2/P3）。
     """
     crew = Path(crew_dir)
     ids = list(dict.fromkeys(receipt_ids))
     for receipt_id in ids:
         validate_receipt_id(receipt_id)
     missing = [rid for rid in ids if not (inbox_dir(crew) / f"{rid}.json").exists()]
+    skipped: list[str] = []
     if missing:
-        raise CrewMsgError("回执不存在，未标记任何回执: " + ", ".join(missing))
+        if not skip_missing:
+            raise CrewMsgError("回执不存在，未标记任何回执: " + ", ".join(missing))
+        skipped = missing
+        missing_set = set(missing)
+        ids = [rid for rid in ids if rid not in missing_set]
+        if not ids:
+            return {
+                "marked": [], "already_read": [], "skipped": skipped,
+                "cursor": str(read_cursor_path(crew)), "warning": None,
+            }
     cursor = read_cursor_path(crew)
-    result: dict = {"marked": [], "already_read": [], "cursor": str(cursor), "warning": None}
+    result: dict = {"marked": [], "already_read": [], "skipped": skipped,
+                    "cursor": str(cursor), "warning": None}
     if not ids:
         return result
     crew.mkdir(parents=True, exist_ok=True)
@@ -316,12 +339,13 @@ def mark_receipts_read(crew_dir: Path, receipt_ids: list[str]) -> dict:
                 result["already_read"] = [rid for rid in ids if rid in current]
                 if result["marked"]:
                     now = utc_now()
-                    current.update(result["marked"])
+                    for receipt_id in result["marked"]:
+                        current.setdefault(receipt_id, now)
                     atomic_write_json(
                         cursor,
                         {
                             "version": CURSOR_VERSION,
-                            "read": {rid: now for rid in sorted(current)},
+                            "read": {rid: current[rid] for rid in sorted(current)},
                         },
                     )
             finally:
@@ -790,8 +814,20 @@ def deliver_receipt(
         return result
 
     route = routes.get(to)
+    # FB-039：auto + 同项目 herdr 目标默认直推，叫醒已结束回合的收件方；
+    # 复用 T28 的「本地 inbox 即收件方 inbox」判定，聚焦守卫等仍由 deliver_qoder 承担。
+    auto_same_project = (
+        route is None
+        and peer_inbox.get("status") == "same"
+        and receipt.get("runtime") == "qoder"
+    )
     if target_runtime in (None, "auto"):
-        runtime = route["runtime"] if route else "herdr"
+        if route:
+            runtime = route["runtime"]
+        elif auto_same_project:
+            runtime = "qoder"
+        else:
+            runtime = "herdr"
     else:
         runtime = target_runtime
         if route is not None and route["runtime"] != runtime:
@@ -801,7 +837,21 @@ def deliver_receipt(
             )
 
     if runtime == "herdr":
-        result = _notify_result(receipt, crew_dir, "herdr", "Herdr 目标：只写文件 + 通知")
+        if target_runtime == "herdr":
+            note = "Herdr 目标（显式 --target-runtime herdr）：只写文件 + 通知"
+        elif peer_inbox.get("status") == "same":
+            note = (
+                f"同项目但发送方 runtime={receipt.get('runtime')}："
+                "未注入，只写文件 + Herdr 通知"
+            )
+        elif peer_inbox.get("status") in ("written", "dedup"):
+            note = "跨项目目标：未注入，只写文件 + Herdr 通知"
+        else:
+            note = (
+                f"未注入（{peer_inbox.get('reason') or '无法确认同项目'}）："
+                "只写文件 + Herdr 通知"
+            )
+        result = _notify_result(receipt, crew_dir, "herdr", note)
         result["target"] = to
         return finish(result)
 
@@ -1027,11 +1077,13 @@ def _cmd_ls(args, crew_dir: Path) -> int:
     if args.mark_read:
         if args.all and args.receipt_ids:
             raise CrewMsgError("--mark-read 的 --all 与显式 receipt_id 不能同时使用")
+        skip_missing = False
         if args.all:
             ids = [
                 item["receipt_id"]
                 for item in list_receipts(crew_dir, status=args.status)
             ]
+            skip_missing = True
         elif args.receipt_ids:
             ids = list(args.receipt_ids)
         else:
@@ -1039,7 +1091,15 @@ def _cmd_ls(args, crew_dir: Path) -> int:
                 "ls --mark-read 需要 receipt_id 或 --all"
                 "（例：ls --mark-read r-1 / ls --mark-read --all）"
             )
-        mark_result = mark_receipts_read(crew_dir, ids)
+        mark_result = mark_receipts_read(crew_dir, ids, skip_missing=skip_missing)
+        if mark_result["skipped"]:
+            preview = ", ".join(mark_result["skipped"][:3])
+            more = " 等" if len(mark_result["skipped"]) > 3 else ""
+            warnings.append(
+                f"ls --mark-read --all 跳过 {len(mark_result['skipped'])} 条"
+                f"文件名与 receipt_id 不一致的回执（{preview}{more}）："
+                "其 <receipt_id>.json 不在 inbox，未标记（inbox 文件仍是真源）"
+            )
         if mark_result["warning"]:
             warnings.append(mark_result["warning"])
     elif args.receipt_ids or args.all:
@@ -1047,10 +1107,10 @@ def _cmd_ls(args, crew_dir: Path) -> int:
 
     receipts = list_receipts(crew_dir, status=args.status)
     if args.unread:
-        read_ids, cursor_warning = load_read_cursor(crew_dir)
+        read_map, cursor_warning = load_read_cursor(crew_dir)
         if cursor_warning and cursor_warning not in warnings:
             warnings.append(cursor_warning)
-        receipts = [item for item in receipts if item.get("receipt_id") not in read_ids]
+        receipts = [item for item in receipts if item.get("receipt_id") not in read_map]
     for warning in warnings:
         print(f"warning: {warning}", file=sys.stderr)
 
@@ -1130,20 +1190,25 @@ def build_parser() -> argparse.ArgumentParser:
 changed_files[] / evidence[] / work_slot / findings[] / summary / ts。
 status=captain 表示 ⏸ 待 Captain。回执先原子落盘，推送失败不影响回执成立。
 
-推送边界：
+推送边界（2.2.17）：
 - qoder→qoder：默认 `herdr agent prompt <目标名>` 直推（非交互、无跨会话审批）；
   直推前查目标 pane 的 focused（T37）：聚焦或无法判定 → 不注入，回执落 inbox +
   Herdr 通知，结果记 delivery=inbox_fallback（`--via herdr` 同此口径）；
-  目标不在本机 agent list 或 agent list 不可用 → 目标不可达，ok=false + 退出码 3；
+  显式 qoder 直推时目标不在本机 agent list 或 agent list 不可用 → 目标不可达，
+  ok=false + 退出码 3；herdr 调用本身失败时回退 DELEGATE 并返回诊断错误；
   `--via sendmessage` 保留 DELEGATE（由调用方用 SendMessage 转发）并告警需接收方
-  人工确认；`--via herdr` 强制 herdr，herdr 调用失败时回退 DELEGATE 并返回诊断错误；
+  人工确认；
 - opencode→opencode：POST /api/session/{id}/prompt，请求体 delivery=queue；
 - claude / codex：本批仅校验路由并返回 placeholder，不真实投递；
-- 跨产品 / Herdr 目标：只写文件 + Herdr 通知；`--via` 只作用于同 runtime=qoder 的推送。
-- `--target-runtime auto` 只查 registry；无路由按 Herdr 目标处理（文件+通知）。需要 qoder
-  直推时显式传 `--target-runtime qoder`。
+- `--target-runtime auto`（默认）：先查 registry；无路由时，若 `--to` 是本机 herdr
+  agent 且与发送方同一项目，按 qoder 直推（含聚焦守卫，回执到达即唤醒收件方，
+  delivery=herdr）；跨项目 / 目标不可达 / 发送方非 qoder / 显式
+  `--target-runtime herdr` 时只写文件 + Herdr 通知（delivery=notification，
+  note 写明未注入）。auto 已判定同项目后，二次 `herdr agent list` 失败或目标从
+  列表消失按 A-1 情形③处理（delegate ok=false + 退出码 3，note 写明原因）。
+- 跨产品：只写文件 + Herdr 通知；`--via` 只作用于同 runtime=qoder 的推送。
 - 审计：投递通道写回本地回执副本 delivery（herdr / inbox_fallback /
-  sendmessage-delegate 等）。
+  sendmessage-delegate / notification 等）。
 
 已读游标：`<git-common-dir>/crew/inbox-read-cursor.json`
 （`{"version": 1, "read": {"<receipt_id>": "<标记时间>"}}`，flock + tmp/rename 原子写）。
@@ -1190,7 +1255,7 @@ status=captain 表示 ⏸ 待 Captain。回执先原子落盘，推送失败不�
         "--target-runtime",
         choices=("auto",) + SENDER_RUNTIMES + ("herdr",),
         default="auto",
-        help="auto=查注册表；无注册表路由按 Herdr 目标处理",
+        help="auto=查注册表；无路由时同项目 herdr 目标直推、其余只写文件+通知",
     )
     write.add_argument("--no-push", action="store_true", help="只落文件，不推送")
     write.add_argument(
@@ -1214,7 +1279,8 @@ status=captain 表示 ⏸ 待 Captain。回执先原子落盘，推送失败不�
     ls.add_argument(
         "--all",
         action="store_true",
-        help="配合 --mark-read：标记 --status 范围内全部回执",
+        help="配合 --mark-read：标记 --status 范围内全部回执；文件名与 receipt_id "
+             "不一致且 <receipt_id>.json 不存在的条目跳过并告警（rc=0）",
     )
     ls.add_argument(
         "receipt_ids",
@@ -1233,7 +1299,7 @@ status=captain 表示 ⏸ 待 Captain。回执先原子落盘，推送失败不�
         "--target-runtime",
         choices=("auto",) + SENDER_RUNTIMES + ("herdr",),
         default="auto",
-        help="auto=查注册表；无注册表路由按 Herdr 目标处理",
+        help="auto=查注册表；无路由时同项目 herdr 目标直推、其余只写文件+通知",
     )
     push.add_argument(
         "--via",

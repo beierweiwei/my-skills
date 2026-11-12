@@ -43,6 +43,9 @@
 数据源：默认 `herdr api snapshot`，失败退回 `tab list` + `pane list` + `agent list`；
 `--snapshot FILE` 注入 fixture JSON（测试/复算用，不调用 herdr）。
 
+后台 job 语义（S12）：pane 内用 `&` / `nohup` 等启动的后台 job，在 `--apply` 关闭
+pane 时仍可能收到 SIGHUP；本工具只按前台进程组/进程信息判定，不保证后台 job 安全。
+
 用法：
   python3 scripts/pane-audit.py                       # dry-run 只报告
   python3 scripts/pane-audit.py --apply               # 自检默认：关闭空 tab/空 pane/完成流 tab
@@ -835,6 +838,8 @@ def build_parser() -> argparse.ArgumentParser:
             "blocked 巡检：读取 <crew-dir>/inbox 回执，blocked agent 取最新回执（ts 最大），"
             "仍 blocked 且年龄 > --blocked-grace（默认 30 分钟）时告警 blocked-overdue，"
             "按 R6 处置（re-task / close / escalate）；仅报告，--apply 不关闭。\n"
+            "后台 job 语义：pane 内后台 job（& / nohup 等）在 --apply 关闭 pane 时仍可能"
+            "收到 SIGHUP；本工具只按前台进程组/进程信息判定，不保证后台 job 安全。\n"
             "示例：python3 scripts/pane-audit.py --snapshot snapshot.json\n"
             "      python3 scripts/pane-audit.py --apply\n"
             "      python3 scripts/pane-audit.py --blocked-grace 45 --crew-dir <git-common-dir>/crew"

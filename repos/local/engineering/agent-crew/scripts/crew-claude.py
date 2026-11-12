@@ -38,6 +38,12 @@ stdout 只打印一行摘要；诊断写 stderr。
 模型空白＝通道默认：`model=""` 合法，rc=0，不设 `ANTHROPIC_MODEL`（子进程用
 CLI 自身默认模型），不会返回 2。
 
+运行注册（FB-040）：启动 claude 前在 `<crew-dir>/runs/` 原子写
+`claude-<pid>-<随机>.json`（pid/role/backend/model/started_at/out_dir/root/command），
+`crew_dir` 经 `crew_paths.crew_dir(root)` 解析；正常结束、非零 rc、超时统一删除
+（try/finally）。注册失败只 stderr 告警，不阻断 run；`meta.json` 的 `runs_registry`
+记注册文件路径（未注册为 null）。
+
 决策：不判断模型是否为 CLI 已知别名，一律走 env（网关自定义模型 CLI 不识别；已知
 别名走 env 同样生效），避免双分支。
 """
@@ -52,9 +58,14 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.dont_write_bytecode = True  # 不在项目 scripts/ 留 __pycache__
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from crew_paths import CrewPathsError, crew_dir as resolve_crew_dir  # noqa: E402
 
 EXIT_OK = 0
 EXIT_LOCAL = 1
@@ -183,6 +194,66 @@ def stderr_excerpt(data: bytes) -> str:
     return text[-STDERR_EXCERPT:] if text else "<空>"
 
 
+def register_run(root: Path, role: str, backend: str, model: str,
+                 out_dir: Path) -> Path | None:
+    """在 `<crew-dir>/runs/` 原子写运行注册（FB-040）；失败只告警返回 None。"""
+    try:
+        runs_dir = resolve_crew_dir(root) / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        path = runs_dir / f"claude-{os.getpid()}-{uuid.uuid4().hex[:8]}.json"
+        payload = {
+            "pid": os.getpid(),
+            "role": role,
+            "backend": backend,
+            "model": model,
+            "started_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "out_dir": str(out_dir.resolve()),
+            "root": str(root),
+            "command": "crew-claude.py run",
+        }
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=False)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        finally:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        return path
+    except (CrewPathsError, OSError, RuntimeError, ValueError) as exc:
+        print(f"crew-claude: warning: 运行注册失败（run 继续，guard 将看不到本次运行）："
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return None
+
+
+def unregister_run(path: Path | None) -> None:
+    """删除自己的运行注册；二次删除静默（FB-040）。"""
+    if path is None:
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        print(f"crew-claude: warning: 运行注册清理失败：{path}（{exc}）",
+              file=sys.stderr)
+
+
+@contextmanager
+def run_registration(root: Path, role: str, backend: str, model: str,
+                     out_dir: Path):
+    """包住整次运行的注册生命周期：进入即注册，任何退出路径都清理。"""
+    path = register_run(root, role, backend, model, out_dir)
+    try:
+        yield path
+    finally:
+        unregister_run(path)
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     root, config = resolve_root(args.root, args.config)
     agents = load_agents(config)
@@ -228,82 +299,87 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     started = time.monotonic()
     timed_out = False
-    with open(prompt, "rb") as stdin:
-        try:
-            proc = subprocess.Popen(
-                argv, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                cwd=str(root), env=env, start_new_session=True)
-        except OSError as exc:
-            raise EnvError(f"启动 claude 失败：{exc}") from exc
-        try:
-            stdout, stderr = proc.communicate(timeout=args.timeout)
-            rc = proc.returncode
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            kill_group(proc)
+    with run_registration(root, args.role, backend, model, out_dir) as runs_registry:
+        with open(prompt, "rb") as stdin:
             try:
-                stdout, stderr = proc.communicate(timeout=10)
+                proc = subprocess.Popen(
+                    argv, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    cwd=str(root), env=env, start_new_session=True)
+            except OSError as exc:
+                raise EnvError(f"启动 claude 失败：{exc}") from exc
+            try:
+                stdout, stderr = proc.communicate(timeout=args.timeout)
+                rc = proc.returncode
             except subprocess.TimeoutExpired:
-                stdout, stderr = b"", b""
-            rc = EXIT_TIMEOUT
-    duration = time.monotonic() - started
-    if rc < 0:
-        rc = 128 + (-rc)
+                timed_out = True
+                kill_group(proc)
+                try:
+                    stdout, stderr = proc.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    stdout, stderr = b"", b""
+                rc = EXIT_TIMEOUT
+        duration = time.monotonic() - started
+        if rc < 0:
+            rc = 128 + (-rc)
 
-    meta = {
-        "role": args.role,
-        "playbook": args.playbook or "",
-        "backend": backend,
-        "model": model,
-        "model_source": source,
-        "rc": rc,
-        "timeout": timed_out,
-        "timeout_seconds": args.timeout,
-        "bytes": len(stdout),
-        "stderr_bytes": len(stderr),
-        "duration": round(duration, 3),
-        "prompt": display_path(prompt, root),
-        "report": display_path(report_path, root),
-        "stderr_path": display_path(stderr_path, root),
-        "rc_path": display_path(rc_path, root),
-        "claude": claude_bin,
-        "argv": argv,
-    }
+        meta = {
+            "role": args.role,
+            "playbook": args.playbook or "",
+            "backend": backend,
+            "model": model,
+            "model_source": source,
+            "rc": rc,
+            "timeout": timed_out,
+            "timeout_seconds": args.timeout,
+            "bytes": len(stdout),
+            "stderr_bytes": len(stderr),
+            "duration": round(duration, 3),
+            "prompt": display_path(prompt, root),
+            "report": display_path(report_path, root),
+            "stderr_path": display_path(stderr_path, root),
+            "rc_path": display_path(rc_path, root),
+            "claude": claude_bin,
+            "argv": argv,
+            "runs_registry": (
+                display_path(runs_registry, root) if runs_registry else None),
+        }
 
-    # 一次落盘：报告 / stderr / rc / meta 全部在子进程结束后写入
-    write_bytes_atomic(report_path, stdout)
-    write_bytes_atomic(stderr_path, stderr)
-    write_bytes_atomic(rc_path, f"{rc}\n".encode("utf-8"))
-    write_bytes_atomic(
-        meta_path, (json.dumps(meta, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+        # 一次落盘：报告 / stderr / rc / meta 全部在子进程结束后写入
+        write_bytes_atomic(report_path, stdout)
+        write_bytes_atomic(stderr_path, stderr)
+        write_bytes_atomic(rc_path, f"{rc}\n".encode("utf-8"))
+        write_bytes_atomic(
+            meta_path,
+            (json.dumps(meta, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
 
-    problems: list[str] = []
-    if timed_out:
-        problems.append(f"超时（>{args.timeout}s），已杀子进程组")
-    elif rc != 0:
-        problems.append(f"claude rc={rc}；stderr 摘要：{stderr_excerpt(stderr)}")
-    if len(stdout) == 0:
-        problems.append("报告为空（stdout 0 字节）")
+        problems: list[str] = []
+        if timed_out:
+            problems.append(f"超时（>{args.timeout}s），已杀子进程组")
+        elif rc != 0:
+            problems.append(f"claude rc={rc}；stderr 摘要：{stderr_excerpt(stderr)}")
+        if len(stdout) == 0:
+            problems.append("报告为空（stdout 0 字节）")
 
-    if timed_out:
-        exit_code = EXIT_TIMEOUT
-    elif rc != 0:
-        exit_code = rc
-    elif problems:
-        exit_code = EXIT_LOCAL
-    else:
-        exit_code = EXIT_OK
+        if timed_out:
+            exit_code = EXIT_TIMEOUT
+        elif rc != 0:
+            exit_code = rc
+        elif problems:
+            exit_code = EXIT_LOCAL
+        else:
+            exit_code = EXIT_OK
 
-    status = "ok" if exit_code == EXIT_OK else "failed"
-    print(
-        f"crew-claude: {status} role={args.role} model={model or '<channel-default>'} "
-        f"backend={backend} rc={rc} bytes={len(stdout)} duration={duration:.1f}s "
-        f"report={display_path(report_path, root)} meta={display_path(meta_path, root)}")
-    if problems:
-        print(f"crew-claude: 失败：{'；'.join(problems)}", file=sys.stderr)
-        print(f"crew-claude: 证据：{display_path(stderr_path, root)} / "
-              f"{display_path(meta_path, root)}", file=sys.stderr)
-    return exit_code
+        status = "ok" if exit_code == EXIT_OK else "failed"
+        print(
+            f"crew-claude: {status} role={args.role} "
+            f"model={model or '<channel-default>'} "
+            f"backend={backend} rc={rc} bytes={len(stdout)} duration={duration:.1f}s "
+            f"report={display_path(report_path, root)} meta={display_path(meta_path, root)}")
+        if problems:
+            print(f"crew-claude: 失败：{'；'.join(problems)}", file=sys.stderr)
+            print(f"crew-claude: 证据：{display_path(stderr_path, root)} / "
+                  f"{display_path(meta_path, root)}", file=sys.stderr)
+        return exit_code
 
 
 def build_parser() -> argparse.ArgumentParser:

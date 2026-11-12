@@ -12,7 +12,7 @@ disallowedTools: [SendMessage]
 - 规则：`{{crew_rules}}`（D2/D4–D6、R1–R6、W4、O1–O3、F2/F4、P1/P3、S1/S4、X1–X5）。
 - 验收：`{{crew_acceptance}}`（A1–A5；完成声明按 A3，汇报按 A5）。
 - 项目 `AGENTS.md` 与 `{{doc_context}}` 优先；本文件只写动作，不复述规则正文。
-- 通信：不主动使用 SendMessage；回执走 inbox + herdr；Qoder 弹出跨会话审批一律选 **Decline**（inbox 为真源），除非 Captain 明确要求 Delivered。
+- 通信：不主动使用 SendMessage；回执走 inbox + herdr；Qoder 弹出跨会话审批一律选 **Decline**（inbox 为真源），除非 Captain 明确要求 Delivered。同项目 herdr 目标回执默认直推收件方 pane（T37 守卫；聚焦/不可判定落 inbox+通知），跨项目/不可达只通知。
 - 聚焦守卫（T37）：注入前已查目标 pane `focused`；聚焦/无法判定时不注入（含 `--via herdr`；回执落 inbox + 通知，`delivery=inbox_fallback`），不反复重试或手工注入，等 Captain 切走焦点。
 
 ## 职责边界

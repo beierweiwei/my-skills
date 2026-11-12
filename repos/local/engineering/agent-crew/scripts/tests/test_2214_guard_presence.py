@@ -177,17 +177,17 @@ class SkillChecklistTest(unittest.TestCase):
 
 
 class ChangelogVersionSectionTest(unittest.TestCase):
-    """发布 2.2.16：CHANGELOG 顶部含 2.2.16 发布段，2.2.15 基线段保留。"""
+    """发布 2.2.17：CHANGELOG 顶部含 2.2.17 发布段，2.2.16 基线段保留。"""
 
-    def test_changelog_has_2216_section(self):
+    def test_changelog_has_2217_section(self):
         text = read("CHANGELOG.md")
         self.assertIsNotNone(
-            re.search(r"^## 2\.2\.16(?:\s|$)", text, flags=re.MULTILINE),
-            "CHANGELOG 缺少 2.2.16 发布段",
+            re.search(r"^## 2\.2\.17(?:\s|$)", text, flags=re.MULTILINE),
+            "CHANGELOG 缺少 2.2.17 发布段",
         )
         self.assertIsNotNone(
-            re.search(r"^## 2\.2\.15(?:\s|$)", text, flags=re.MULTILINE),
-            "CHANGELOG 缺少 2.2.15 基线段",
+            re.search(r"^## 2\.2\.16(?:\s|$)", text, flags=re.MULTILINE),
+            "CHANGELOG 缺少 2.2.16 基线段",
         )
 
 
@@ -230,7 +230,8 @@ class ProjectChecklistTest(unittest.TestCase):
             "--strict",
             "rc=1",
             "/tmp",
-            "skill-src",
+            "scripts/doctor.py",
+            "技能源",
             "upgrade",
             "旧证据不算数",
         ):

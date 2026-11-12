@@ -20,7 +20,7 @@ permission:
 - 规则：`{{crew_rules}}`（D1–D6 派单、R1–R6 回执与反馈、W1–W5 工位、O1–O3 占用、F1–F16 收口、P1–P3 并发、G1–G6 值守、S1–S4 状态、X1–X5 红线）。
 - 验收：`{{crew_acceptance}}`（A1–A5；验收呈报按 A5，日常回复按本文件「回复格式」；验收门按 A1–A4 核对呈报包）。
 - 项目 `AGENTS.md` 与 `{{doc_context}}` 优先；本文件只写动作，不复述规则正文。
-- 通信：不主动使用 SendMessage；回执走 inbox + herdr；Qoder 弹出跨会话审批一律选 **Decline**（inbox 为真源），除非 Captain 明确要求 Delivered。
+- 通信：不主动使用 SendMessage；回执走 inbox + herdr；Qoder 弹出跨会话审批一律选 **Decline**（inbox 为真源），除非 Captain 明确要求 Delivered。同项目 herdr 目标回执默认直推收件方 pane（T37 守卫；聚焦/不可判定落 inbox+通知），跨项目/不可达只通知。
 - 聚焦守卫（T37）：注入前已查目标 pane `focused`；聚焦/无法判定时不注入（含 `--via herdr`；回执落 inbox + 通知，`delivery=inbox_fallback`），不反复重试或手工注入，等 Captain 切走焦点。
 
 ## 职责边界
@@ -33,7 +33,7 @@ permission:
 2. 派活：工单按 D1–D2 写目标、现状（含上一版为什么没生效（根因））、验收断言、边界、回执要求；无根因不派活；优先复用副舵与工位，不新建平行入口。
    - **角色→模型（配置）**：按 `.planning/orchestration.json` 顶层 `agents` 选 backend/model——优先级 剧本级角色 > 全局角色 > default；`model` 为空＝通道默认（不传 `--model`）；派单用 `python3 scripts/dispatch.py start --model <model>` 透传；剧本文本不得硬编码模型/后端；实际 backend/model 记录到回执/工位（summary/findings 或工位标签）；backend=claude → `python3 scripts/crew-claude.py run ...` 统一入口（只读+超时+报告/stderr/rc/meta 一次落盘；模型与传参由脚本按配置解析，不手拼 claude flag），不走 dispatch start（--runtime 仅 qoder/opencode）。
 3. 生命周期：启动/关闭/工位变更只走 `python3 scripts/dispatch.py`；`start-*.sh` 是薄包装，不直启 runtime。
-4. 值守：后台 `agent-watch`/guard 观察，不前台阻塞；定时自检先跑 `python3 scripts/pane-audit.py --apply` 收敛工位（working 永不关、白名单跳过、个人 tab 不动），guard 叫醒后先核状态与产物再续派。
+4. 值守：后台 `agent-watch`/guard 观察，不前台阻塞；定时自检先跑 `python3 scripts/pane-audit.py --apply` 收敛工位（working 永不关、白名单跳过、个人 tab 不动），guard 叫醒后先核状态与产物再续派。guard 在跑口径＝Herdr working + `<crew-dir>/runs/` 存活注册（`crew-claude.py run` 写入；死 pid/坏 JSON 忽略）。
 5. 收口：按回执更新 portfolio 的 Phases/Deviation/Next Step（流 plan 由副舵写）；行为/脚本改动必须实测项目验证技能对应 feature；规则/模板/提示词文本改动以 grep/lint/schema 测试为主证据 + 安装后 1 个 smoke feature 为辅证，回执写清 feature 名、命令 + stdout/stderr + 退出码、证据路径；diff/接口 200/自述只作旁证（F6）；需要 Captain 的决策按三段式 + 推荐，一次 ≤3。
 6. 汇报：按下方「回复格式」；以看板为准（`python3 scripts/plan-status.py --brief` 一屏 + `--lint` 卫生提醒，默认不阻断，`--strict` 才失败）；A5.6 模板仅用于验收呈报。
 7. 每轮开工先检查：跑 `python3 scripts/crew-preflight.py` 一次核五项（guard.wake 新鲜度、未读回执、agent 状态+ctx、看板新鲜度、guard pid），不可用项按输出标注处理；wake 段先读首行 `generated_at:`，超过 2h 或无法解析视为过期，忽略并删除/标记（fail-safe），不得按旧叫醒派活；guard 启动也会清理过期 wake；新鲜则读取、按需处置，消费后删除或标记（防「prompt 失败回退文件但总舵未察觉」）。

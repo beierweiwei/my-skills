@@ -6,8 +6,8 @@
   ① guard.wake 新鲜度：有无 / 首行 generated_at / 是否超过 TTL（默认 7200s）
   ② 未读回执：inbox 文件；T42 已读游标（inbox-read-cursor.json）就绪时按其扣减，
      未就绪或损坏时按全部回执计数并标注
-  ③ herdr agent 状态 + ctx：本仓 cwd 的 agent；`herdr pane read` 可解析时给出
-     ctx（与 crew-guard.py 同口径），不可解析标未知
+  ③ herdr agent 状态 + ctx：本仓（含 `git worktree list` 的 linked worktree）cwd 的
+     agent；`herdr pane read` 可解析时给出 ctx（与 crew-guard.py 同口径），不可解析标未知
   ④ 看板新鲜度：调用 plan-status.py --check-fresh
   ⑤ guard pid：guard.lock + 进程存活 + 锁持有
 
@@ -275,6 +275,31 @@ def _herdr_pane_ctx(herdr_bin: str, pane: str) -> str:
     return f"{ctx_k:g}k/1M"
 
 
+def _git_worktree_roots(root: Path) -> list[Path]:
+    """`git worktree list --porcelain` 的 linked worktree 路径；失败返回空表不崩。"""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "worktree", "list", "--porcelain"],
+            text=True, capture_output=True, check=False, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0:
+        return []
+    roots: list[Path] = []
+    for line in proc.stdout.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        value = line[len("worktree "):].strip()
+        if not value:
+            continue
+        try:
+            roots.append(Path(value).expanduser().resolve())
+        except (OSError, RuntimeError):
+            continue
+    return roots
+
+
 def check_agents(root: Path, herdr_bin: str = "herdr") -> dict:
     source = f"{herdr_bin} agent list + pane read"
     try:
@@ -297,8 +322,12 @@ def check_agents(root: Path, herdr_bin: str = "herdr") -> dict:
     if not isinstance(agents, list):
         return _unavailable("agents", "herdr agent list 缺 agents", source)
 
-    project = [item for item in agents
-               if isinstance(item, dict) and _is_under(item.get("cwd"), root)]
+    project_roots = [root.resolve(), *_git_worktree_roots(root)]
+    project = [
+        item for item in agents
+        if isinstance(item, dict)
+        and any(_is_under(item.get("cwd"), candidate) for candidate in project_roots)
+    ]
     project.sort(key=lambda item: str(item.get("name") or ""))
     if not project:
         return _check("agents", available=True, ok=True,
@@ -361,13 +390,19 @@ def _pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
+    except OverflowError:
+        return False
     return True
 
 
 def _lock_held(path: Path) -> tuple[bool, str]:
-    """flock 探测：guard 存活时持有 guard.lock；返回 (held, error)。"""
+    """flock 探测：guard 存活时持有 guard.lock；返回 (held, error)。
+
+    只读打开：guard.lock 在 is_file 与 open 之间被删时返回 (False, 原因)，
+    不会留下空锁文件污染后续判断。
+    """
     try:
-        with open(path, "a+", encoding="utf-8") as handle:
+        with open(path, "r", encoding="utf-8") as handle:
             try:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
