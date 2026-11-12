@@ -34,6 +34,11 @@ try:  # T33 覆盖集与 upgrade 同口径（init 顶层无副作用）；init �
 except Exception:  # noqa: BLE001
     init_lib = None  # type: ignore[assignment]
 
+try:  # B-1：源新增受管脚本只有读源侧 AST 清单才能发现（复用 upgrade 实现）
+    import upgrade as upgrade_lib  # noqa: E402
+except Exception:  # noqa: BLE001
+    upgrade_lib = None  # type: ignore[assignment]
+
 MARK_START = "<!-- agent-crew:orchestration:start -->"
 MARK_END = "<!-- agent-crew:orchestration:end -->"
 BLOCK_LINE_LIMIT = 150
@@ -435,6 +440,24 @@ class Doctor:
         return [entry for entry in entries
                 if isinstance(entry, dict) and entry.get("kind") == kind]
 
+    def managed_script_names(self, source: Path) -> list[str]:
+        """受管脚本覆盖集=源 AST 清单 ∪ manifest entries ∪ 本进程 init 清单。
+
+        项目内安装的 init 清单可能滞后一代（首升中间态）；源新增脚本只有读源侧
+        AST 清单才可见，否则会漏报「项目缺失 scripts/<新脚本>」。upgrade 缺失或
+        读取失败时回退本进程清单（不劣于旧行为）。
+        """
+        names: list[str] = []
+        reader = getattr(upgrade_lib, "source_script_manifest", None)
+        if callable(reader):
+            names.extend(reader(source))
+        names.extend(init_lib.SCRIPT_MANIFEST)
+        for entry in self.manifest_entries("file"):
+            rel = str(entry.get("path") or "")
+            if rel.startswith("scripts/") and rel.endswith((".py", ".sh")):
+                names.append(Path(rel).name)
+        return list(dict.fromkeys(name for name in names if name))
+
     def role_entries(self) -> list[dict]:
         entries: list[dict] = []
         qoder_dir = self.root / ".qoder/agents"
@@ -740,6 +763,44 @@ class Doctor:
             return Result("agents.block", "warn", "块体合法，但 manifest 未登记 block hash",
                           next="init --refresh-block --confirm")
         return Result("agents.block", "pass", f"块体 {line_count} 行；blockSha256 一致")
+
+    def check_agents_template_drift(self) -> Result:
+        """T35：按当前技能模板渲染比对 AGENTS 受管块（模板升级/配置变更 → 过期）。"""
+        if init_lib is None:
+            return Result("agents.drift", "skip", "init 模块不可用，跳过模板渲染比对")
+        skill_root = self.skill_root()
+        if skill_root is None or not skill_root.is_dir():
+            return Result("agents.drift", "skip", f"skillRoot 不可读：{skill_root}")
+        templates = skill_root / "templates"
+        template = templates / "AGENTS-编排节.md"
+        if not template.is_file():
+            return Result("agents.drift", "skip", f"技能模板不可读：{template}")
+        text = read_text(self.root / "AGENTS.md")
+        if text is None:
+            return Result("agents.drift", "skip", "AGENTS.md 不存在（由 agents.block 负责）")
+        body, errors = block_body(text)
+        if errors:
+            return Result("agents.drift", "skip", "AGENTS.md 标记非法（由 agents.markers 负责）")
+        try:
+            cfg, _ = init_lib.load_config(self.root, templates)
+            cfg = init_lib.prepare_config(
+                self.root, cfg, None, init_lib.read_skill_version(skill_root),
+                source_dir=skill_root)
+            rendered = init_lib.marker_scan(init_lib.render_agents_section(
+                templates, init_lib.render_context(cfg, self.root)))["body"]
+        except Exception as exc:  # noqa: BLE001 - 配置/模板不可读按 skip，不误报
+            return Result("agents.drift", "skip",
+                          f"模板渲染不可用：{type(exc).__name__}: {exc}")
+        if body != rendered:
+            return Result(
+                "agents.drift", "warn",
+                "AGENTS 受管块已过期：与当前技能模板渲染不一致"
+                "（技能模板已升级或渲染配置已变更）",
+                evidence={"blockSha256": sha256_bytes(body.encode("utf-8")),
+                          "renderedSha256": sha256_bytes(rendered.encode("utf-8"))},
+                next="python3 scripts/init.py --refresh-block --confirm",
+            )
+        return Result("agents.drift", "pass", "受管块与当前技能模板渲染一致")
 
     def check_agents_budget(self) -> Result:
         path = self.root / "AGENTS.md"
@@ -2109,10 +2170,11 @@ class Doctor:
                       f"config/源/manifest 版本一致：{config_version}")
 
     def check_install_scripts_source(self) -> Result:
-        """受管脚本与安装源一致（T33 假绿防护）。
+        """受管脚本与安装源一致（T33 假绿防护 + B-1 口径统一）。
 
-        覆盖集=当前 init.SCRIPT_MANIFEST（与 upgrade 同口径）：源缺失、项目缺失、
-        两侧不一致均 warn；全部存在且一致才 pass；不可判定（缺 manifest/源）skip。
+        覆盖集=安装源 AST 清单 ∪ manifest entries ∪ 本进程 init 清单（与 upgrade
+        复核同一口径）：源缺失、项目缺失、两侧不一致均 warn；全部存在且一致才
+        pass；不可判定（缺 manifest/源/init）skip。
         """
         manifest = self.manifest()
         if manifest is None:
@@ -2128,7 +2190,7 @@ class Doctor:
         project_missing: list[str] = []
         mismatches: list[str] = []
         compared = 0
-        for name in init_lib.SCRIPT_MANIFEST:
+        for name in self.managed_script_names(source):
             rel = Path("scripts") / name
             origin = source / rel
             if not origin.is_file():
@@ -2162,7 +2224,8 @@ class Doctor:
                 evidence={"compared": compared, "sourceMissing": source_missing,
                           "projectMissing": project_missing,
                           "mismatches": mismatches},
-                next=("运行 python3 scripts/upgrade.py --apply --confirm 后再核；"
+                next=("运行 python3 scripts/upgrade.py --apply --confirm 后再核"
+                      "（源新增受管脚本时可能需再跑一次 upgrade）；"
                       "源不完整时先修复技能源安装"))
         return Result("install.scripts_source", "pass",
                       f"受管脚本与安装源一致（核对 {compared} 项）")
@@ -2314,7 +2377,7 @@ def _lock_text_pid(text: str) -> int | None:
 CHECKS = [
     "manifest.schema", "manifest.hash.file", "manifest.hash.block", "manifest.config",
     "manifest.roleStubs", "manifest.orphan",
-    "agents.markers", "agents.block", "agents.budget", "agents.duplicate", "agents.pending",
+    "agents.markers", "agents.block", "agents.drift", "agents.budget", "agents.duplicate", "agents.pending",
     "agents.config",
     "context.baseline",
     "docs.duplicate", "docs.pointers", "skill.source", "docs.links",
@@ -2340,6 +2403,7 @@ METHODS = {
     "manifest.orphan": "check_manifest_orphan",
     "agents.markers": "check_agents_markers",
     "agents.block": "check_agents_block",
+    "agents.drift": "check_agents_template_drift",
     "agents.budget": "check_agents_budget",
     "agents.duplicate": "check_agents_duplicate",
     "agents.pending": "check_agents_pending",

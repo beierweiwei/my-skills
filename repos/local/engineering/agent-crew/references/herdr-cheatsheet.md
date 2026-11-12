@@ -52,6 +52,7 @@ python3 scripts/dispatch.py --root . status --json
 ```
 
 - **角色与权限**：项目角色文件（`.qoder/agents/<role>.md` / `.opencode/agent/<role>.md`）只放发现字段与 `extends: skill:<role>`；运行时 frontmatter/权限只取技能基类。Qoder 基类 `disallowedTools` 翻译为 `--disallowed-tools`；opencode 基类 `permission`/`mode` 原样进入组合产物。
+- **backend=claude**：只读外部调用统一走 `python3 scripts/crew-claude.py run ...`（模型按 `.planning/orchestration.json` 解析、经 `ANTHROPIC_MODEL` 传参，只读+超时，报告/stderr/rc/meta 一次落盘；不手拼 claude flag）。
 - **YOLO 模式**：副舵派 worker 时由 dispatch 透传 `--permission-mode bypass_permissions`（Qoder）或 `--auto`（opencode）；只在隔离 worktree 与明确工单边界内，合并/推送/清理与数据安全门禁不放宽。
 - **总舵**：`bash scripts/start-helm.sh`（内部走 dispatch）；agent 名取 `orchestration.json` 的 `helm.agentName`，默认派生 `helm-<项目名>`，同机全局唯一。
 - **opencode**：技能源已带 7 个 `mode: primary` 基类；项目 stub 由 init 生成。dispatch 以 `OPENCODE_CONFIG_DIR` 指向组合目录启动；用 `opencode agent list` 确认发现，改 agent/skill/config 后必须重启会话（不热重载）。
@@ -66,6 +67,10 @@ herdr agent get <task>-builder
 
 - 提示走 dispatch（写 agent-log）；`herdr agent read/get` 只读。
 - 派活/重发只走 dispatch（写 agent-log）；排障先看 dispatch 日志，不把手工生命周期命令当主路径。
+- **聚焦守卫（T37）**：qoder 直推、`dispatch notify`、guard 叫醒注入前都会查目标 pane 的 `focused`（`herdr pane list`）。目标 pane 聚焦（Captain 正在输入）或聚焦状态无法判定时**不注入**：回执/通知落 inbox，输出 `delivery=inbox_fallback`；`dispatch prompt` 直接拒绝并返回 rc=2。等 Captain 切走焦点后重试，或用 `crew-msg.py write` 落 inbox + 通知；不要反复重试或手工注入。`--via sendmessage` 行为不变。
+  - **`--via herdr` 同此口径**（A-2）：聚焦/不可判定同样不注入、落 inbox + 通知，结果仍是 `inbox_fallback` 且 note 显式标注强制模式；只有 herdr 调用本身失败才回退 DELEGATE 并返回诊断错误。
+  - **目标不可达 ≠ 聚焦回退**（A-1）：目标不在本机 `herdr agent list`、或 agent list 调用失败/不可解析时，`crew-msg.py` 报 `ok=false` + rc=3（不报 `inbox_fallback ok=true`），回执只落发送方 inbox；核对目标名/在线状态后重推。
+  - **已知限制（A-4）**：focused 判定与 `agent prompt` 注入是两次独立 CLI 调用，herdr 未提供原子 `--if-unfocused` 选项（`agent prompt` 只有 `--wait`/`--until`/`--timeout`）；Captain 恰在两步之间切入目标 pane 时注入仍会发生，残余竞态窗口无法由 CLI 消除，本守卫只收窄不归零。
 - `recent-unwrapped` 适合读长输出；读不到时让它把结论写成 Markdown 文件，再读文件。
 - 超时不等于 prompt 没送到，不要盲目重复提交。
 - 编排会话内禁止前台 `--wait` 占住主控：改用后台 `python3 scripts/agent-watch.py --interval 15` 或完成通知。
@@ -91,7 +96,7 @@ herdr agent send-keys <task>-builder enter    # 仅人工恢复：默认选中 A
 ```bash
 herdr agent list                      # 所有 Agent 状态（只读）
 herdr tab list                        # 当前 workspace 的 tab（只读）
-herdr pane list                       # pane 清单（只读）
+herdr pane list                       # pane 清单（只读；focused 字段为聚焦守卫真源）
 herdr tab rename <tab_id> 新名字
 # 关 tab / pane 走 dispatch（写 agent-log、带工位约束）
 python3 scripts/dispatch.py --root . tab close --tab <tab_id>
@@ -101,7 +106,7 @@ python3 scripts/dispatch.py --root . pane close --pane <pane_id>
 - TUI 里 `Ctrl+B` 然后 `Q` detach；Agent 继续在后台跑，重新 `herdr` 回来。
 - 上下文：看 CLI 状态栏的 `ctx` 用量。运行中的会话**不压缩**；worker（Builder/Reviewer/Scout）≥30% 不再接新切片，完成当前切片后停止，下一轮会话开始前统一 `/compact` 或重建；压缩摘要即交接，不单独写 handoff；主控/Planner ≥60% 停止接新任务，下一轮开始前压缩/重建。Herdr 只保活进程，不保存对话上下文。
 - 后台监听：`python3 scripts/agent-watch.py --interval 15`（可加 `--workspace` / `--agent`）轮询 `herdr agent list`，状态变化发 Herdr 通知；不要前台 `--wait` 长时间阻塞。`worktree-watch.py` 只监控 worktree，不监控 Agent。状态去重文件默认 `.git/agent-watch.state`（全 worktree 共用一份，键为 `workspace/agent`，可用 `--state-file` 另指）；手工抽查用 `python3 scripts/agent-watch.py --once --no-notify --state-file /tmp/aw-check.state`，不要污染常驻监听的基线；通知只在 `HERDR_ENV=1`（Herdr 内）生效，Herdr 外只打印不通知。
-- 后台建 tab / 启动 Agent 用 `--no-focus`，不要抢当前输入；dispatch 的 prompt 不抢焦点，无需额外参数。
+- 后台建 tab / 启动 Agent 用 `--no-focus`，不要抢当前输入；dispatch 的 prompt 不抢焦点，但目标 pane 聚焦时不注入（见 §5 聚焦守卫）。
 - worktree：`python3 scripts/worktree-watch.py` 看未合并/未提交；常驻监控用 `--interval 60`，状态变化会发 Herdr 通知。合并与清理必须经 Captain 同意，由大副执行。
 - 不要裸跑 `herdr` 做命令发现，它会启动 TUI；用 `herdr <命令组>` 看帮助。
 

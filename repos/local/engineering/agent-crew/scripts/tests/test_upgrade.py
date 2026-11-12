@@ -200,22 +200,30 @@ class UpgradeTest(unittest.TestCase):
             capture_output=True, text=True)
         self.assertEqual(doctor.returncode, 0, doctor.stdout)
 
-    def test_diff_report_follows_manifest_entries(self):
-        # D：diff_report 以 manifest entries（kind:file 且 scripts/*.py|*.sh）为准，
-        # 不再固定遍历 init_lib.SCRIPT_MANIFEST。
+    def test_diff_report_unions_source_manifest_and_entries(self):
+        # T34：受管集合 = 源 SCRIPT_MANIFEST ∪ manifest entries；entries 不能反向收窄，
+        # 源清单外的额外条目仍按 file 条目纳入 diff。
+        custom_source = self.v2 / "scripts/custom-tool.py"
+        custom_source.write_text("#!/usr/bin/env python3\nprint('custom')\n",
+                                 encoding="utf-8")
+        custom_project = self.root / "scripts/custom-tool.py"
+        custom_project.write_text(custom_source.read_text(encoding="utf-8"),
+                                  encoding="utf-8")
         manifest_path = self.root / "docs/crew/manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest["entries"] = [
             entry for entry in manifest["entries"]
             if entry.get("path") == "scripts/dispatch.py"
-        ]
+        ] + [{"kind": "file", "path": "scripts/custom-tool.py", "sha256": ""}]
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
                                  encoding="utf-8")
         diff = self.upgrade("--diff", "--json")
         self.assertEqual(diff.returncode, 0, diff.stderr)
         report = json.loads(diff.stdout)
-        self.assertEqual(["scripts/dispatch.py"],
-                         [row["path"] for row in report["scripts"]])
+        paths = [row["path"] for row in report["scripts"]]
+        self.assertIn("scripts/dispatch.py", report["changed"])
+        self.assertIn("scripts/init.py", paths)  # 源清单不被 manifest entries 收窄
+        self.assertIn("scripts/custom-tool.py", paths)  # 额外 entries 仍受管
         self.assertEqual(["scripts/dispatch.py"], report["changed"])
 
     def test_apply_install_log_next_not_stale(self):

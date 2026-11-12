@@ -43,7 +43,7 @@
 - 透传：派单时把选出的 model 传给 `python3 scripts/dispatch.py start --model <model>`；空 model 不传（走通道默认）。
 - 切换/切回只改 1–2 行：改 `agents.roles.<role>` 或 `agents.playbooks.<playbook>.roles.<role>` 的 `backend`/`model`，不改剧本与派单命令。
 - 剧本正文只声明 owner 角色，不写模型/后端；派单方按上述优先级解析，实际 backend/model 记录到回执/工位（summary/findings 或工位标签）。
-- claude 通道：`dispatch start --runtime` 只支持 qoder/opencode；backend=claude 时由 firstmate 派 Runner 执行只读 `claude -p ...`（报告落证据、发现由副舵复验），不走 `dispatch start`。
+- claude 通道：`dispatch start --runtime` 只支持 qoder/opencode；backend=claude 时由 firstmate 派 Runner 走 `python3 scripts/crew-claude.py run --role <role> --prompt <prompt.md> --out-dir <证据目录>` 统一入口执行（报告落证据、发现由副舵复验），不走 `dispatch start`；禁止绕过统一入口直调 claude。
 - 审计口径：技能层 `templates/playbooks/*.md` 随分发剧本（README 文档除外）不得出现角色/模型赋值（`backend`/`model` 键、具体模型 ID）；项目层 `.planning/playbooks/` 由项目自管。安装命令的 runtime 目标（如 `--agent qoder-cn,claude`）不属角色模型。
 
 ## 解析契约（硬）

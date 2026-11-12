@@ -762,7 +762,19 @@ class NotifyCommandTest(unittest.TestCase):
     def fake_herdr(self, argv: list[str]) -> str:
         self.calls.append(list(argv))
         if argv[:3] == ["herdr", "agent", "list"]:
-            return json.dumps({"result": {"agents": self.agents}})
+            agents = []
+            for agent in self.agents:
+                entry = dict(agent)
+                entry.setdefault("pane_id", f"pane-{entry.get('name', 'agent')}")
+                agents.append(entry)
+            return json.dumps({"result": {"agents": agents}})
+        if argv[:3] == ["herdr", "pane", "list"]:
+            panes = [
+                {"pane_id": agent.get("pane_id") or f"pane-{agent.get('name', 'agent')}",
+                 "focused": bool(agent.get("focused"))}
+                for agent in self.agents
+            ]
+            return json.dumps({"result": {"panes": panes}})
         return ""
 
     def dispatch_main(self, *args: str) -> tuple[int, str]:
@@ -788,21 +800,31 @@ class NotifyCommandTest(unittest.TestCase):
         code, out = self.dispatch_main(
             "notify", "--agent", "case-agent", "--message", "2.2.11 已发布", "--json")
         self.assertEqual(0, code)
+        # T28：literal 模式先查 herdr agent list 解析收件方 inbox；目标不在本机 →
+        # 只 prompt 并显式标记未落盘。
         self.assertEqual(
             [["herdr", "agent", "prompt", "case-agent",
-              "2.2.11 已发布\n" + dispatch_mod.RECEIPT_LINE]], self.calls)
+              "2.2.11 已发布\n" + dispatch_mod.RECEIPT_LINE]], self.prompt_calls())
         self.assertFalse(registry.exists())
         row = self.agent_log()[-1]
         self.assertEqual("notify", row["action"])
         self.assertEqual("case-agent", row["agent"])
         self.assertEqual("case-agent", row["target"])
-        self.assertEqual("literal", row["delivery"])
+        self.assertEqual("herdr", row["delivery"])
+        self.assertEqual("literal", row["target_resolution"])
+        self.assertIsNone(row["prompt_skipped"])
         self.assertTrue(row["receipt_required"])
         self.assertEqual("ok", row["result"])
+        self.assertEqual("skipped", row["inbox_status"])
+        self.assertIn("本机 herdr agent list", row["inbox_reason"])
         self.assertIn("ts", row)
         self.assertEqual(
-            {"agent": "case-agent", "target": "case-agent", "delivery": "literal",
-             "receipt_required": True, "result": "ok"}, json.loads(out))
+            {"agent": "case-agent", "target": "case-agent", "delivery": "herdr",
+             "target_resolution": "literal", "prompt_skipped": None, "notified": False,
+             "receipt_required": True,
+             "inbox": {"status": "skipped", "path": None,
+                       "reason": "目标不在本机 herdr agent list"},
+             "result": "ok"}, json.loads(out))
 
     def test_existing_registry_is_left_untouched(self):
         registry = dispatch_mod.registry_path(self.root)
@@ -811,12 +833,13 @@ class NotifyCommandTest(unittest.TestCase):
             json.dumps({"crew-helm": {"role": "helm", "runtime": "qoder"}}),
             encoding="utf-8")
         before = registry.read_bytes()
-        code, _ = self.dispatch_main(
+        code, out = self.dispatch_main(
             "notify", "--agent", "case-agent", "--message", "ping", "--no-require-receipt")
         self.assertEqual(0, code)
         self.assertEqual(before, registry.read_bytes())
         self.assertEqual(
-            [["herdr", "agent", "prompt", "case-agent", "ping"]], self.calls)
+            [["herdr", "agent", "prompt", "case-agent", "ping"]], self.prompt_calls())
+        self.assertIn("未落收件方 inbox", out)
 
     def test_cli_description_lists_notify(self):
         parser = dispatch_mod.build_parser()
@@ -858,12 +881,15 @@ class NotifyCommandTest(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertEqual(
             [["herdr", "agent", "list"],
+             ["herdr", "pane", "list"],
              ["herdr", "agent", "prompt", "helm-x-3", "请接管"]], self.calls)
         payload = json.loads(out)
-        self.assertEqual("resolved", payload["delivery"])
+        self.assertEqual("herdr", payload["delivery"])
+        self.assertEqual("resolved", payload["target_resolution"])
         self.assertEqual("helm-x-3", payload["target"])
         row = self.agent_log()[-1]
-        self.assertEqual("resolved", row["delivery"])
+        self.assertEqual("herdr", row["delivery"])
+        self.assertEqual("resolved", row["target_resolution"])
         self.assertEqual("helm-x-3", row["target"])
         self.assertEqual("helm", row["role"])
 

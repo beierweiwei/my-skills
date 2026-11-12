@@ -420,8 +420,8 @@ class ModelSelectionTest(unittest.TestCase):
                 "剧本文本不得硬编码模型/后端",
                 "实际 backend/model 记录到回执/工位",
                 "backend=claude",
-                "firstmate 派 Runner",
-                "`claude -p ...`",
+                "`python3 scripts/crew-claude.py run ...`",
+                "不手拼 claude flag",
                 "不走 dispatch start",
                 "--runtime 仅 qoder/opencode",
             ):
@@ -454,7 +454,7 @@ class ModelSelectionTest(unittest.TestCase):
             "claude 通道",
             "backend=claude",
             "firstmate 派 Runner",
-            "`claude -p ...`",
+            "crew-claude.py run",
             "不走 `dispatch start`",
             "`dispatch start --runtime` 只支持 qoder/opencode",
         ):
