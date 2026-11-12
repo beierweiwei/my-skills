@@ -3,7 +3,8 @@
 
 覆盖：
 - FB-009：两 helm 口头决策当轮落盘 + 回显 + 交接 digest「未落盘决策」栏；
-  crew-rules 新增 G6；索引/guide/两 helm/两 firstmate 的 G 范围更新为 G1–G6。
+  crew-rules 新增 G6；索引/guide/两 helm/两 firstmate 的 G 范围更新为 G1–G7
+  （A3/A4 随 C2 的 G7 同步）。
 - FB-010：两 firstmate 回合末先查 inbox，未处置回执/待续派不得结束回合。
 - FB-013：plan-discipline 与两 firstmate 的 Errors 当轮记录、空表写「无」禁「待记录」；
   10 个 worker 模板回执 findings 带出 Error/Resolution。
@@ -82,9 +83,9 @@ class Fb009HelmDecisionPersistenceTest(unittest.TestCase):
                 self.assertIn("未落盘决策", text)
                 self.assertIn("无则写「无」", text)
 
-    def test_crew_rules_adds_g6(self):
+    def test_crew_rules_adds_g6_and_indexes_g7(self):
         rules = read(CREW_RULES)
-        self.assertIn("| G | 值守 | G1–G6 |", rules)
+        self.assertIn("| G | 值守 | G1–G7 |", rules)
         g6_line = next(
             (line for line in rules.splitlines() if line.startswith("- **G6 ")),
             "",
@@ -114,11 +115,11 @@ class Fb009HelmDecisionPersistenceTest(unittest.TestCase):
                 offenders.append(str(path.relative_to(REPO_ROOT)))
         self.assertEqual([], offenders)
 
-    def test_guide_helm_firstmate_reference_g1_g6(self):
+    def test_guide_helm_firstmate_reference_g1_g7(self):
         paths = [GUIDE, *HELM.values(), *FIRSTMATE.values()]
         for path in paths:
             with self.subTest(path=str(path.relative_to(REPO_ROOT))):
-                self.assertIn("G1–G6", read(path))
+                self.assertIn("G1–G7", read(path))
 
 
 class Fb010FirstmateTurnEndTest(unittest.TestCase):

@@ -131,7 +131,7 @@ class CheatsheetSyncTest(unittest.TestCase):
             self.assertIn(phrase, line, f"T37 段缺少投递语义：{phrase}")
 
     def test_guard_section_documents_runs_registry(self):
-        line = line_with(read(CHEATSHEET), "guard 值守（G1–G6）", CHEATSHEET)
+        line = line_with(read(CHEATSHEET), "guard 值守（G1–G7）", CHEATSHEET)
         for phrase in (
             "runs/` 存活注册",
             "crew-claude.py run",
@@ -179,7 +179,7 @@ class GuideSyncTest(unittest.TestCase):
         self.assertIn("默认直推收件方 pane", line, "registry 段未说明 Herdr 目标默认直推")
 
     def test_guard_section_references_g4_runs_scope(self):
-        line = line_with(read(GUIDE), "待办/在跑口径见 G1–G6", GUIDE)
+        line = line_with(read(GUIDE), "待办/在跑口径见 G1–G7", GUIDE)
         for phrase in ("G4", "runs/` 存活注册", "crew-claude.py run"):
             self.assertIn(phrase, line, f"守卫段缺少在跑口径：{phrase}")
 

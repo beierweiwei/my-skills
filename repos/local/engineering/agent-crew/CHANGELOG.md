@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.2.20 — 2026-11-12
+
+关键决策对抗审查硬门（D7）、窗口对账回收（crew-reaper）、交接残留根因（FB-045），含互检/评审补口与本地发布。
+
+### 新增
+
+- **A/D7 关键决策对抗审查硬门**：`crew-rules.md` 新增 D7，`crew-acceptance.md` 新增 A3.3；qoder/opencode 的 helm/firstmate 四份模板在派单/收口/值守处写明「涉主数据/架构口径/验收口径/数据安全/范围变更的关键决策，实施前必须独立 Reviewer 对抗审查；Captain 直令不豁免（取证可并行）；阻断清零才实施；收口/评审门缺证据即阻断」；新增 `templates/playbooks/adversarial-review.md`（Frame/Review/Clear 只读骨架）并在 README 登记；`templates/AGENTS-编排节.md`「决策与门禁」接线（init 升级后自动获得）；F1 收口核对抗审查结论与证据。
+- **B 窗口对账回收 `scripts/crew-reaper.py`**：对账 dispatch 注册表 + 现役总舵（`guard.handoff` / registry）+ herdr pane/tab 现状；多个「总舵」tab 只保留现役，其余仅在 pane 全空或 agent idle/done、无 working/blocked/unknown、非聚焦、非白名单时先 pane close 再 tab close；旧 helm 残留同口径；无法判定（缺 handoff / 多候选 / 字段矛盾 / workspace 未知）零关闭只报告；默认 dry-run，`--apply` 才执行，统一走 dispatch；`--snapshot` 夹具与 `--apply` 互斥（rc=2）。登记进 `SCRIPT_MANIFEST`，init/upgrade/doctor/release-check 全链路覆盖；四份角色模板定时自检接入 `crew-reaper.py --apply --json`；guide §5.12 写明用法、对账三源、安全与 best-effort 边界。
+- **C 交接残留根因（FB-045）**：`crew-guard.py` 交接以 `oldPane` 反查 `oldTab`（pane list 权威、agent list 兜底），缺失/不一致以反查为准并写回 handoff + 告警，反查不到 fail-soft；`phase=done` 后对残留旧 helm 一次有界回收（仅 idle/done、非现役、非聚焦、非白名单；working/blocked/unknown 不关）；新增手工 handoff 字段校验；`pane-audit.py` 增「多个总舵 tab / 旧 helm 残留」finding（默认只报告，`--apply` 走 dispatch）；guard 每 15 轮调用 `crew-reaper.py --apply --json`（失败只记日志）；`crew-rules.md` G7 与 guide §5.11.1 同步交接口径。
+
+### 修复
+
+- 互检 B-1：pane-audit 在 handoff `done+failed` 时回退 registry 会把失败继任当现役并可关闭真实现役 tab——现统一判为无法判定（unknown），不回退 registry，负向测试锁定零关闭。
+- 互检 S-1–S-7：`--snapshot` 与 `--apply` 互斥；reaper 与 pane-audit 现役判定跨实现一致性测试；workspace 无法判定时零动作只报告；G 编号与模板同步（G1–G7）；best-effort 边界写入 help/docstring/guide；C 单先红证据补缺记观察。
+- 两轴评审 R-1：`crew-reaper.py` 未进 `SCRIPT_MANIFEST` 导致 init/upgrade/doctor/release-check 四处漏装且假绿——已登记并做删装/复原实测；S-1/S-2（互斥、guide 分工口径）同批修正。
+
+### 测试
+
+- 新增 `test_2220_adversarial_gate.py`、`test_2220_reaper.py`、`test_2220_handoff_rootcause.py`；补 `test_pane_audit.py`、`test_2211_patch.py`、`test_2217_docs_delivery_runs.py` 等断言（先红后绿）。
+- 全量 pytest 0 fail（本版 1370 passed + 1012 subtests）；`crew-lint`（含 `--purity`）、`plan-status --selftest`/`--playbooks` 绿。
+- 版本 2.2.20：`SKILL.md` frontmatter 与标题、`init.py` fallback、本段、`test_crew_lint.py`、`test_220_final.py`、`test_224_retro.py`、`test_225_patch.py`、`test_2214_guard_presence.py` 版本断言同步。
+
 ## 2.2.19 — 2026-11-12
 
 交接必读硬达标（A）与进度看板人类可读 v2（B），含互检/评审补口与本地发布。

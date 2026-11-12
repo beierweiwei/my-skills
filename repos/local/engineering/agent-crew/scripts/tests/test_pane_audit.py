@@ -454,12 +454,20 @@ class _MainTest(unittest.TestCase):
             # 未声明的 pane 一律「无法判定」，保持既有用例的只报告口径
             return pane_id in empty_panes if empty_panes is not None else None
 
+        extra = list(extra or [])
+        argv = ["--snapshot", str(path)] + extra
+        if "--apply" in extra:
+            # S-1：--apply 与 --snapshot 互斥；apply 用例改以 live snapshot 注入夹具
+            argv = extra
+            live_patch = mock.patch.object(pa, "load_live_snapshot", lambda: data)
+            live_patch.start()
+            self.addCleanup(live_patch.stop)
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(pa, "close_pane", fake_close_pane), \
                 mock.patch.object(pa, "close_tab", fake_close_tab), \
                 mock.patch.object(pa, "probe_empty_pane", fake_probe):
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                rc = pa.main(["--snapshot", str(path)] + (extra or []))
+                rc = pa.main(argv)
         return rc, out.getvalue(), err.getvalue(), recorded
 
     def _apply_fixture(self) -> dict:
@@ -611,12 +619,20 @@ class BlockedOverdueMainTest(unittest.TestCase):
             recorded["tabs"].append(tab_id)
             return True
 
+        extra = list(extra or [])
+        argv = ["--snapshot", str(path)] + extra
+        if "--apply" in extra:
+            # S-1：--apply 与 --snapshot 互斥；apply 用例改以 live snapshot 注入夹具
+            argv = extra
+            live_patch = mock.patch.object(pa, "load_live_snapshot", lambda: data)
+            live_patch.start()
+            self.addCleanup(live_patch.stop)
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(pa, "close_pane", fake_close_pane), \
                 mock.patch.object(pa, "close_tab", fake_close_tab), \
                 mock.patch.object(pa, "probe_empty_pane", lambda pane_id: None):
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                rc = pa.main(["--snapshot", str(path)] + (extra or []))
+                rc = pa.main(argv)
         return rc, out.getvalue(), err.getvalue(), recorded
 
     def _blocked_fixture(self) -> dict:
@@ -962,9 +978,10 @@ class FlowReclaimApplyGuardTest(unittest.TestCase):
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(pa, "close_tab", lambda tab_id: closed.append(tab_id) or True), \
                 mock.patch.object(pa, "close_pane", lambda _pane_id: True), \
-                mock.patch.object(pa, "probe_empty_pane", lambda _pane_id: None):
+                mock.patch.object(pa, "probe_empty_pane", lambda _pane_id: None), \
+                mock.patch.object(pa, "load_live_snapshot", lambda: data):
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                rc = pa.main(["--snapshot", str(path), "--apply", "--root", str(project)])
+                rc = pa.main(["--apply", "--root", str(project)])
         return rc, out.getvalue(), err.getvalue(), closed
 
     def _fixture(self) -> dict:
@@ -1010,9 +1027,10 @@ class ApplyRealProcessFixtureTest(unittest.TestCase):
             with mock.patch.object(pa, "herdr_json", lambda _args: payload), \
                     mock.patch.object(pa, "close_pane",
                                       lambda pane_id: closed.append(pane_id) or True), \
-                    mock.patch.object(pa, "close_tab", lambda _tab_id: True):
+                    mock.patch.object(pa, "close_tab", lambda _tab_id: True), \
+                    mock.patch.object(pa, "load_live_snapshot", lambda: data):
                 with contextlib.redirect_stdout(out):
-                    rc = pa.main(["--snapshot", str(path), "--apply"])
+                    rc = pa.main(["--apply"])
             self.assertEqual(0, rc)
             self.assertEqual([], closed, "跑脚本的 shell pane 不得被 --apply 关闭")
             self.assertNotIn("已关闭 pane p2", out.getvalue())
@@ -1045,9 +1063,10 @@ class ApplyReprobeTest(unittest.TestCase):
             with mock.patch.object(pa, "probe_empty_pane", flaky_probe), \
                     mock.patch.object(pa, "close_pane",
                                       lambda pane_id: closed.append(pane_id) or True), \
-                    mock.patch.object(pa, "close_tab", lambda _tab_id: True):
+                    mock.patch.object(pa, "close_tab", lambda _tab_id: True), \
+                    mock.patch.object(pa, "load_live_snapshot", lambda: data):
                 with contextlib.redirect_stdout(out):
-                    rc = pa.main(["--snapshot", str(path), "--apply"])
+                    rc = pa.main(["--apply"])
             self.assertEqual(0, rc)
             self.assertEqual([], closed, "复检不通过不得关闭 pane")
             self.assertEqual(2, len(calls), "audit 一次 + 关闭前复检一次")
@@ -1163,12 +1182,20 @@ class T45MainApplyTest(unittest.TestCase):
         def fake_probe(pane_id: str) -> bool | None:
             return pane_id in empty_panes if empty_panes is not None else None
 
+        extra = list(extra or [])
+        argv = ["--snapshot", str(path)] + extra
+        if "--apply" in extra:
+            # S-1：--apply 与 --snapshot 互斥；apply 用例改以 live snapshot 注入夹具
+            argv = extra
+            live_patch = mock.patch.object(pa, "load_live_snapshot", lambda: data)
+            live_patch.start()
+            self.addCleanup(live_patch.stop)
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(pa, "close_pane", fake_close_pane), \
                 mock.patch.object(pa, "close_tab", fake_close_tab), \
                 mock.patch.object(pa, "probe_empty_pane", fake_probe):
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                rc = pa.main(["--snapshot", str(path)] + (extra or []))
+                rc = pa.main(argv)
         return rc, out.getvalue(), err.getvalue(), recorded
 
     def _empty_pane_fixture(self) -> dict:

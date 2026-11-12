@@ -26,8 +26,10 @@
 | `maintain-verification.md` | 验证技能维护循环：source wave + live pass 审计 feature map 漂移；结论 clean/changed/blocked |
 | `agents-md-slimming.md` | AGENTS 瘦身与维护流程 |
 | `rework-reset.md` | 同一 task/fix 回执 ≥3 或同一功能 ≥3 轮返工：停手归集、根因归类、补验收、重开需求门、对抗审查、切片重排、验收门 |
+| `adversarial-review.md` | 涉主数据/架构口径/验收口径/数据安全/范围变更的关键决策实施前：独立对抗审查、挑战清单、阻断清零与证据落点 |
 
 - 触发与范围：`maintain-verification.md` 于发布执行完成（最终收口回执前）当轮启动，最迟下一个工作会话；每周复盘兜底。范围＝完整执行维护剧本 Phase 1–6；发布后下限 source wave + live pass，不替代不可跳过项。
+- 触发与范围：`adversarial-review.md` 于关键决策（主数据/架构口径/验收口径/数据安全/范围变更）实施前必走，Captain 直令不豁免（取证可并行）；阻断清零才实施，报告与回执成对。
 
 ## 大副选板与铺设
 

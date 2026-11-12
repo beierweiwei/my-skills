@@ -105,7 +105,7 @@ python3 scripts/dispatch.py --root . pane close --pane <pane_id>
 ```
 
 - TUI 里 `Ctrl+B` 然后 `Q` detach；Agent 继续在后台跑，重新 `herdr` 回来。
-- guard 值守（G1–G6）：`python3 scripts/crew-guard.py --helm <当前舵> --interval 120` 长驻；在跑 worker = Herdr `working` + `<crew-dir>/runs/` 存活注册（`crew-claude.py run` 写入；死 pid/坏 JSON 忽略），`--once --json` 输出含 `claudeRuns`。
+- guard 值守（G1–G7）：`python3 scripts/crew-guard.py --helm <当前舵> --interval 120` 长驻；在跑 worker = Herdr `working` + `<crew-dir>/runs/` 存活注册（`crew-claude.py run` 写入；死 pid/坏 JSON 忽略），`--once --json` 输出含 `claudeRuns`。
 - 上下文：看 CLI 状态栏的 `ctx` 用量。运行中的会话**不压缩**；worker（Builder/Reviewer/Scout）≥30% 不再接新切片，完成当前切片后停止，下一轮会话开始前统一 `/compact` 或重建；压缩摘要即交接，不单独写 handoff；主控/Planner ≥60% 停止接新任务，下一轮开始前压缩/重建。Herdr 只保活进程，不保存对话上下文。
 - 后台监听：`python3 scripts/agent-watch.py --interval 15`（可加 `--workspace` / `--agent`）轮询 `herdr agent list`，状态变化发 Herdr 通知；不要前台 `--wait` 长时间阻塞。`worktree-watch.py` 只监控 worktree，不监控 Agent。状态去重文件默认 `.git/agent-watch.state`（全 worktree 共用一份，键为 `workspace/agent`，可用 `--state-file` 另指）；手工抽查用 `python3 scripts/agent-watch.py --once --no-notify --state-file /tmp/aw-check.state`，不要污染常驻监听的基线；通知只在 `HERDR_ENV=1`（Herdr 内）生效，Herdr 外只打印不通知。
 - 后台建 tab / 启动 Agent 用 `--no-focus`，不要抢当前输入；dispatch 的 prompt 不抢焦点，但目标 pane 聚焦时不注入（见 §5 聚焦守卫）。

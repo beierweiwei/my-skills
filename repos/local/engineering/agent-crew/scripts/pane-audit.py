@@ -11,6 +11,13 @@
 - 总舵 tab（标签含「总舵」或配置 `helm.tabLabel`）只允许 1 个 pane，多 pane 告警；
   空 tab 与无 registry 的 pane 也报告；总舵 tab 内的多余空 pane 在 --apply 时关闭
   （保留总舵自身 pane；FB-038：guard 交接 tab create 后多出的空 shell pane）；
+- 多个总舵 tab / 旧 helm 残留（FB-045）：现役总舵解析优先级＝guard.handoff
+  （phase=started/done 的 new；warn 的 old）→ dispatch registry role=helm 最新
+  startedAt → 无法判定只报告。现役总舵 tab 永不关；旧总舵 tab 仅在非聚焦、
+  非白名单、pane 全为空或 registry agent idle/done 且无 working/blocked/无法确认
+  时，--apply 经 `dispatch tab close` 回收；handoff old ≠ 现役且 agent 仍在时告警
+  「旧 helm 残留」，仅 idle/done、pane 非现役/非聚焦/非白名单时经
+  `dispatch pane close` 回收；其余只报告（含各 tab id/标签/所属 agent/status）；
 - 有 pane 无 registry（agent list 无对应 pane）告警；经 `herdr pane process-info`
   确认前台是**空闲交互 shell**（进程组组长是 shell 且 argv 无脚本/命令参数）且所在
   tab 仍有"有名 crew 工位"（registry agent 名非空，或 --helm-pane）时，视为「多余空
@@ -41,7 +48,13 @@
   非法 fail-soft 跳过；crew dir 缺失/解析失败不报错，其余巡检照常。
 
 数据源：默认 `herdr api snapshot`，失败退回 `tab list` + `pane list` + `agent list`；
-`--snapshot FILE` 注入 fixture JSON（测试/复算用，不调用 herdr）。
+`--snapshot FILE` 注入 fixture JSON（测试/复算用，不调用 herdr）。**`--snapshot` 与
+`--apply` 互斥（rc=2）**：fixture 可能已过期，禁止据此执行真实关闭；apply 请基于
+live 数据重跑，或先用 dry-run 只报告（S-1）。
+
+总舵/旧 helm 回收为 best-effort（S-7）：workspace 缺失/不一致、聚焦未知、空 pane
+无法确认等任一不确定即不关；`dispatch` 关闭前不做二次复检（tab 回收基于本轮快照，
+与既有 tab 回收同一残余竞态窗口）。
 
 后台 job 语义（S12）：pane 内用 `&` / `nohup` 等启动的后台 job，在 `--apply` 关闭
 pane 时仍可能收到 SIGHUP；本工具只按前台进程组/进程信息判定，不保证后台 job 安全。
@@ -87,6 +100,8 @@ IDLE_AGENT_STATUSES = ("idle", "done")
 KIND_TEXT = {
     "tab-overflow": "单 tab pane 超限",
     "helm-tab-multi-pane": "总舵 tab 多 pane",
+    "multiple-helm-tabs": "多个总舵 tab",
+    "residual-old-helm": "旧 helm 残留",
     "empty-pane": "多余空 pane",
     "flow-complete-tab": "完成流回收 tab",
     "orphan-pane": "pane 无 registry",
@@ -310,6 +325,117 @@ def load_helm_labels(root: str | Path = ".") -> tuple[str, ...]:
 
 def is_helm_agent(agent: dict) -> bool:
     return str(agent.get("name") or "").lower().startswith(HELM_AGENT_PREFIX)
+
+
+# ---------------------------------------------------------------------------
+# 现役总舵解析（handoff → registry → unknown；FB-045）
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class HelmContext:
+    """现役总舵上下文；current 为空表示无法判定（只报告）。"""
+
+    current: str = ""
+    current_pane: str = ""
+    current_tab: str = ""
+    source: str = "unknown"
+    old: str = ""
+    old_pane: str = ""
+    old_tab: str = ""
+    reason: str = ""
+
+
+def read_handoff(crew_dir: Path | None) -> dict[str, str]:
+    """读取 `<crew-dir>/guard.handoff`；缺失/损坏 fail-soft 返回 {}。"""
+    if crew_dir is None:
+        return {}
+    try:
+        text = (Path(crew_dir) / "guard.handoff").read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    fields: dict[str, str] = {}
+    for line in text.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key:
+            fields[key] = value.strip()
+    return fields if fields.get("phase") else {}
+
+
+def load_helm_registry(crew_dir: Path | None) -> list[tuple[str, str, str]]:
+    """registry 中 role=helm 条目 → [(startedAt, name, pane)]；损坏 fail-soft。"""
+    if crew_dir is None:
+        return []
+    try:
+        data = json.loads(
+            (Path(crew_dir) / "dispatch-agents.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    entries: list[tuple[str, str, str]] = []
+    for name, info in data.items():
+        if not isinstance(info, dict) or info.get("role") != "helm":
+            continue
+        pane = info.get("pane") or info.get("pane_id") or ""
+        entries.append((str(info.get("startedAt") or ""), str(name), str(pane)))
+    return entries
+
+
+def resolve_helm_context(root: str | Path, crew_dir: Path | None = None) -> HelmContext:
+    """现役总舵解析优先级：handoff（started/done 的 new；warn 的 old）→ registry
+    最新 startedAt → unknown。无法判定时 current 为空（调用方只报告）。"""
+    if crew_dir is None:
+        try:
+            crew_dir = resolve_crew_dir(root)
+        except (RuntimeError, OSError):
+            crew_dir = None
+    handoff = read_handoff(crew_dir)
+    phase = handoff.get("phase", "")
+    old = handoff.get("old", "")
+    old_pane = handoff.get("oldPane", "")
+    old_tab = handoff.get("oldTab", "")
+    new = handoff.get("new", "")
+    result = handoff.get("result", "")
+    if phase in ("started", "done") and result == "failed":
+        # B-1 / §5.12：失败继任可能已 dispatch start 进 registry，绝不能回退 registry
+        # 把它当现役（会把真实现役旧舵 tab 误判为可回收）。现役 unknown，只报告。
+        return HelmContext(
+            source="unknown",
+            old=old, old_pane=old_pane, old_tab=old_tab,
+            reason="handoff 上次交接失败（result=failed），现役不确定，只报告",
+        )
+    if phase in ("started", "done") and new:
+        return HelmContext(
+            current=new,
+            current_pane=handoff.get("newPane", ""),
+            current_tab=handoff.get("newTab", ""),
+            source="handoff:new",
+            old=old, old_pane=old_pane, old_tab=old_tab,
+        )
+    if phase == "warn" and old:
+        return HelmContext(
+            current=old,
+            current_pane=old_pane,
+            current_tab=old_tab,
+            source="handoff:old",
+            old=old, old_pane=old_pane, old_tab=old_tab,
+        )
+    entries = load_helm_registry(crew_dir)
+    if entries:
+        entries.sort(reverse=True)
+        latest_started = entries[0][0]
+        if sum(1 for entry in entries if entry[0] == latest_started) == 1:
+            _started, name, pane = entries[0]
+            return HelmContext(
+                current=name,
+                current_pane=pane,
+                source=f"registry:{name}",
+                old=old, old_pane=old_pane, old_tab=old_tab,
+            )
+    return HelmContext(old=old, old_pane=old_pane, old_tab=old_tab)
 
 
 def match_flow(agent_name: str, flows: dict[str, bool]) -> str | None:
@@ -562,6 +688,282 @@ def flow_reclaim_finding(
     )
 
 
+def _pane_descriptor(pane: dict, agent: dict | None) -> str:
+    pane_id = str(pane.get("pane_id") or "?")
+    status = str(pane.get("agent_status") or "unknown")
+    if agent is not None:
+        return (f"{pane_id}[{agent.get('name') or '?'} "
+                f"status={agent.get('agent_status') or 'unknown'}]")
+    return f"{pane_id}[无 registry status={status}]"
+
+
+def _helm_tab_summary(
+    tab_id: str,
+    tab: dict,
+    panes_by_tab: dict[str, list[dict]],
+    agents_by_pane: dict[str, dict],
+) -> str:
+    panes = panes_by_tab.get(tab_id, [])
+    descriptors = ", ".join(
+        _pane_descriptor(pane, agents_by_pane.get(str(pane.get("pane_id") or "")))
+        for pane in panes
+    ) or "无 pane"
+    focused = tab.get("focused")
+    focus_text = ("聚焦" if focused is True
+                  else "非聚焦" if focused is False else "聚焦未知")
+    return f"{tab_id}（{_label(tab)}，{focus_text}）：{descriptors}"
+
+
+def _helm_tab_reclaimable(
+    tab_id: str,
+    tab: dict,
+    panes_by_tab: dict[str, list[dict]],
+    agents_by_pane: dict[str, dict],
+    whitelist_prefixes: tuple[str, ...],
+    probe: Callable[[str], bool | None],
+    current_name: str,
+    current_workspace: str,
+) -> tuple[bool, str]:
+    """总舵 tab 回收安全判定（保守）：任一不确定即不关。
+
+    S-3：能定位现役 workspace 时，tab/pane/agent 的 `workspace_id` 必须显式一致；
+    缺失即视为无法确认归属，只报告不回收。定位不到 workspace 时零动作。
+    """
+    if not current_workspace:
+        return False, "无法定位现役 workspace"
+    if str(tab.get("workspace_id") or "") != current_workspace:
+        return False, "tab workspace 缺失或与现役不一致"
+    label = str(tab.get("label") or "").strip()
+    if label.startswith(whitelist_prefixes):
+        return False, "白名单 tab"
+    if tab.get("focused") is True:
+        return False, "tab 当前聚焦"
+    panes = panes_by_tab.get(tab_id, [])
+    if not panes:
+        if tab.get("focused") is not False:
+            return False, "空 tab 聚焦无法判定"
+        return True, "空 tab"
+    for pane in panes:
+        pane_id = str(pane.get("pane_id") or "")
+        if not pane_id:
+            return False, "pane id 缺失"
+        if str(pane.get("workspace_id") or "") != current_workspace:
+            return False, f"pane {pane_id} workspace 缺失或与现役不一致"
+        focused = pane.get("focused")
+        if focused is True:
+            return False, f"pane {pane_id} 聚焦"
+        if not isinstance(focused, bool) and not isinstance(tab.get("focused"), bool):
+            return False, f"pane {pane_id} 聚焦无法判定"
+        agent = agents_by_pane.get(pane_id)
+        if agent is not None:
+            name = str(agent.get("name") or "")
+            status = str(agent.get("agent_status") or "")
+            if str(agent.get("workspace_id") or "") != current_workspace:
+                return False, f"agent {name or pane_id} workspace 缺失或与现役不一致"
+            if name and name == current_name:
+                return False, f"pane {pane_id} 是现役总舵 {name}"
+            if status not in IDLE_AGENT_STATUSES:
+                return False, f"agent {name or pane_id} 状态 {status or 'unknown'}"
+            continue
+        status = str(pane.get("agent_status") or "unknown")
+        if status not in EMPTY_PANE_STATUSES:
+            return False, f"pane {pane_id} 状态 {status}"
+        if pane.get("agent"):
+            return False, f"pane {pane_id} 有未进 registry 的 TUI"
+        if probe(pane_id) is not True:
+            return False, f"pane {pane_id} 空 pane 无法确认"
+    return True, ""
+
+
+def helm_reclaim_findings(
+    tab_by_id: dict[str, dict],
+    panes_by_tab: dict[str, list[dict]],
+    agents: list[dict],
+    agents_by_pane: dict[str, dict],
+    helm_labels: tuple[str, ...],
+    whitelist_prefixes: tuple[str, ...],
+    probe: Callable[[str], bool | None],
+    helm_context: HelmContext | None,
+    pane_by_id: dict[str, dict],
+) -> list[Finding]:
+    """「多个总舵 tab」与「旧 helm 残留」发现（FB-045）。
+
+    - 现役总舵 tab 永不关；无法判定现役 → 全部只报告；
+    - 旧总舵 tab 仅在 tab 非聚焦、非白名单、pane 全为空或 registry agent idle/done
+      时提议 `--apply` 经 dispatch 回收（action=dispatch-tab）；
+    - 旧 helm agent 残留：仅 idle/done、非现役 pane/tab、非聚焦、非白名单时
+      提议 dispatch pane close（action=dispatch-pane）。
+    """
+    context = helm_context or HelmContext()
+    agent_by_name = {
+        str(agent.get("name") or ""): agent
+        for agent in agents if agent.get("name")
+    }
+    current_name = context.current
+    # 无法判定现役总舵（current 为空）时，pane/tab 字段一律不可信 → 只报告。
+    current_pane = context.current_pane if current_name else ""
+    current_tab = context.current_tab if current_name else ""
+    current_agent = agent_by_name.get(current_name) if current_name else None
+    if current_agent is not None:
+        current_pane = (str(current_agent.get("pane_id") or current_agent.get("pane")
+                            or "") or current_pane)
+        tab_from_agent = str(current_agent.get("tab_id") or "")
+        if not tab_from_agent and current_pane:
+            tab_from_agent = str(
+                pane_by_id.get(current_pane, {}).get("tab_id") or "")
+        if tab_from_agent:
+            current_tab = tab_from_agent
+    if current_pane and not current_tab:
+        current_tab = str(pane_by_id.get(current_pane, {}).get("tab_id") or "")
+    if current_tab and current_tab not in tab_by_id:
+        current_tab = ""  # handoff/registry 的 tab 已不存在：以快照为准
+    # 跨 workspace 保护（S-3）：能定位现役总舵 workspace 时，只对账显式同
+    # workspace 的 tab/pane/agent；缺 workspace_id 的条目只报告、不回收；
+    # 定位不到 workspace 时总舵/旧 helm 回收零动作、只报告。显式其它 workspace
+    # 的 tab 不报告也不触碰（herdr 列表是全局的，别的项目「总舵」不归本仓处置）。
+    current_workspace = ""
+    if current_agent is not None:
+        current_workspace = str(current_agent.get("workspace_id") or "")
+    if not current_workspace and current_pane:
+        current_workspace = str(
+            pane_by_id.get(current_pane, {}).get("workspace_id") or "")
+    if not current_workspace and current_tab:
+        current_workspace = str(
+            tab_by_id.get(current_tab, {}).get("workspace_id") or "")
+
+    def _workspace_state(item: dict) -> str:
+        if not current_workspace:
+            return "unknown"
+        workspace = str(item.get("workspace_id") or "")
+        if not workspace:
+            return "missing"
+        return "match" if workspace == current_workspace else "other"
+
+    helm_tabs = {
+        tab_id: tab for tab_id, tab in tab_by_id.items()
+        if is_helm_tab(tab, helm_labels)
+        and _workspace_state(tab) != "other"
+    }
+    findings: list[Finding] = []
+    if len(helm_tabs) >= 2:
+        summaries = "；".join(
+            _helm_tab_summary(tab_id, tab, panes_by_tab, agents_by_pane)
+            for tab_id, tab in sorted(helm_tabs.items())
+        )
+        current_tab_ready = bool(
+            current_tab and current_tab in helm_tabs
+            and _workspace_state(helm_tabs[current_tab]) == "match")
+        if current_tab_ready:
+            current_summary = _helm_tab_summary(
+                current_tab, helm_tabs[current_tab], panes_by_tab, agents_by_pane)
+            for tab_id, tab in sorted(helm_tabs.items()):
+                if tab_id == current_tab:
+                    continue
+                state = _workspace_state(tab)
+                if state == "missing":
+                    safe, reason = False, "tab 缺 workspace_id（无法确认归属）"
+                elif state != "match":
+                    safe, reason = False, "无法定位现役 workspace"
+                else:
+                    safe, reason = _helm_tab_reclaimable(
+                        tab_id, tab, panes_by_tab, agents_by_pane,
+                        whitelist_prefixes, probe, current_name, current_workspace,
+                    )
+                detail = (f"现役总舵 {current_name or '?'}（{context.source}）在 "
+                          f"{current_summary}；本 tab 非现役。全部总舵 tab：{summaries}")
+                if safe:
+                    findings.append(Finding(
+                        "multiple-helm-tabs", tab_id, _label(tab),
+                        f"{detail}；判定：可回收（{reason}）", "dispatch-tab",
+                        "执行 `python3 scripts/pane-audit.py --apply` 经 dispatch "
+                        "关闭旧总舵 tab（保留现役）",
+                    ))
+                else:
+                    findings.append(Finding(
+                        "multiple-helm-tabs", tab_id, _label(tab),
+                        f"{detail}；判定：仅报告（{reason or '无法确认'}）", None,
+                        f"人工确认后关闭：`python3 scripts/dispatch.py tab close "
+                        f"--tab {tab_id}`（现役总舵 tab {current_tab} 永不关）",
+                    ))
+        else:
+            findings.append(Finding(
+                "multiple-helm-tabs", "helm-tabs", "总舵",
+                f"检测到 {len(helm_tabs)} 个总舵 tab，无法确认现役总舵 tab"
+                f"（来源 {context.source}"
+                f"{'：' + context.reason if context.reason else ''}）；{summaries}",
+                None,
+                "人工确认现役总舵后关闭旧 tab（`python3 scripts/dispatch.py tab "
+                "close --tab <旧tab>`）；handoff/registry 缺失或矛盾时本项只报告",
+            ))
+
+    if context.old and context.old != current_name and context.old in agent_by_name:
+        old_agent = agent_by_name[context.old]
+        old_pane = (str(old_agent.get("pane_id") or old_agent.get("pane") or "")
+                    or context.old_pane)
+        old_status = str(old_agent.get("agent_status") or "")
+        old_pane_entry = pane_by_id.get(old_pane)
+        old_tab = (str(old_agent.get("tab_id") or "")
+                   or str((old_pane_entry or {}).get("tab_id") or "")
+                   or context.old_tab)
+        old_tab_entry = tab_by_id.get(old_tab)
+        label = _label(old_tab_entry)
+        detail = (f"handoff old={context.old} 仍存在（status="
+                  f"{old_status or 'unknown'}，pane={old_pane or '未知'}，"
+                  f"tab={old_tab or '未知'}（{label}））；现役 {current_name or '未知'}")
+        covered = any(
+            finding.kind == "multiple-helm-tabs" and finding.target == old_tab
+            for finding in findings
+        )
+        if covered:
+            findings.append(Finding(
+                "residual-old-helm", old_pane or context.old, label,
+                f"{detail}；由「多个总舵 tab」回收覆盖", None,
+                "随旧总舵 tab 一并回收（见上一条告警）",
+            ))
+            return findings
+        safe = True
+        reason = ""
+        if not current_name:
+            safe, reason = False, "无法判定现役总舵"
+        elif not current_workspace:
+            safe, reason = False, "无法定位现役 workspace（零动作）"
+        elif old_status not in IDLE_AGENT_STATUSES:
+            safe, reason = False, f"agent 状态 {old_status or 'unknown'}"
+        elif not old_pane or not old_pane_entry:
+            safe, reason = False, "pane 缺失或无法确认"
+        elif old_pane == current_pane:
+            safe, reason = False, "pane 是现役总舵"
+        elif old_tab and old_tab == current_tab:
+            safe, reason = False, "tab 是现役总舵"
+        elif old_pane_entry.get("focused") is not False:
+            safe, reason = False, "pane 聚焦或聚焦无法判定"
+        elif old_tab_entry is None:
+            safe, reason = False, "tab 无法确认（白名单/聚焦未知）"
+        elif str(old_agent.get("workspace_id") or "") != current_workspace \
+                or str(old_pane_entry.get("workspace_id") or "") != current_workspace:
+            safe, reason = False, "旧 helm agent/pane workspace 缺失或与现役不一致"
+        elif str(old_tab_entry.get("workspace_id") or "") != current_workspace:
+            safe, reason = False, "旧 helm tab workspace 缺失或与现役不一致"
+        elif str(old_tab_entry.get("label") or "").strip().startswith(
+                whitelist_prefixes):
+            safe, reason = False, "白名单 tab"
+        elif old_tab_entry.get("focused") is True:
+            safe, reason = False, "tab 当前聚焦"
+        action = "dispatch-pane" if safe else None
+        verdict = "可回收" if safe else f"仅报告（{reason or '无法确认'}）"
+        next_step = (
+            "执行 `python3 scripts/pane-audit.py --apply` 经 dispatch 关闭旧 helm pane"
+            if safe else
+            "人工确认后关闭：`python3 scripts/dispatch.py pane close --pane "
+            f"{old_pane}`（working/blocked/聚焦/白名单不自动关）"
+        )
+        findings.append(Finding(
+            "residual-old-helm", old_pane or context.old, label,
+            f"{detail}；判定：{verdict}", action, next_step,
+        ))
+    return findings
+
+
 def audit(
     snapshot: dict,
     whitelist_prefixes: tuple[str, ...] = DEFAULT_WHITELIST_PREFIXES,
@@ -573,6 +975,7 @@ def audit(
     blocked_receipts: list[dict] | None = None,
     now: datetime | None = None,
     blocked_grace_minutes: int = DEFAULT_BLOCKED_GRACE_MINUTES,
+    helm_context: HelmContext | None = None,
 ) -> list[Finding]:
     tabs = snapshot.get("tabs") or []
     panes = snapshot.get("panes") or []
@@ -584,11 +987,13 @@ def audit(
     panes_by_tab: dict[str, list[dict]] = {}
     agents_by_tab: dict[str, list[dict]] = {}
     pane_ids: set[str] = set()
+    pane_by_id: dict[str, dict] = {}
     for pane in panes:
         pane_id = pane.get("pane_id")
         if not pane_id:
             continue
         pane_ids.add(str(pane_id))
+        pane_by_id[str(pane_id)] = pane
         panes_by_tab.setdefault(str(pane.get("tab_id")), []).append(pane)
     for agent in agents:
         tab_id = agent.get("tab_id")
@@ -604,6 +1009,12 @@ def audit(
             return None
 
     findings: list[Finding] = []
+
+    if helm_context is not None:
+        findings.extend(helm_reclaim_findings(
+            tab_by_id, panes_by_tab, agents, agents_by_pane, helm_labels,
+            whitelist_prefixes, probe, helm_context, pane_by_id,
+        ))
 
     for tab_id, tab in tab_by_id.items():
         label = _label(tab)
@@ -763,21 +1174,53 @@ def close_tab(tab_id: str) -> bool:
     return herdr_run(["tab", "close", tab_id]).returncode == 0
 
 
+def make_dispatch_runner(root: str | Path) -> Callable[[str, str], bool]:
+    """总舵/旧 helm 回收统一走 `dispatch.py pane|tab close`（禁止直写 herdr 生命周期）。"""
+    script = Path(__file__).resolve().parent / "dispatch.py"
+
+    def runner(kind: str, target: str) -> bool:
+        args = (["pane", "close", "--pane", target] if kind == "pane"
+                else ["tab", "close", "--tab", target])
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(script), "--root", str(root), *args],
+                text=True, capture_output=True, check=False,
+            )
+        except OSError as exc:
+            print(f"[失败] dispatch {kind} close {target}：{exc}",
+                  file=sys.stderr, flush=True)
+            return False
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout).strip()
+            print(f"[失败] dispatch {kind} close {target}："
+                  f"{detail or f'退出码 {proc.returncode}'}",
+                  file=sys.stderr, flush=True)
+            return False
+        return True
+
+    return runner
+
+
 def apply_findings(
     findings: list[Finding],
     probe: Callable[[str], bool | None] | None = None,
+    dispatch_runner: Callable[[str, str], bool] | None = None,
 ) -> tuple[list[str], list[str], list[Finding]]:
     """执行关闭动作；pane 关闭前用 probe 复检一次（S-2：缩小判定与关闭竞态）。
 
     复检结果不是明确的 True（空闲交互 shell）时不关闭，回到「仅报告」。
+    `dispatch-pane` / `dispatch-tab`（总舵/旧 helm 回收）统一经 dispatch_runner；
+    未注入时按失败记录（不静默回落裸 herdr）。
     """
     closed_panes: list[str] = []
     closed_tabs: list[str] = []
     failed: list[Finding] = []
     for finding in findings:
-        if finding.action not in ("pane", "tab"):
+        if finding.action not in ("pane", "tab", "dispatch-pane", "dispatch-tab"):
             continue
-        if finding.action == "pane" and probe is not None:
+        via_dispatch = finding.action.startswith("dispatch-")
+        kind = finding.action.rsplit("-", 1)[-1] if via_dispatch else finding.action
+        if kind == "pane" and not via_dispatch and probe is not None:
             try:
                 confirmed = probe(finding.target)
             except Exception:  # noqa: BLE001 - 探针异常按无法确认（不关闭）
@@ -787,18 +1230,26 @@ def apply_findings(
                       f"（{confirmed!r}），改为仅报告", flush=True)
                 continue
         try:
-            ok = (close_pane if finding.action == "pane" else close_tab)(finding.target)
+            if via_dispatch:
+                if dispatch_runner is None:
+                    print(f"[失败] 回收 {finding.action} {finding.target}："
+                          "未配置 dispatch runner", file=sys.stderr, flush=True)
+                    failed.append(finding)
+                    continue
+                ok = bool(dispatch_runner(kind, finding.target))
+            else:
+                ok = (close_pane if kind == "pane" else close_tab)(finding.target)
         except AuditError as exc:
-            print(f"[失败] 关闭 {finding.action} {finding.target}：{exc}",
+            print(f"[失败] 关闭 {kind} {finding.target}：{exc}",
                   file=sys.stderr, flush=True)
             failed.append(finding)
             continue
         if ok:
-            (closed_panes if finding.action == "pane" else closed_tabs).append(finding.target)
-            print(f"已关闭 {finding.action} {finding.target}（{KIND_TEXT[finding.kind]}："
+            (closed_panes if kind == "pane" else closed_tabs).append(finding.target)
+            print(f"已关闭 {kind} {finding.target}（{KIND_TEXT[finding.kind]}："
                   f"{finding.label}）", flush=True)
         else:
-            print(f"[失败] 关闭 {finding.action} {finding.target}：herdr 返回非零",
+            print(f"[失败] 关闭 {kind} {finding.target}：返回非零",
                   file=sys.stderr, flush=True)
             failed.append(finding)
     return closed_panes, closed_tabs, failed
@@ -828,6 +1279,18 @@ def build_parser() -> argparse.ArgumentParser:
             "竞态窗口：pane 关闭前会用 process-info 复检一次（复检不通过则跳过关闭）；tab 回收"
             "基于本轮快照，关闭前不重新取数——快照与关闭之间被人工开始使用的 tab 仍可能被关，"
             "此为已知残余窗口。\n"
+            "数据源互斥（S-1）：--snapshot 与 --apply 不可同用（rc=2）；fixture 可能过期，"
+            "禁止据此执行真实关闭，apply 请基于 live 数据重跑。\n"
+            "总舵回收 best-effort（S-7）：workspace 缺失/不一致、聚焦未知、空 pane 无法确认"
+            "等任一不确定即不关；dispatch 关闭前不做二次复检（tab 基于本轮快照，与既有 tab"
+            "回收同一残余竞态窗口）。\n"
+            "总舵回收（FB-045）：多个总舵 tab / 旧 helm 残留默认只报告；现役总舵按 "
+            "guard.handoff（started/done 的 new、warn 的 old）→ dispatch registry 最新 "
+            "role=helm startedAt 解析；done/started result=failed 一律 unknown、不回退 "
+            "registry；无法判定只报告。现役总舵 tab 永不关；旧总舵 tab 仅在非聚焦、"
+            "非白名单、workspace 显式一致、pane 全空或 agent idle/done 时 --apply 经 "
+            "dispatch 回收；旧 helm agent 残留仅 idle/done 且非现役/非聚焦/非白名单/"
+            "同 workspace 时经 dispatch 关 pane；working/blocked/无法确认一律不关。\n"
             "完成流回收：flow plan（<root>/.planning/<流>/task_plan.md）按 `### Phase` 分段解析 "
             "`**Status:**`，段内缺失/非法默认 pending（非法行在 stderr 告警，该流按未完成处理）；"
             "全部 Phase complete 且 tab 内 agent 全 idle/done、名称可归属流时提议关闭 tab，"
@@ -904,6 +1367,15 @@ def resolve_crew_dir_arg(root: str, explicit: str | None) -> Path | None:
 def main(argv: list[str] | None = None) -> int:
     parser = add_arguments(build_parser())
     args = parser.parse_args(argv)
+    if args.apply and args.snapshot:
+        # S-1：fixture 快照可能已过期，禁止据此执行真实关闭（退化为「看陈旧数据关窗口」）。
+        print(
+            "error: --apply 与 --snapshot 互斥：fixture 快照可能已过期，"
+            "禁止据此执行真实关闭；请去掉 --snapshot 基于 live 数据重跑，"
+            "或先 dry-run 只报告。",
+            file=sys.stderr, flush=True,
+        )
+        return 2
     if args.blocked_grace <= 0:
         print("error: --blocked-grace 必须为正整数（分钟）", file=sys.stderr, flush=True)
         return 2
@@ -918,13 +1390,16 @@ def main(argv: list[str] | None = None) -> int:
     prefixes = tuple(DEFAULT_WHITELIST_PREFIXES) + tuple(args.whitelist_prefix)
     helm_labels = load_helm_labels(args.root)
     flows = load_flow_plans(args.root)
-    blocked_receipts = load_receipts(resolve_crew_dir_arg(args.root, args.crew_dir))
+    crew_dir = resolve_crew_dir_arg(args.root, args.crew_dir)
+    blocked_receipts = load_receipts(crew_dir)
+    helm_context = resolve_helm_context(args.root, crew_dir)
     findings = audit(
         snapshot, prefixes, frozenset(args.helm_pane), helm_labels,
         flows=flows,
         empty_probe=probe_empty_pane,
         blocked_receipts=blocked_receipts,
         blocked_grace_minutes=args.blocked_grace,
+        helm_context=helm_context,
     )
     if not findings:
         print(
@@ -941,12 +1416,17 @@ def main(argv: list[str] | None = None) -> int:
     if not args.apply:
         print(
             f"\ndry-run：共 {len(findings)} 项告警，其中可安全自动关闭 {len(closable)} 项"
-            f"（空 tab / 多余空 pane / 完成流 tab）；确认后加 --apply。",
+            f"（空 tab / 多余空 pane / 完成流 tab / 旧总舵与旧 helm 回收）；"
+            "确认后加 --apply。",
             flush=True,
         )
         return 0
 
-    closed_panes, closed_tabs, failed = apply_findings(findings, probe=probe_empty_pane)
+    closed_panes, closed_tabs, failed = apply_findings(
+        findings,
+        probe=probe_empty_pane,
+        dispatch_runner=make_dispatch_runner(args.root),
+    )
     reported = len(findings) - len(closed_panes) - len(closed_tabs) - len(failed)
     print(
         f"\n已关闭：{len(closed_panes)} 个 pane、{len(closed_tabs)} 个 tab；"
