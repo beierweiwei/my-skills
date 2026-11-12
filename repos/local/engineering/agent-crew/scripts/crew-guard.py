@@ -15,7 +15,11 @@ guard.wake 首行 `generated_at: <ISO8601 Z>`（兼容旧格式裸 ISO 首行）
 - 活跃流 plan 中 Phase Status ≠ complete 的未勾选 `[ ]`（排除含 ⏸ / 待 Captain / 留 Captain）；
 - portfolio Backlog 中 T 行且阻塞列无 待 C / blocked / 已完成（complete/done）；
 - 已完成 Phase 的残留 `[ ]` 只记日志，不叫醒。
-在跑口径：Herdr agent_status == working，排除总舵自身与 Captain*；blocked 单独叫醒。
+在跑口径：Herdr agent_status == working + `<crew-dir>/runs/` 存活注册
+（`crew-claude.py run` 写入；死 pid/坏 JSON/缺 pid 忽略并记日志；存活注册需进程
+身份/年龄核验——cmdline 不含 crew-claude 视为 pid 复用、按死删除，cmdline 不可读
+且 started_at >24h 忽略并保留取证，缺 started_at 按存活计入 fail-safe），排除
+总舵自身与 Captain*；blocked 单独叫醒。
 cwd 隔离：只统计 cwd 在本仓或 `git worktree list --porcelain` 列出的 linked worktree
 内的 agent；外部项目（其他仓）不参与 running/blocked/快速叫醒。cwd 缺失或不可解析时
 沿用旧口径包含（无法确认归属时不改变既有行为）。
@@ -80,6 +84,11 @@ PAUSE_MARKS = ("⏸", "待 Captain", "留 Captain")
 DONE_RE = re.compile(r"(?<![a-z])(?:complete|completed|done)(?![a-z])")
 COOLDOWN_SECONDS = 600
 WRITE_INTERVAL_SECONDS = 300
+# 存活 claude 运行注册的进程身份/年龄核验（互检建议-2）：pid 复用按死处理
+CLAUDE_PROCESS_MARKER = "crew-claude"
+CLAUDE_RUN_MAX_AGE_SECONDS = 24 * 3600
+# os.kill 的 pid_t 为 32 位有符号；超出范围（如 2**63）报 OverflowError，按无效 pid 处理
+PID_MAX_VALID = 2 ** 31 - 1
 # 交接启动前 progress 轮转保留条数（与 plan-status.py --rotate 默认一致；显式常量便于审计）
 ROTATE_KEEP = 10
 PROBE_NAME_PREFIXES = ("s9-", "probe-", "test-")
@@ -178,6 +187,51 @@ def is_probe_agent(agent: dict) -> bool:
         return path == tmp or tmp in path.parents
     except (OSError, RuntimeError):
         return False
+
+
+def pid_alive(pid: int) -> bool:
+    """pid 存活判定：ProcessLookupError=死；PermissionError=活（进程存在但无权限，
+    与 crew-preflight 口径一致）；OverflowError（超出 pid_t 范围）按无效/死处理；
+    其余 OSError 按死处理（值守不因坏 pid 崩溃）。"""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OverflowError:
+        return False
+    except OSError:
+        return False
+    return True
+
+
+def proc_cmdline(pid: int) -> str:
+    """读 /proc/<pid>/cmdline（NUL 分隔转空格）；不可读时抛 OSError。
+
+    pid 复用核验用（建议-2）：只认 cmdline 含 crew-claude 的进程。
+    """
+    return (
+        Path(f"/proc/{pid}/cmdline")
+        .read_bytes()
+        .replace(b"\0", b" ")
+        .decode("utf-8", "replace")
+        .strip()
+    )
+
+
+def registry_age_seconds(started_at: str, now: float) -> float | None:
+    """运行注册 started_at（UTC ISO Z）→ 已运行秒数；缺失/不可解析返回 None。"""
+    text = str(started_at or "").strip()
+    if not text:
+        return None
+    try:
+        started = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return (datetime.fromtimestamp(now, timezone.utc) - started).total_seconds()
 
 
 def parse_ctx_k(text: str) -> float | None:
@@ -1428,6 +1482,83 @@ class Guard:
             return True
         return any(path == root or root in path.parents for root in self._roots())
 
+    def _claude_runs(self) -> list[dict]:
+        """读 `<crew-dir>/runs/*.json` 的存活注册（FB-040）。
+
+        `crew-claude.py run` 用普通子进程跑 claude，不在 herdr 注册；这里按 os.kill
+        判活计入在跑 worker。死 pid 顺手删除；坏 JSON / 缺 pid 忽略并记一行日志；
+        超出 pid_t 范围的 pid 视为无效并删除（不因 OverflowError 中断整轮）。
+        存活注册再做进程身份/年龄核验（互检建议-2）：cmdline 可读且不含 crew-claude
+        （含空串，如僵尸进程）视为 pid 复用，删除注册并按死处理；cmdline 不可读时
+        started_at 超龄（>24h）忽略但保留取证，started_at 缺失/不可解析按存活计入
+        （fail-safe，宁可误等不误叫醒）。
+        """
+        runs_dir = self.crew_dir / "runs"
+        try:
+            paths = sorted(runs_dir.glob("*.json"))
+        except OSError:
+            return []
+        alive: list[dict] = []
+        for path in paths:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, ValueError) as exc:
+                self.log(f"claude 运行注册读取失败，忽略：{path.name}"
+                         f"（{type(exc).__name__}: {exc}）")
+                continue
+            pid = data.get("pid") if isinstance(data, dict) else None
+            if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+                self.log(f"claude 运行注册缺少有效 pid，忽略：{path.name}")
+                continue
+            if pid > PID_MAX_VALID:
+                self.log(f"claude 运行注册 pid={pid} 为无效/超范围 pid，"
+                         f"忽略并删除：{path.name}")
+                try:
+                    path.unlink()
+                except OSError as exc:
+                    self.log(f"claude 运行注册删除失败：{path.name}（{exc}）")
+                continue
+            if not pid_alive(pid):
+                self.log(f"claude 运行注册 pid={pid} 已死，忽略：{path.name}")
+                try:
+                    path.unlink()
+                except OSError as exc:
+                    self.log(f"claude 运行注册删除失败：{path.name}（{exc}）")
+                continue
+            try:
+                cmdline: str | None = proc_cmdline(pid)
+            except OSError:
+                cmdline = None
+            if cmdline is not None and CLAUDE_PROCESS_MARKER not in cmdline:
+                self.log(
+                    f"claude 运行注册 pid={pid} 的进程 cmdline 不含 "
+                    f"{CLAUDE_PROCESS_MARKER}（pid 复用/非 crew-claude 进程），"
+                    f"按死处理并删除：{path.name}")
+                try:
+                    path.unlink()
+                except OSError as exc:
+                    self.log(f"claude 运行注册删除失败：{path.name}（{exc}）")
+                continue
+            if cmdline is None:
+                age = registry_age_seconds(
+                    str(data.get("started_at") or ""), self.clock())
+                if age is not None and age > CLAUDE_RUN_MAX_AGE_SECONDS:
+                    self.log(
+                        f"claude 运行注册 pid={pid} 超龄（{age / 3600:.1f}h）且无法"
+                        f"核验进程，忽略：{path.name}")
+                    continue
+                if age is None:
+                    self.log(
+                        f"claude 运行注册 pid={pid} 无法读取 cmdline 且缺 started_at"
+                        f"（或不可解析），按存活计入（fail-safe）：{path.name}")
+            alive.append({
+                "pid": pid,
+                "role": str(data.get("role") or ""),
+                "started_at": str(data.get("started_at") or ""),
+                "out_dir": str(data.get("out_dir") or ""),
+            })
+        return alive
+
     def _excluded(self, agent: dict) -> bool:
         name = str(agent.get("name") or "")
         return name == self.helm or name.startswith("Captain")
@@ -1631,6 +1762,7 @@ class Guard:
             agent for agent in workers
             if str(agent.get("agent_status")) == "blocked" and not is_probe_agent(agent)
         ]
+        claude_runs = self._claude_runs()
         # 年龄表先于 handoff 分支更新：交接期间 blocked 时长继续累计。
         blocked_since = self._track_blocked(now, blocked)
         pending, residual = scan_todos(self.root)
@@ -1638,13 +1770,13 @@ class Guard:
         for todo in residual:
             self.log(f"已完成 Phase 残留 [ ]（仅记日志）：{todo.label}")
 
-        current_working = len(running)
+        current_working = len(running) + len(claude_runs)
         prev_working = self.prev_working
         # worker 从 working 全部转 idle 且仍有待办：立即叫醒，不等连续 2 轮
         fast_wake = prev_working > 0 and current_working == 0 and bool(pending)
         self.prev_working = current_working
 
-        condition = bool(pending) and not running
+        condition = bool(pending) and not running and not claude_runs
         if condition:
             self.consecutive += 1
         else:
@@ -1683,6 +1815,7 @@ class Guard:
                  "status": str(agent.get("agent_status") or "")}
                 for agent in workers
             ],
+            "claudeRuns": claude_runs,
         }
         try:
             handoff = self._check_handoff(agents)
@@ -1765,6 +1898,9 @@ def build_parser() -> argparse.ArgumentParser:
     epilog = """\
 叫醒口径：有待办 + 无在跑 worker 连续 2 轮；若上一轮有 working、本轮全部转 idle
 则立即叫醒（仍受 10 分钟冷却）；blocked 单独叫醒；
+在跑 worker = Herdr agent_status == working + `<crew-dir>/runs/` 存活注册
+（`crew-claude.py run` 写入；死 pid/坏 JSON/缺 pid 忽略并记日志；存活注册需进程
+身份/年龄核验，pid 复用按死处理并删除注册）；
 排除总舵自身与 Captain*（按 agent 名）；blocked 判定排除测试探针（agent 名
 s9-/probe-/test- 前缀，或 cwd 在 /tmp 下），真实 blocked 仍叫醒。cwd 隔离：只统计
 cwd 在本仓或 linked worktree（git worktree list --porcelain）内的 agent，外部项目
@@ -1819,7 +1955,8 @@ done(result=failed) 不自动重试，人工删除或改写 <crew-dir>/guard.han
     parser.add_argument("--once", action="store_true", help="只跑一轮（测试/人工抽查）")
     parser.add_argument("--json", action="store_true",
                         help="配合 --once 输出 JSON"
-                             "（crewDir/planPath/pending/workers/wake/handoff/rework）")
+                             "（crewDir/planPath/pending/workers/claudeRuns/wake/"
+                             "handoff/rework）")
     return parser
 
 
@@ -1856,6 +1993,7 @@ def main(argv: list[str] | None = None) -> int:
                     "planPath": result.get("planPath", ""),
                     "pending": result.get("pending", 0),
                     "workers": result.get("workers", []),
+                    "claudeRuns": result.get("claudeRuns", []),
                     "wake": bool(result.get("woke")),
                     "handoff": result.get("handoff", {}),
                     "rework": result.get("rework", []),

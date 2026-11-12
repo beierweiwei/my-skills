@@ -48,7 +48,7 @@
 | 运行时 | Herdr | workspace/tab/pane、Agent 生命周期、worktree、远程 |
 | 工单 | `.scratch/<topic>/issues/`（临时；可接远端 Issue 系统） | 执行层任务卡，不是状态真源 |
 | 状态 | `.planning/<task>/` 三文件（task_plan / findings / progress） | 任务状态唯一真源；看板只是派生视图 |
-| 路由 | `<git-common-dir>/crew/registry.json` | 只存 Herdr 不知道的路由（非 Herdr 运行时的收件箱/会话），默认不创建 |
+| 路由 | `<git-common-dir>/crew/registry.json` | 只存 Herdr 不知道的路由（非 Herdr 运行时的收件箱/会话），默认不创建；Herdr 目标默认直推收件方 pane（不落 registry） |
 | 回执 | `<git-common-dir>/crew/inbox/` | crew → 编排者的文件回执；是触发器，不是状态 |
 | 组合产物 | `<git-common-dir>/crew/compose/<run-id>/` | dispatch 启动时一次性产物，可丢弃；不写项目发现目录 |
 | 正文 | 需求文档 `{{doc_req}}`（含『落地要点』） | 唯一需求真源 |
@@ -240,7 +240,7 @@
 - 编排者不能靠前台阻塞等待（`herdr agent prompt --wait` / `agent wait`）过日子——一个 Agent 的长任务会把编排者钉死，其他流全部停摆。
 - 因此采用「guard 常驻轮询 + 一次性人工抽查 + 外置看门狗」：guard 按 G1–G6 的待办/在跑口径判断是否叫醒，正常零输出；人工抽查用监听脚本的边沿模式，不承担自动叫醒；外置定时只检查 guard 进程存活。
 - **启动与恢复**：Agent 只经 `dispatch.py start` 启动并写 agent-log（`composedSha256`/`delivery`/`baseRef`）；`doctor.py` 的 `role.delivery` 复核最近一次启动与 compose 报告一致。
-- 叫醒条件、冷却、待办/在跑口径见 G1–G6；命令用法见 [herdr-cheatsheet.md](herdr-cheatsheet.md)。
+- 叫醒条件、冷却、待办/在跑口径见 G1–G6（在跑口径见 G4：Herdr `working` + `<crew-dir>/runs/` 存活注册，覆盖 `crew-claude.py run` 子进程）；命令用法见 [herdr-cheatsheet.md](herdr-cheatsheet.md)。
 
 ## 8. 可选远端扩展
 

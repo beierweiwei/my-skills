@@ -601,6 +601,32 @@ class ReadCursorTest(CrewDirTestBase):
         self.assertFalse(self.cursor_file.exists())
         self.assertEqual(self._unread_ids(), ["r-1"])
 
+    def test_mark_all_skips_filename_receipt_id_mismatch(self):
+        """S13：--all 只标实际存在 <receipt_id>.json 的回执；文件名不一致项跳过并告警。"""
+        self._write_receipts("r-1")
+        inbox = cm.inbox_dir(self.crew)
+        legacy = inbox / "20261111T063200Z-legacy-case.json"
+        legacy.write_text(json.dumps({
+            "receipt_id": "case-legacy-1", "from": "stub", "runtime": "qoder",
+            "task": "T-legacy", "status": "done", "commit": "",
+            "changed_files": [], "evidence": [], "work_slot": "stub",
+            "findings": [], "summary": "legacy", "ts": "2026-11-11T06:32:00Z",
+        }, ensure_ascii=False), encoding="utf-8")
+        code, out, err = self._ls("--mark-read", "--all", "--json")
+        self.assertEqual(code, 0, err)
+        payload = json.loads(out)
+        self.assertEqual(payload["marked"], ["r-1"])
+        self.assertEqual(payload["skipped"], ["case-legacy-1"])
+        self.assertIn("跳过 1 条", err)
+        self.assertIn("receipt_id", err)
+        cursor = json.loads(self.cursor_file.read_text(encoding="utf-8"))
+        self.assertEqual(set(cursor["read"]), {"r-1"})
+        self.assertTrue(legacy.exists(), "跳过项不得删除或改写回执")
+        # 显式 receipt_id 缺失仍按原契约整体拒绝
+        code, _, err = self._ls("--mark-read", "case-legacy-1")
+        self.assertEqual(code, 1)
+        self.assertIn("不存在", err)
+
     def test_mark_read_argument_errors(self):
         cases = [
             ("--mark-read",),  # 缺 receipt_id / --all

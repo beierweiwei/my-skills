@@ -40,7 +40,7 @@
 
 ## R 回执
 
-- **R1 文件真源**：回执以 `<git-common-dir>/crew/inbox/` 下的文件为真源；先原子落盘（见 P3）再尝试推送，推送失败不影响回执成立。读取用 `python3 scripts/crew-msg.py ls --unread` 取未读，处置后 `ls --mark-read <receipt_id>...`（或 `--all`）记已读游标（`<git-common-dir>/crew/inbox-read-cursor.json`）；游标只记读取进度，不改回执状态、不删回执文件，inbox 文件仍是唯一真源。**已读≠已处置：处置以回执 status + plan 为准**（游标只表示读过，不代表 blocked/⏸ 已处理）。
+- **R1 文件真源**：回执以 `<git-common-dir>/crew/inbox/` 下的文件为真源；先原子落盘（见 P3）再尝试推送，推送失败不影响回执成立。读取用 `python3 scripts/crew-msg.py ls --unread` 取未读，处置后 `ls --mark-read <receipt_id>...`（或 `--all`）记已读游标（`<git-common-dir>/crew/inbox-read-cursor.json`）；游标只记读取进度，不改回执状态、不删回执文件，inbox 文件仍是唯一真源。**已读≠已处置：处置以回执 status + plan 为准**（游标只表示读过，不代表 blocked/⏸ 已处理）。**投递语义**：`crew-msg.py write --to <同项目 herdr agent>`（`--target-runtime auto`，发送方 qoder）默认直推收件方 pane（`delivery=herdr`，复用 T37 聚焦守卫）；目标 pane 聚焦或聚焦无法判定时不注入，落 inbox + Herdr 通知（`delivery=inbox_fallback`）；跨项目目标、目标不可达或显式 `--target-runtime herdr` 时只写文件 + Herdr 通知（`delivery=notification`）。**A-1 情形③**：默认 auto 已判定同项目后，二次 `herdr agent list` 失败或目标从列表消失 → `delegate ok=false` + rc=3（note 写明原因；不冒充 notification/inbox_fallback）。
 - **R2 回执字段**：`receipt_id`、`from`、`runtime`、`task`、`status`（`done|blocked|captain`）、`commit`、`changed_files[]`、`evidence[]`、`work_slot`、`findings[]`、`summary`、`ts`；缺字段视为无效回执；⏸ 一律用 `status=captain`。返工/修复/升级类任务的 findings 首条必须写「根因：成立」或「根因：修正为…」，形成派单—回执闭环。
 - **R3 去重**：回执按 `receipt_id` 去重，同一 `receipt_id` 只处理一次。
 - **R4 触发器不是状态**：回执只触发收口与审计，任务状态只认 plan；回执与 plan 不一致时以 plan 为准并触发核对。
@@ -91,7 +91,7 @@
 - **G1 单实例轮询**：guard 单实例运行、固定周期轮询；多实例时后启动者退出。
 - **G2 唤醒条件**：仅当「有待办且无在跑 worker」连续两轮成立才叫醒；冷却期内同一待办不重复叫醒。
 - **G3 待办口径**：活跃流 plan 中未勾选且未标 ⏸/待 Captain 的 Phase 待办，加 portfolio Backlog 中无阻塞的 T 行；已完成 Phase 的残留待办只记日志，不叫醒。
-- **G4 在跑口径**：只有 working 算在跑；blocked 单独作为「卡住」叫醒理由，叫醒带年龄与重复叫醒——达到 15 分钟未处置再叫醒，达到 blockedGrace（默认 30 分钟）提示「应关闭或升级」，不自动杀 agent；idle/done/unknown 不算在跑。
+- **G4 在跑口径**：在跑 = Herdr `agent_status=working` + `<crew-dir>/runs/` 存活注册（`crew-claude.py run` 运行时原子写入，含 pid/role/started_at/out_dir）；死 pid、坏 JSON、缺 pid 的注册忽略并记日志，注册失败只告警不阻断运行；blocked 单独作为「卡住」叫醒理由，叫醒带年龄与重复叫醒——达到 15 分钟未处置再叫醒，达到 blockedGrace（默认 30 分钟）提示「应关闭或升级」，不自动杀 agent；idle/done/unknown 不算在跑。
 - **G5 零输出与边界**：正常零输出；可提示「回执 done 但 plan 未更新」，不代写 plan；外置定时只检查 guard 存活；人工抽查工具不承担自动叫醒。
 - **G6 口头决策落盘**：Captain 口头/会话决策由收到指令的 owner **当轮**写入对应 plan 的 `## Decisions Made` 或 portfolio `progress.md`（含生效口径与时间），并在回复回显「已落盘：<文件>/<条目>」；未落盘不得当作已决执行；交接 digest 必须列「未落盘决策」（无则写「无」）。
 

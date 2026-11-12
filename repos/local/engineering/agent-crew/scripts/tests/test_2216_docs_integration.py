@@ -105,11 +105,12 @@ class PreflightIntegrationTest(unittest.TestCase):
             )
 
     def test_old_piecemeal_checks_removed(self):
-        self.assertNotIn(
-            "每轮开工先检查 `<crew-dir>/guard.wake`",
-            read(Q_HELM),
-            "qoder helm 仍保留逐条手工 wake 检查（双口径）",
-        )
+        for rel in HELM:
+            self.assertNotIn(
+                "每轮开工先检查 `<crew-dir>/guard.wake`",
+                read(rel),
+                f"{rel} 仍保留逐条手工 wake 检查（双口径）",
+            )
         for rel in FIRSTMATE:
             self.assertNotIn(
                 "每轮开工先查 `<crew-dir>/inbox/`（R1 文件真源）与 `<crew-dir>/guard.wake`",

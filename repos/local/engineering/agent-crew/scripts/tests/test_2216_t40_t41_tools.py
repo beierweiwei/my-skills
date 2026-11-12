@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -200,6 +201,33 @@ class EvidenceCliTest(unittest.TestCase):
         self.assertEqual(0, proc.returncode)
         self.assertIn("写失败恒 1", proc.stdout)
         self.assertIn("crew-evidence: WRITE_FAILED", proc.stdout)
+        self.assertIn("--timeout", proc.stdout)
+        self.assertIn("超时", proc.stdout)
+        self.assertIn("124", proc.stdout)
+
+    def test_timeout_kills_command_and_keeps_evidence(self):
+        """S9：--timeout 到点终止被采命令，证据仍落盘（rc=124 + stderr 超时说明）。"""
+        started = time.monotonic()
+        proc = self.run_cli(
+            "--root", str(self.root), "--out", str(self.out), "--timeout", "1", "--",
+            PYTHON, "-c", "import time; time.sleep(30)")
+        elapsed = time.monotonic() - started
+        self.assertEqual(124, proc.returncode, proc.stderr)
+        self.assertLess(elapsed, 10, "超时未及时终止被采命令")
+        self.assertTrue(self.out.is_file(), "超时后证据文件仍应落盘")
+        fields = evidence_fields(self.out.read_text(encoding="utf-8"))
+        self.assertEqual("124", fields["rc"])
+        self.assertIn("超时", fields["stderr"])
+        self.assertIn("124", fields["stderr"])
+
+    def test_timeout_does_not_affect_normal_command(self):
+        proc = self.run_cli(
+            "--root", str(self.root), "--out", str(self.out), "--timeout", "5", "--",
+            PYTHON, "-c", "print('ok')")
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        fields = evidence_fields(self.out.read_text(encoding="utf-8"))
+        self.assertEqual("0", fields["rc"])
+        self.assertIn("ok", fields["stdout"])
 
 
 class PreflightParserTest(unittest.TestCase):
@@ -526,6 +554,109 @@ sys.exit(2)
         self.assertIn("过期", checks["board"]["value"])
         strict = self.run_preflight("--strict")
         self.assertEqual(1, strict.returncode)
+
+
+class PreflightLockProbeTest(unittest.TestCase):
+    """S7：_lock_held 只读探测，不在竞态下新建空 guard.lock。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        self.pf = load_module("preflight_s7", PREFLIGHT)
+
+    def test_missing_lock_reports_reason_without_creating_file(self):
+        path = self.tmp / "guard.lock"
+        held, reason = self.pf._lock_held(path)
+        self.assertFalse(held)
+        self.assertTrue(reason)
+        self.assertFalse(path.exists(), "探测不得新建空 guard.lock")
+
+    def test_held_then_released_semantics(self):
+        path = self.tmp / "guard.lock"
+        path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+        handle = open(path, "r", encoding="utf-8")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held, reason = self.pf._lock_held(path)
+            self.assertTrue(held, reason)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+        held, reason = self.pf._lock_held(path)
+        self.assertFalse(held, reason)
+
+
+class PreflightWorktreeAgentsTest(unittest.TestCase):
+    """S8：agent 口径=root + linked worktree（与 guard _in_project 一致）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        self.pf = load_module("preflight_s8", PREFLIGHT)
+
+    def _git_repo(self, name: str) -> Path:
+        root = self.tmp / name
+        root.mkdir()
+        subprocess.run([GIT, "init", "-q", str(root)], check=True,
+                       capture_output=True)
+        (root / "README.md").write_text("x\n", encoding="utf-8")
+        subprocess.run([GIT, "-C", str(root), "add", "README.md"],
+                       check=True, capture_output=True)
+        subprocess.run(
+            [GIT, "-C", str(root), "-c", "user.email=t@example.com",
+             "-c", "user.name=T", "commit", "-qm", "init"],
+            check=True, capture_output=True)
+        return root
+
+    def _herdr(self, agents: list[dict]) -> str:
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        script = bin_dir / "herdr"
+        payload = json.dumps(agents, ensure_ascii=False)
+        script.write_text(
+            f"""#!{PYTHON}
+import json, sys
+args = sys.argv[1:]
+if args[:3] == ["agent", "list"]:
+    print(json.dumps({{"result": {{"agents": {payload}}}}}, ensure_ascii=False))
+    sys.exit(0)
+if args[:2] == ["pane", "read"]:
+    print("ctx (10k/1M)")
+    sys.exit(0)
+sys.exit(2)
+""", encoding="utf-8")
+        script.chmod(0o755)
+        return str(script)
+
+    def test_linked_worktree_agent_counted_outside_excluded(self):
+        root = self._git_repo("repo")
+        worktree = self.tmp / "repo-wt"
+        subprocess.run(
+            [GIT, "-C", str(root), "worktree", "add", "-q", "-b", "wt", str(worktree)],
+            check=True, capture_output=True)
+        outside = self._git_repo("outside")
+        herdr = self._herdr([
+            {"name": "root-agent", "agent_status": "idle", "cwd": str(root)},
+            {"name": "wt-agent", "agent_status": "working", "cwd": str(worktree)},
+            {"name": "outside-agent", "agent_status": "working", "cwd": str(outside)},
+        ])
+        result = self.pf.check_agents(root, herdr)
+        self.assertTrue(result["available"], result)
+        self.assertIn("2 个本仓 agent", result["value"])
+        self.assertIn("wt-agent", result["detail"])
+        self.assertNotIn("outside-agent", result["detail"])
+
+    def test_non_git_root_keeps_old_behavior(self):
+        root = self.tmp / "plain"
+        root.mkdir()
+        herdr = self._herdr([
+            {"name": "root-agent", "agent_status": "idle", "cwd": str(root)},
+        ])
+        result = self.pf.check_agents(root, herdr)
+        self.assertTrue(result["available"], result)
+        self.assertIn("1 个本仓 agent", result["value"])
 
 
 class ManifestTest(unittest.TestCase):

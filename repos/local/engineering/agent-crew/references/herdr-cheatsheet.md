@@ -67,10 +67,11 @@ herdr agent get <task>-builder
 
 - 提示走 dispatch（写 agent-log）；`herdr agent read/get` 只读。
 - 派活/重发只走 dispatch（写 agent-log）；排障先看 dispatch 日志，不把手工生命周期命令当主路径。
-- **聚焦守卫（T37）**：qoder 直推、`dispatch notify`、guard 叫醒注入前都会查目标 pane 的 `focused`（`herdr pane list`）。目标 pane 聚焦（Captain 正在输入）或聚焦状态无法判定时**不注入**：回执/通知落 inbox，输出 `delivery=inbox_fallback`；`dispatch prompt` 直接拒绝并返回 rc=2。等 Captain 切走焦点后重试，或用 `crew-msg.py write` 落 inbox + 通知；不要反复重试或手工注入。`--via sendmessage` 行为不变。
+- **聚焦守卫（T37）**：qoder 直推、`dispatch notify`、guard 叫醒注入前都会查目标 pane 的 `focused`（`herdr pane list`）。目标 pane 聚焦（Captain 正在输入）或聚焦状态无法判定时**不注入**：回执/通知落 inbox，输出 `delivery=inbox_fallback`；`dispatch prompt` 直接拒绝并返回 rc=2。等 Captain 切走焦点后重试，或用 `crew-msg.py write` 落 inbox + 通知；不要反复重试或手工注入。`--via sendmessage` 行为不变。**默认直推（FB-039）**：同项目 herdr 目标的 `crew-msg.py write` 默认直推收件方 pane（`delivery=herdr`）；跨项目/不可达只写文件 + 通知（`delivery=notification`），显式 `--target-runtime herdr` 保持通知。
   - **`--via herdr` 同此口径**（A-2）：聚焦/不可判定同样不注入、落 inbox + 通知，结果仍是 `inbox_fallback` 且 note 显式标注强制模式；只有 herdr 调用本身失败才回退 DELEGATE 并返回诊断错误。
-  - **目标不可达 ≠ 聚焦回退**（A-1）：目标不在本机 `herdr agent list`、或 agent list 调用失败/不可解析时，`crew-msg.py` 报 `ok=false` + rc=3（不报 `inbox_fallback ok=true`），回执只落发送方 inbox；核对目标名/在线状态后重推。
+  - **目标不可达 ≠ 聚焦回退（A-1）**：分三种情形——① **显式 `--target-runtime qoder`** 且目标不在本机 `herdr agent list`、或 agent list 调用失败/不可解析 → 不注入，`ok=false` + rc=3（结果为 `delegate ok=false`，不冒充 `inbox_fallback ok=true`），回执只落发送方 inbox；② **默认 auto** 且目标从一开始就不在本机 agent list（或 agent list 不可用）→ 只写文件 + 通知，`delivery=notification`、`ok=true`（回执成立，note 写明未注入；核对目标名/在线状态后可重推）；③ **默认 auto** 且已判定同项目、随后焦点/可达性检查失败 → 按实际回退结果：pane 聚焦或聚焦不可判定为 `delivery=inbox_fallback`（ok=true），二次 agent list 失败或目标从列表消失则 `delegate ok=false` + rc=3，note 写明原因。
   - **已知限制（A-4）**：focused 判定与 `agent prompt` 注入是两次独立 CLI 调用，herdr 未提供原子 `--if-unfocused` 选项（`agent prompt` 只有 `--wait`/`--until`/`--timeout`）；Captain 恰在两步之间切入目标 pane 时注入仍会发生，残余竞态窗口无法由 CLI 消除，本守卫只收窄不归零。
+- **回执游标（R1）**：`crew-msg.py ls --unread` 按 `<crew-dir>/inbox-read-cursor.json` 扣减未读；标记已读只记读取进度，不改回执状态、不删文件（已读≠已处置）。文件名 ≠ `receipt_id` 的 legacy 文件名回执会被 `--mark-read --all` 跳过并汇总 warning（rc=0），显式 `--mark-read <id>` 仍按原契约拒绝（rc=1），故这类条目会一直出现在 `ls --unread`/preflight 未读计数里；处置路径＝确认内容后把文件重命名为 `<receipt_id>.json`（内容真源不变），或确认已处置后删除。
 - `recent-unwrapped` 适合读长输出；读不到时让它把结论写成 Markdown 文件，再读文件。
 - 超时不等于 prompt 没送到，不要盲目重复提交。
 - 编排会话内禁止前台 `--wait` 占住主控：改用后台 `python3 scripts/agent-watch.py --interval 15` 或完成通知。
@@ -104,6 +105,7 @@ python3 scripts/dispatch.py --root . pane close --pane <pane_id>
 ```
 
 - TUI 里 `Ctrl+B` 然后 `Q` detach；Agent 继续在后台跑，重新 `herdr` 回来。
+- guard 值守（G1–G6）：`python3 scripts/crew-guard.py --helm <当前舵> --interval 120` 长驻；在跑 worker = Herdr `working` + `<crew-dir>/runs/` 存活注册（`crew-claude.py run` 写入；死 pid/坏 JSON 忽略），`--once --json` 输出含 `claudeRuns`。
 - 上下文：看 CLI 状态栏的 `ctx` 用量。运行中的会话**不压缩**；worker（Builder/Reviewer/Scout）≥30% 不再接新切片，完成当前切片后停止，下一轮会话开始前统一 `/compact` 或重建；压缩摘要即交接，不单独写 handoff；主控/Planner ≥60% 停止接新任务，下一轮开始前压缩/重建。Herdr 只保活进程，不保存对话上下文。
 - 后台监听：`python3 scripts/agent-watch.py --interval 15`（可加 `--workspace` / `--agent`）轮询 `herdr agent list`，状态变化发 Herdr 通知；不要前台 `--wait` 长时间阻塞。`worktree-watch.py` 只监控 worktree，不监控 Agent。状态去重文件默认 `.git/agent-watch.state`（全 worktree 共用一份，键为 `workspace/agent`，可用 `--state-file` 另指）；手工抽查用 `python3 scripts/agent-watch.py --once --no-notify --state-file /tmp/aw-check.state`，不要污染常驻监听的基线；通知只在 `HERDR_ENV=1`（Herdr 内）生效，Herdr 外只打印不通知。
 - 后台建 tab / 启动 Agent 用 `--no-focus`，不要抢当前输入；dispatch 的 prompt 不抢焦点，但目标 pane 聚焦时不注入（见 §5 聚焦守卫）。

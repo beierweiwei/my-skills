@@ -1264,6 +1264,17 @@ class T45HelpTest(unittest.TestCase):
                       "完成流", "总舵 tab", "FB-038"):
             self.assertIn(token, text)
 
+    def test_help_documents_background_job_sighup(self):
+        """S12：固化「pane 内后台 job 在 --apply 关 pane 时仍可能收 SIGHUP」语义。"""
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            with self.assertRaises(SystemExit) as cm:
+                pa.main(["--help"])
+        self.assertEqual(cm.exception.code, 0)
+        text = out.getvalue()
+        for token in ("SIGHUP", "后台 job", "不保证"):
+            self.assertIn(token, text)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
