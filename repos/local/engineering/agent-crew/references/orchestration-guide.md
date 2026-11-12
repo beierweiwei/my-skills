@@ -14,7 +14,7 @@
 | 工位 | crew-rules.md **W1–W5** |
 | 占用与并发 | crew-rules.md **O1–O3、P1–P3** |
 | 收口 | crew-rules.md **F1–F16** |
-| 值守 | crew-rules.md **G1–G6** |
+| 值守 | crew-rules.md **G1–G7** |
 | 状态机与放行条件 | crew-rules.md **S1–S4** |
 | 边界红线 | crew-rules.md **X1–X5** |
 | 逐节点抽验 / 关键交互物自验 / 完成声明 / AOP 六维 | crew-acceptance.md **A1–A4** |
@@ -187,6 +187,22 @@
 - **③ 可交接性实测**：真实 pane ctx 读取（`herdr pane read <helm pane> --lines 80` 可见 `ctx Nk/1M`）、① 无锁窗口采集的 `python3 scripts/crew-guard.py --once --json`（stdout 为非空 JSON；长驻持锁时静默 rc=0 不算）、继任组合只读校验 `python3 scripts/dispatch.py compose --role helm --json` rc=0；证据落 `.planning/<task>/evidence/release/`。双 runtime 判读：项目同时装 qoder+opencode 时，compose 按 `<crew-dir>/dispatch-agents.json` 中同 role 最新 `startedAt` 记录自动解析现役 runtime（输出 `runtimeResolvedFrom=registry:<agent>`）；显式 `--runtime` 始终优先且不读注册表；无现役记录或最新记录并列时拒绝，按提示确认现役总舵/该角色实际运行的 runtime 后补 `--runtime qoder|opencode`，解析来源记入证据。
 - **④ 红线**：上述任一未完成或无证据、或未核 guard 存在（`python3 scripts/doctor.py --only runtime.guard` 非 pass 或 detail 无 pid），不得报发布收口。
 
+### 5.11.1 自动交接（guard.handoff）
+
+- **oldPane 反查**：交接操作前以 `oldPane` 反查 `oldTab`（`pane list` 权威、`agent list` 兜底）；缺失/不一致以反查为准关闭并写回 `<crew-dir>/guard.handoff`（`tabCheck`）并告警；反查不到（pane/agent 消失）fail-soft，不按未验证 `oldTab` 关 tab。
+- **done 后残留回收**：`phase=done` 后对残留旧 helm 做一次有界回收（仅 idle/done、非现役 pane/tab、非聚焦、非白名单；working/blocked/unknown 不关、只记日志）；结果写 handoff `reclaim` 标记，guard 重启不重复。
+- **周期对账**：guard 周期调用 `crew-reaper.py --apply --json`（失败只记 guard.log、不阻断值守）；一键入口、对账三源与安全边界见 §5.12。
+
+### 5.12 窗口对账回收（crew-reaper）
+
+- **问题**：换舵/交接后可能残留多个「总舵」tab（旧舵 idle、现役 working）。pane-audit 只做单 tab 巡检，不知道「现役总舵是谁」，无法判定多个总舵 tab 该保留哪个。
+- **对账三源**：dispatch 注册表（`<crew-dir>/dispatch-agents.json`）、现役总舵（`<crew-dir>/guard.handoff` 优先，`phase=warn` 取 old、`started/done` 取 new、`done+failed` 视为无法判定而不回退 registry，避免把失败继任误认现役；registry 中 role=helm 的最新 `startedAt` 次选）、herdr 的 tab/pane/agent 现状。报告写明现役判定来源（`handoff:new` / `handoff:old` / `registry:<agent>` / `unknown`）。
+- **回收口径**：多个总舵 tab 只保留现役（现役 pane 所在 tab，或 handoff newPane/newTab）；其余仅在全部 pane 为空或 registry agent idle/done、无 working/blocked/unknown、tab 非聚焦、tab 非白名单时，先 `dispatch pane close` 再 `dispatch tab close`。旧 helm agent 残留（handoff.old / registry 中非现役 helm）按同一口径回收；现役总舵 tab 永不关闭。无法判定现役（缺 handoff、registry 无 helm、多候选并列、两源矛盾或字段不一致）→ 只报告，零关闭。herdr 列表是全局的：能定位现役总舵 workspace 时只对账该 workspace，其它项目的 tab/agent 一律不触碰；定位不到 workspace（快照/字段缺失）时同样零关闭、只报告。
+- **best-effort 边界**：回收基于本轮快照，关闭前不重新取数/二次复检（快照与关闭之间被人工开始使用的 pane/tab 仍可能被关）；dispatch 失败只记录并继续其余安全项。先跑 dry-run 核对再 `--apply`。
+- **与 pane-audit 分工**：pane-audit 负责一般空 pane / 空 tab / 完成流 tab 巡检回收；reaper 只负责总舵 tab 与旧 helm 残留。本批新增的总舵/旧 helm 回收（reaper、guard reclaim、pane-audit 总舵检查）统一走 `dispatch.py`；pane-audit 既有的一般空 pane / 空 tab / 完成流 tab 回收仍直写 herdr（存量行为，本批不迁移），排障时按此区分。
+- **用法**：默认 dry-run 只报告；`--apply` 才执行；`--json` 输出 `current_helm/source/findings/actions` 供机器读取；`--snapshot` 注入 fixture（不调用 herdr，空 pane 一律按无法确认只报告）。退出码 0＝成功/无可回收/无法判定；1＝参数或数据错误；2＝参数互斥（--snapshot 与 --apply 不可同用）；dispatch 调用失败只记录并继续其余安全项。
+- **周期接线**：guard 周期调用 `crew-reaper.py --apply --json`（失败只记 guard.log，不阻断值守）；人工一键用 `python3 scripts/crew-reaper.py --apply`。角色模板的定时自检清单由模板 owner 统一维护，本文只给口径。
+
 ## 6. 三道人工门（为什么不可自批）
 
 三道门各回答一个不同的问题，顺序不能省：
@@ -238,9 +254,9 @@
 ### 7.5 值守与监听机制
 
 - 编排者不能靠前台阻塞等待（`herdr agent prompt --wait` / `agent wait`）过日子——一个 Agent 的长任务会把编排者钉死，其他流全部停摆。
-- 因此采用「guard 常驻轮询 + 一次性人工抽查 + 外置看门狗」：guard 按 G1–G6 的待办/在跑口径判断是否叫醒，正常零输出；人工抽查用监听脚本的边沿模式，不承担自动叫醒；外置定时只检查 guard 进程存活。
+- 因此采用「guard 常驻轮询 + 一次性人工抽查 + 外置看门狗」：guard 按 G1–G7 的待办/在跑口径判断是否叫醒，正常零输出；人工抽查用监听脚本的边沿模式，不承担自动叫醒；外置定时只检查 guard 进程存活。
 - **启动与恢复**：Agent 只经 `dispatch.py start` 启动并写 agent-log（`composedSha256`/`delivery`/`baseRef`）；`doctor.py` 的 `role.delivery` 复核最近一次启动与 compose 报告一致。
-- 叫醒条件、冷却、待办/在跑口径见 G1–G6（在跑口径见 G4：Herdr `working` + `<crew-dir>/runs/` 存活注册，覆盖 `crew-claude.py run` 子进程）；命令用法见 [herdr-cheatsheet.md](herdr-cheatsheet.md)。
+- 叫醒条件、冷却、待办/在跑口径见 G1–G7（在跑口径见 G4：Herdr `working` + `<crew-dir>/runs/` 存活注册，覆盖 `crew-claude.py run` 子进程）；命令用法见 [herdr-cheatsheet.md](herdr-cheatsheet.md)。
 
 ## 8. 可选远端扩展
 

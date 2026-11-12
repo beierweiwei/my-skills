@@ -47,6 +47,7 @@
 ### 决策与门禁
 
 - 可逆、可配置、不涉合同/合规/主数据/架构口径的事项可代决，标注「代决（可覆盖）」。
+- **关键决策对抗审查（硬门）**：涉主数据/架构口径/验收口径/数据安全/范围变更的关键决策，实施前必须交独立 Reviewer 持对抗立场做对抗审查；Captain 直令不豁免（取证可并行），阻断清零才实施；收口/评审门缺证据即阻断（步骤见 `references/crew-rules.md` D7 与 `templates/playbooks/adversarial-review.md`）。
 - 必须 Captain 决策的清单：
 
 {{captain_decisions}}

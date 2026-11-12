@@ -39,8 +39,12 @@ guard 不自动关闭/杀 agent；agent 不再 blocked 或消失即清除年龄�
 `tab create` 后按 pane list 校验新 tab pane 数=1，多出的明确空 pane 经
 `dispatch pane close` 关闭并记 guard.log（FB-038）；取数/关闭失败只告警不中断交接。
 旧舵一律按 handoff `old` 身份判定，working 不杀；继任缺失/blocked/idle 无首报或旧舵
-持续未收口连续 HANDOFF_STALL_ROUNDS 轮后记 failed 并通知人工。交接完成（phase=done）后
-继续监控继任总舵，不因 done 永久短路。交接启动前先执行
+持续未收口连续 HANDOFF_STALL_ROUNDS 轮后记 failed 并通知人工。交接操作前以 oldPane
+反查 pane/tab（pane list 权威、agent list 兜底，FB-045）：oldTab 缺失/不一致以反查为准
+并写回 handoff；反查不到（pane/agent 消失）不按未验证 oldTab 操作。交接完成（phase=done）后
+继续监控继任总舵，不因 done 永久短路；并对残留旧 helm 做一次有界回收（idle/done 且
+非现役/非聚焦/非白名单才关，handoff `reclaim` 标记幂等）。每 REAPER_EVERY_ROUNDS 轮
+调用 `crew-reaper.py --apply --json`，失败只记日志不阻断值守（D-7）。交接启动前先执行
 `plan-status.py --rotate --apply --keep ROTATE_KEEP`（默认 10）归档 progress；
 rotate 失败或异常只写 guard.log 告警，继续原交接流程（不阻断、不回落 split）。
 回执返工提醒：每轮扫描 <crew-dir>/inbox/*.json 中带 `task` 的回执并分组，
@@ -105,6 +109,10 @@ DEFAULT_CTX_HANDOFF = 0.50
 # 交接等待有界：继任缺失/blocked/idle 无首报，或旧舵持续未收口满 N 轮
 # → phase=done result=failed
 HANDOFF_STALL_ROUNDS = 3
+# D-7：guard 每 N 轮调用一次 crew-reaper（--apply --json）；失败只记日志不阻断
+REAPER_EVERY_ROUNDS = 15
+# 残留回收白名单：Captain 个人窗口 / 流程优化专用 tab 不自动关
+RECLAIM_WHITELIST_PREFIXES = ("Captain·", "流程优化·")
 # 创建阶段失败的 newPane/newTab 是孤儿资源；其它失败步骤下继任可能仍可用，提示保留。
 HANDOFF_CREATE_FAILURE_STEPS = ("tab create", "dispatch start", "dispatch prompt", "state")
 DEFAULT_TAB_LABEL = "总舵"
@@ -596,6 +604,22 @@ def herdr_panes() -> list[dict]:
     return payload.get("result", {}).get("panes", [])
 
 
+def herdr_tabs() -> list[dict]:
+    env = {**os.environ, "HERDR_ENV": "1"}
+    proc = subprocess.run(
+        ["herdr", "tab", "list"],
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+        timeout=15,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or "herdr tab list failed")
+    payload = json.loads(proc.stdout)
+    return payload.get("result", {}).get("tabs", [])
+
+
 def herdr_prompt(name: str, message: str) -> bool:
     try:
         proc = subprocess.run(
@@ -635,6 +659,25 @@ def run_dispatch(root: Path, args: list[str]) -> tuple[int, str, str]:
         timeout=120,
     )
     return proc.returncode, proc.stdout, proc.stderr
+
+
+def run_reaper_apply(root: Path, crew_dir: Path) -> tuple[int, str]:
+    """周期调用 crew-reaper（B 单交付）：`--apply --json`，失败由调用方记日志。
+
+    脚本缺失/异常返回非 0（-1 表示不可用）；不抛异常、不阻断值守。
+    """
+    script = Path(__file__).resolve().parent / "crew-reaper.py"
+    if not script.is_file():
+        return -1, "crew-reaper.py 不存在（跳过周期回收）"
+    proc = subprocess.run(
+        [sys.executable, str(script), "--root", str(root),
+         "--crew-dir", str(crew_dir), "--apply", "--json"],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+    return proc.returncode, (proc.stdout + proc.stderr).strip()
 
 
 def herdr_notify(title: str, body: str) -> bool:
@@ -721,6 +764,123 @@ def read_handoff_state(crew_dir: Path) -> dict[str, str]:
     return fields if fields.get("phase") else {}
 
 
+def pane_tab_lookup(
+    pane_id: str,
+    agents: list[dict] | None,
+    panes: list[dict] | None,
+) -> tuple[str, str]:
+    """以 pane 反查所在 tab：返回 (tab_id, source)，source ∈ {"panes","agents",""}。
+
+    pane list 是 pane→tab 的权威来源，agent list 兜底；都查不到返回 ("","")。
+    FB-045：手工 handoff 的 oldTab 可能沿用上一轮旧值，必须以 oldPane 反查为准。
+    """
+    if not pane_id:
+        return "", ""
+    for pane in panes or []:
+        if not isinstance(pane, dict):
+            continue
+        if str(pane.get("pane_id") or "") != pane_id:
+            continue
+        tab_id = str(pane.get("tab_id") or "").strip()
+        if tab_id:
+            return tab_id, "panes"
+    for agent in agents or []:
+        if not isinstance(agent, dict):
+            continue
+        value = agent.get("pane_id") or agent.get("pane")
+        if str(value or "").strip() != pane_id:
+            continue
+        tab_id = str(agent.get("tab_id") or "").strip()
+        if tab_id:
+            return tab_id, "agents"
+    return "", ""
+
+
+def pane_present(
+    pane_id: str,
+    agents: list[dict] | None,
+    panes: list[dict] | None,
+) -> bool:
+    """pane 是否仍存在于 pane list 或 agent list（两路任一命中即算存在）。
+
+    两路都没有才判定「pane/agent 消失」；仅一路有（如 registry 残留或 pane list
+    过滤）时仍按存在处理，交给 dispatch 关闭结果做最终裁决（失败转人工）。
+    """
+    if not pane_id:
+        return False
+    for pane in panes or []:
+        if isinstance(pane, dict) and str(pane.get("pane_id") or "") == pane_id:
+            return True
+    for agent in agents or []:
+        if not isinstance(agent, dict):
+            continue
+        value = agent.get("pane_id") or agent.get("pane")
+        if str(value or "").strip() == pane_id:
+            return True
+    return False
+
+
+@dataclass(frozen=True)
+class HandoffTabCheck:
+    """手工 handoff 字段校验结果（独立可测，不依赖 Guard/main 循环）。"""
+
+    status: str  # ok | missing_handoff_tab | mismatch | unresolved | unresolved_data | pane_gone
+    old_tab: str  # 校正后的 oldTab（沿用或反查值）
+    resolved_tab: str = ""
+    source: str = ""
+    pane_exists: bool = False
+    note: str = ""
+
+
+def validate_handoff_fields(
+    fields: dict[str, str],
+    agents: list[dict] | None,
+    panes: list[dict] | None,
+) -> HandoffTabCheck:
+    """校验 handoff `oldTab` 必须属于 `oldPane` 所在 tab。
+
+    - 反查到 tab：缺失则纠正（missing_handoff_tab）、不一致则以反查为准（mismatch）；
+    - 反查不到但 pane/agent 仍在：unresolved，沿用 handoff oldTab（不静默）；
+    - 反查不到且 pane/agent 消失：pane_gone，fail-soft（不清空、不按 oldTab 操作）；
+    - panes=None（pane list 不可用）：unresolved_data，保持 legacy 兜底。
+    """
+    old_pane = str(fields.get("oldPane") or "").strip()
+    handoff_tab = str(fields.get("oldTab") or "").strip()
+    if panes is None:
+        return HandoffTabCheck(
+            "unresolved_data", handoff_tab, pane_exists=bool(old_pane),
+            note="pane list 不可用，沿用 handoff oldTab",
+        )
+    if not old_pane:
+        return HandoffTabCheck(
+            "pane_gone", handoff_tab,
+            note="handoff 缺 oldPane，无法反查",
+        )
+    resolved, source = pane_tab_lookup(old_pane, agents, panes)
+    exists = pane_present(old_pane, agents, panes)
+    if resolved:
+        if not handoff_tab:
+            return HandoffTabCheck(
+                "missing_handoff_tab", resolved, resolved, source, True,
+                f"handoff 缺 oldTab，按 {old_pane} 反查纠正为 {resolved}",
+            )
+        if handoff_tab != resolved:
+            return HandoffTabCheck(
+                "mismatch", resolved, resolved, source, True,
+                f"handoff oldTab={handoff_tab} 与 {old_pane} 反查 {resolved} 不一致",
+            )
+        return HandoffTabCheck("ok", handoff_tab, resolved, source, True)
+    if exists:
+        return HandoffTabCheck(
+            "unresolved", handoff_tab, "", "", True,
+            f"未反查到 {old_pane} 所在 tab，沿用 handoff oldTab={handoff_tab or '空'}",
+        )
+    return HandoffTabCheck(
+        "pane_gone", handoff_tab, "", "", False,
+        f"旧 pane {old_pane} 已不存在",
+    )
+
+
 def resolve_guard_helm(root: Path, crew_dir: Path, explicit: str | None) -> str:
     """交接后重启 guard 时按 handoff 状态识别现役总舵（显式 --helm 不覆盖）。
 
@@ -750,12 +910,14 @@ class Guard:
     clock: Callable[[], float] = time.time
     list_agents: Callable[[], list[dict]] = herdr_agents
     list_panes: Callable[[], list[dict]] = herdr_panes
+    list_tabs: Callable[[], list[dict]] = herdr_tabs
     prompt: Callable[[str, str], bool] = herdr_prompt
     notify: Callable[[str, str], bool] = herdr_notify
     pane_read: Callable[[str, int], str] = herdr_pane_read
     dispatch: Callable[[Path, list[str]], tuple[int, str, str]] = run_dispatch
     run_status: Callable[[Path, str], tuple[int, str]] = run_plan_status
     run_rotate: Callable[[Path], tuple[int, str]] | None = None
+    run_reaper: Callable[[Path, Path], tuple[int, str]] | None = None
     log_fn: Callable[[str], None] | None = None
     consecutive: int = field(default=0, init=False)
     prev_working: int = field(default=0, init=False)
@@ -767,6 +929,7 @@ class Guard:
     handoff_failed_noted: bool = field(default=False, init=False)
     handoff_wait_rounds: int = field(default=0, init=False)
     handoff_close_rounds: int = field(default=0, init=False)
+    reaper_rounds: int = field(default=0, init=False)
     rework_logged: set[str] = field(default_factory=set, init=False)
     rework_skipped: set[str] = field(default_factory=set, init=False)
     project_roots: set[Path] | None = None
@@ -881,8 +1044,9 @@ class Guard:
     def _write_handoff(self, **updates: object) -> None:
         fields = self._read_handoff()
         fields.update({key: str(value).replace("\n", " ") for key, value in updates.items()})
-        order = ("phase", "old", "oldPane", "oldTab", "new", "newPane", "newTab",
-                 "time", "reason", "result", "error", "successorWasWorking")
+        order = ("phase", "old", "oldPane", "oldTab", "tabCheck", "new", "newPane",
+                 "newTab", "reclaim", "time", "reason", "result", "error",
+                 "successorWasWorking")
         lines = [f"{key}={fields[key]}" for key in order if key in fields]
         lines.extend(f"{key}={value}" for key, value in fields.items() if key not in order)
         atomic_write_text(self.crew_dir / "guard.handoff", "\n".join(lines) + "\n")
@@ -1241,8 +1405,10 @@ class Guard:
         if code != 0:
             return self._handoff_fail("dispatch prompt", error or output, base)
 
+        # 新一轮交接：清掉上一轮 handoff 的校验/回收标记，避免误抑制本轮残留回收。
         self._write_handoff(
             **base, phase="started", result="ok", successorWasWorking="0",
+            tabCheck="", reclaim="",
         )
         self._notify_handoff(
             "guard 交接",
@@ -1304,9 +1470,30 @@ class Guard:
 
         old_agent = self._find_agent(agents, old_name)
         old_status = str(old_agent.get("agent_status") or "") if old_agent else ""
+        # FB-045：操作前用 oldPane 反查真实 tab；手工 handoff 的 oldTab 可能沿用
+        # 上一轮旧值。反查到就以反查为准并写回纠正；反查不到时 fail-soft。
+        try:
+            panes: list[dict] | None = self.list_panes()
+        except Exception as exc:  # noqa: BLE001 - pane list 不可用时保持 legacy 兜底
+            panes = None
+            self.log(f"旧舵 pane/tab 反查失败（pane list）：{type(exc).__name__}: {exc}")
+        check = validate_handoff_fields(fields, agents, panes)
+        base["oldTab"] = check.old_tab
+        base["tabCheck"] = f"{check.status}:{check.note}"
+        if check.status == "mismatch":
+            self.log(f"交接 oldTab 不一致：{check.note}；以反查为准并写回 handoff")
+            self._write_handoff(oldTab=check.old_tab, tabCheck=base["tabCheck"])
+        elif check.status == "missing_handoff_tab":
+            self.log(f"交接 oldTab 缺失：{check.note}；已写回 handoff")
+            self._write_handoff(oldTab=check.old_tab, tabCheck=base["tabCheck"])
+
         close_note = f"旧舵 {old_name} 仍在运行（{old_status or 'working'}），未关闭"
         pane_closed = False
-        if old_pane and old_status in ("", "idle", "done", "unknown"):
+        if check.status == "pane_gone":
+            close_note = (f"旧舵 {old_name} 的 pane {old_pane or '未知'} 已不存在；"
+                          "旧 tab 未验证、未关闭")
+            self.log(f"残留收敛：{close_note}")
+        elif old_pane and old_status in ("", "idle", "done", "unknown"):
             code, output, error = self.dispatch(
                 self.root, ["pane", "close", "--pane", old_pane]
             )
@@ -1331,7 +1518,7 @@ class Guard:
             )
             return {"action": "wait", "reason": close_note}
 
-        old_tab = fields.get("oldTab", "")
+        old_tab = base["oldTab"]
         if pane_closed and old_tab:
             remaining = None
             try:
@@ -1377,6 +1564,168 @@ class Guard:
         return {"action": "done", "reason": f"交接完成（{close_note}）",
                 "new": successor, "newPane": base["newPane"]}
 
+    def _tabs_by_id(self) -> dict[str, dict] | None:
+        """tab_id → tab（含 label/focused）；取数失败返回 None（调用方按无法判定处理）。"""
+        try:
+            tabs = self.list_tabs()
+        except Exception as exc:  # noqa: BLE001 - tab list 故障按无法判定处理
+            self.log(f"tab list 不可用（残留回收无法确认白名单/聚焦）："
+                     f"{type(exc).__name__}: {exc}")
+            return None
+        return {
+            str(tab["tab_id"]): tab
+            for tab in tabs
+            if isinstance(tab, dict) and tab.get("tab_id")
+        }
+
+    def _reclaim_residual_old_helm(
+        self, fields: dict[str, str], agents: list[dict]
+    ) -> str:
+        """phase=done 后回收残留旧 helm（FB-045）：每份 handoff 只尝试/记录一次。
+
+        仅当旧 helm agent_status ∈ {idle, done}、pane 存在且非现役 pane、tab 非现役
+        tab、pane/tab 非聚焦、tab 非白名单时才经 `dispatch pane close` 关闭，tab
+        无剩余 pane 再关 tab；其余情况只记日志。结果写入 handoff `reclaim=` 标记，
+        guard 重启后不重复动作；不循环、不阻断主流程。
+        """
+        if fields.get("reclaim"):
+            return ""
+        old_name = str(fields.get("old") or "").strip()
+        current = str(fields.get("new") or self.helm).strip() or self.helm
+        if not old_name:
+            self._write_handoff(reclaim="skipped:no-old")
+            return "skipped"
+        if old_name == current:
+            self._write_handoff(reclaim="skipped:current")
+            return "skipped"
+        old_agent = self._find_agent(agents, old_name)
+        if old_agent is None:
+            self._write_handoff(reclaim="gone")
+            self.log(f"残留回收：旧 helm {old_name} 已不存在（reclaim=gone）")
+            return "gone"
+        if not self._in_project(old_agent):
+            self._write_handoff(reclaim="skipped:out-of-project")
+            self.log(f"残留回收：旧 helm {old_name} cwd 不在本仓/worktree，"
+                     "不关闭")
+            return "skipped"
+        status = str(old_agent.get("agent_status") or "")
+        if status not in ("idle", "done"):
+            self._write_handoff(reclaim=f"skipped:status={status or 'unknown'}")
+            self.log(f"残留回收：旧 helm {old_name} 状态 {status or 'unknown'}，"
+                     "不关闭（仅记录一次）")
+            return "skipped"
+        pane_id = self._agent_pane(old_agent)
+        if not pane_id:
+            self._write_handoff(reclaim="skipped:no-pane")
+            self.log(f"残留回收：旧 helm {old_name} 无 pane 信息，不关闭")
+            return "skipped"
+        try:
+            panes = self.list_panes()
+        except Exception as exc:  # noqa: BLE001 - 无法确认 pane/tab 时不动作
+            self._write_handoff(reclaim="skipped:pane-list")
+            self.log(f"残留回收：pane list 不可用（{type(exc).__name__}: {exc}），"
+                     "不关闭")
+            return "skipped"
+        pane_entry = next(
+            (pane for pane in panes
+             if isinstance(pane, dict)
+             and str(pane.get("pane_id") or "") == pane_id),
+            None,
+        )
+        if pane_entry is None:
+            self._write_handoff(reclaim="gone")
+            self.log(f"残留回收：旧 helm {old_name} 的 pane {pane_id} 已不存在"
+                     "（reclaim=gone）")
+            return "gone"
+        current_agent = self._find_agent(agents, current)
+        # 现役 pane/tab 以 agent list 为准，handoff newPane/newTab 兜底（保护面更大）。
+        current_pane = (self._agent_pane(current_agent)
+                        or str(fields.get("newPane") or "").strip())
+        current_tab = ""
+        if current_agent is not None:
+            current_tab = str(current_agent.get("tab_id") or "")
+            if not current_tab and current_pane:
+                current_tab, _ = pane_tab_lookup(current_pane, agents, panes)
+        if not current_tab:
+            current_tab = str(fields.get("newTab") or "").strip()
+        if pane_id == current_pane:
+            self._write_handoff(reclaim="skipped:current-pane")
+            self.log(f"残留回收：旧 helm {old_name} pane 与现役 pane 相同，不关闭")
+            return "skipped"
+        tab_id = (str(pane_entry.get("tab_id") or "")
+                  or str(old_agent.get("tab_id") or ""))
+        if not tab_id:
+            self._write_handoff(reclaim="unresolved:tab")
+            self.log(f"残留回收：旧 helm {old_name} 的 tab 无法确认（pane list/agent "
+                     "list 均无 tab 信息），未关闭")
+            return "unresolved"
+        if tab_id == current_tab:
+            self._write_handoff(reclaim="skipped:current-tab")
+            self.log(f"残留回收：旧 helm {old_name} 与现役总舵同一 tab，不关闭")
+            return "skipped"
+        if pane_entry.get("focused") is not False:
+            self._write_handoff(reclaim="skipped:focused")
+            self.log(f"残留回收：旧 helm {old_name} pane {pane_id} 聚焦或聚焦无法判定，"
+                     "未关闭")
+            return "skipped"
+        tabs = self._tabs_by_id()
+        if tabs is None:
+            self._write_handoff(reclaim="unresolved:tab-list")
+            self.log(f"残留回收：tab list 不可用，未关闭旧 helm {old_name}")
+            return "unresolved"
+        tab = tabs.get(tab_id)
+        if tab is None:
+            self._write_handoff(reclaim="unresolved:tab-missing")
+            self.log(f"残留回收：tab {tab_id} 不在 tab list 中（无法确认白名单），"
+                     f"未关闭旧 helm {old_name}")
+            return "unresolved"
+        label = str(tab.get("label") or "")
+        if label.startswith(RECLAIM_WHITELIST_PREFIXES):
+            self._write_handoff(reclaim="skipped:whitelist")
+            self.log(f"残留回收：旧 helm {old_name} 所在 tab {tab_id}（{label}）"
+                     "属白名单，未关闭")
+            return "skipped"
+        if tab.get("focused") is True:
+            self._write_handoff(reclaim="skipped:focused")
+            self.log(f"残留回收：旧 helm {old_name} 所在 tab {tab_id} 当前聚焦，"
+                     "未关闭")
+            return "skipped"
+
+        code, output, error = self.dispatch(
+            self.root, ["pane", "close", "--pane", pane_id]
+        )
+        if code != 0:
+            detail = (error or output).strip().splitlines()
+            reason = detail[0] if detail else f"退出码 {code}"
+            self._write_handoff(reclaim="skipped:close-failed")
+            self.log(f"残留回收：旧 helm {old_name} pane {pane_id} 关闭失败"
+                     f"（{reason}），不再重试")
+            return "skipped"
+        remaining = [
+            pane for pane in panes
+            if isinstance(pane, dict)
+            and str(pane.get("tab_id") or "") == tab_id
+            and str(pane.get("pane_id") or "") != pane_id
+        ]
+        note = f"pane {pane_id} 已关闭"
+        if remaining:
+            note += f"；旧 tab {tab_id} 仍有 {len(remaining)} 个 pane，未关闭"
+        else:
+            tcode, tout, terr = self.dispatch(
+                self.root, ["tab", "close", "--tab", tab_id]
+            )
+            if tcode == 0:
+                note += f"；旧 tab {tab_id} 已关闭"
+            else:
+                detail = (terr or tout).strip().splitlines()
+                reason = detail[0] if detail else f"退出码 {tcode}"
+                note += f"；旧 tab {tab_id} 关闭失败（{reason}）"
+                self.log(f"残留回收：旧 tab {tab_id} 关闭失败，待人工或 "
+                         "pane-audit 兜底")
+        self._write_handoff(reclaim="done")
+        self.log(f"残留回收：旧 helm {old_name}（{note}）")
+        return "done"
+
     def _check_handoff(self, agents: list[dict]) -> dict:
         fields = self._read_handoff()
         phase = fields.get("phase")
@@ -1397,6 +1746,11 @@ class Guard:
             if successor and successor != self.helm:
                 self.log(f"交接已完成，改监控继任总舵 {successor}")
                 self.helm = successor
+            # FB-045：交接完成后回收残留旧 helm（一次有界，失败不阻断）。
+            try:
+                self._reclaim_residual_old_helm(fields, agents)
+            except Exception as exc:  # noqa: BLE001 - 回收失败不阻断值守
+                self.log(f"残留回收异常：{type(exc).__name__}: {exc}（不阻断值守）")
 
         ctx = self._ctx_for_helm(agents)
         if ctx is None:
@@ -1416,7 +1770,7 @@ class Guard:
             old_tab = str(helm_agent.get("tab_id") or "") if helm_agent else ""
             self._write_handoff(
                 phase="warn", old=self.helm, oldPane=pane, oldTab=old_tab,
-                time=utc_now(), reason=reason,
+                time=utc_now(), reason=reason, tabCheck="", reclaim="",
             )
             self._notify_handoff(
                 "guard 交接预警",
@@ -1646,6 +2000,30 @@ class Guard:
         elif "建议交接时 --rotate" in output:
             self.log(f"plan-status --write 体量告警：{output}")
 
+    def _maybe_run_reaper(self) -> None:
+        """D-7：按固定轮次间隔调用 `crew-reaper.py --apply --json`。
+
+        脚本不存在/退出非 0/异常只记 guard.log，不阻断值守、不影响待办与叫醒。
+        """
+        self.reaper_rounds += 1
+        if self.reaper_rounds % REAPER_EVERY_ROUNDS != 0:
+            return
+        runner = self.run_reaper or run_reaper_apply
+        try:
+            code, output = runner(self.root, self.crew_dir)
+        except Exception as exc:  # noqa: BLE001 - 周期回收失败不影响值守
+            self.log(f"周期回收调用异常：{type(exc).__name__}: {exc}（不阻断值守）")
+            return
+        detail = " / ".join(line.strip() for line in output.splitlines()
+                            if line.strip())[:300]
+        if code == 0:
+            self.log(f"周期回收完成：{detail or 'ok'}")
+        elif code < 0:
+            self.log(f"周期回收跳过：{detail or '脚本不可用'}")
+        else:
+            self.log(f"周期回收失败（退出码 {code}）：{detail or '无输出'}"
+                     "（不阻断值守）")
+
     def _freshness_note(self) -> str:
         try:
             code, output = self.run_status(self.root, "--check-fresh")
@@ -1746,6 +2124,7 @@ class Guard:
         rework = self._scan_rework()
         self._consume_stale_wake(now)
         self._periodic_write(now)
+        self._maybe_run_reaper()
 
         try:
             agents = self.list_agents()
@@ -1936,6 +2315,15 @@ ctxHandoff（默认 50%）一次性 `dispatch.py tab create` 新 tab（配置 he
 交接完成（phase=done, result=ok）后继续监控继任总舵（handoff new），不因 done 永久短路；
 done(result=failed) 不自动重试，人工删除或改写 <crew-dir>/guard.handoff 后重启 guard 恢复。
 旧 tab 有剩余 pane/无法确认或关闭失败只记 note，由人工或 pane-audit --apply 兜底。
+FB-045 反查：交接操作前以 oldPane 反查 pane/tab（pane list 权威、agent list 兜底）；
+oldTab 缺失/不一致时以反查为准关闭并写回 handoff（tabCheck 字段记
+mismatch / missing_handoff_tab），反查不到（pane/agent 消失）不按未验证 oldTab
+操作——只关确认存在的 pane 或只报告。
+残留回收：phase=done 后若 handoff old agent 仍在且非现役总舵，仅当 idle/done、
+pane/tab 非现役、非聚焦、非白名单时经 dispatch 关 pane（tab 无剩余 pane 再关 tab）；
+其余只记日志；每份 handoff 只尝试/记录一次（handoff reclaim 标记，重启不重复）。
+周期回收（D-7）：每 REAPER_EVERY_ROUNDS（默认 15）轮调用
+`crew-reaper.py --apply --json`；脚本不存在/失败只记 guard.log，不阻断值守。
 
 周复盘兜底：仅当 feedback 复盘信箱 `待复盘` >0、无在跑 worker 且最近 retro 报告超期
 （config retro.periodDays，默认 7，夹取 1–30）时叫醒，每日最多一次

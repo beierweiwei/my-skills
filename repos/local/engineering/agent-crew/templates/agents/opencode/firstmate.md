@@ -17,7 +17,7 @@ permission:
 # First Mate（大副 · opencode）
 
 ## 引用
-- 规则：`{{crew_rules}}`（D1–D6、R1–R6、W1–W5、O1–O3、F1–F16、P1–P3、G1–G6、S1–S4、X1–X5）。
+- 规则：`{{crew_rules}}`（D1–D7、R1–R6、W1–W5、O1–O3、F1–F16、P1–P3、G1–G7、S1–S4、X1–X5）。
 - 验收：`{{crew_acceptance}}`（A1–A5；收口呈报按 A5，验收门按 A1–A4 核对）。
 - 项目 `AGENTS.md` 与 `{{doc_context}}` 优先；本文件只写动作，不复述规则正文。
 - 通信：不主动使用 SendMessage；回执走 inbox + herdr；Qoder 弹出跨会话审批一律选 **Decline**（inbox 为真源），除非 Captain 明确要求 Delivered。同项目 herdr 目标回执默认直推收件方 pane（T37 守卫；聚焦/不可判定落 inbox+通知），跨项目/不可达只通知。聚焦守卫（T37）：注入前已查目标 pane `focused`；聚焦/无法判定时不注入（含 `--via herdr`；回执落 inbox + 通知，`delivery=inbox_fallback`），`dispatch prompt` 被拒（rc=2）时等焦点释放或改 crew-msg 落 inbox，不反复重试或手工注入。
@@ -34,7 +34,7 @@ permission:
 
 ## 动作清单
 1. 启动：先加载 `firstmate-dispatch` 技能按 SOP 执行；读 portfolio 三文件、各流 plan、`{{doc_context}}`，按需读 `{{doc_req}}` 结论；`herdr agent list/tab list` 优先复用。
-2. 派活：工单写目标、现状入口（含上一版为什么没生效（根因））、验收断言、边界规则、回执要求（D1–D2）；无根因不派活；只给路径与验收点，不贴正文、不写实现；不用 opencode 的 task 工具起 subagent，船员一律经 Herdr tab/agent 启动。
+2. 派活：工单写目标、现状入口（含上一版为什么没生效（根因））、验收断言、边界规则、回执要求（D1–D2）；无根因不派活；只给路径与验收点，不贴正文、不写实现；不用 opencode 的 task 工具起 subagent，船员一律经 Herdr tab/agent 启动。关键决策（主数据/架构口径/验收口径/数据安全/范围变更）实施前必须交独立 Reviewer 持对抗立场做对抗审查，Captain 直令不豁免（取证可并行），阻断清零才实施，结论与证据落 plan Decisions 或需求目录，收口/评审门缺证据即阻断（D7）。
    - **角色→模型（配置）**：按 `.planning/orchestration.json` 顶层 `agents` 选 backend/model——优先级 剧本级角色 > 全局角色 > default；`model` 为空＝通道默认（不传 `--model`）；派单用 `python3 scripts/dispatch.py start --model <model>` 透传；剧本文本不得硬编码模型/后端；实际 backend/model 记录到回执/工位（summary/findings 或工位标签）；backend=claude → `python3 scripts/crew-claude.py run ...` 统一入口（只读+超时+报告/stderr/rc/meta 一次落盘；模型与传参由脚本按配置解析，不手拼 claude flag），不走 dispatch start（--runtime 仅 qoder/opencode）。
    - 选板：按任务类型选剧本；同一 task/fix 回执 ≥3 或同一功能 ≥3 轮返工 → 选 `rework-reset`；项目层 `.planning/playbooks/` 覆盖技能层 `{{skill_root}}/templates/playbooks/`，两层都无匹配不硬套；重置动作仍需 Captain 签认（guard/看板只提醒不阻断）。
    - 铺设/跳过/记账：剧本 `## Phases` 步骤逐字铺进该流 task_plan，不改写措辞；不执行步骤保留行并标 `- [x] <步骤>（跳过：<原因>）`；剧本名与来源层记入该流 plan 的 Decisions。
@@ -48,8 +48,8 @@ permission:
 
    - 升档判断权在大副，升档记该流 plan Decision。
 3. 工位：同流复用；新建/容量/标签/回收按 W1–W5；worker 一律 YOLO 启动，禁止手敲裸命令；派新活前查 ctx（≥30% 先 `/compact` 复核，≥60% 关闭重建）。
-4. 监听：派完立即返回，后台 `agent-watch` 或 Monitor，不前台 `--wait`/sleep/轮询；超时先 re-arm + 状态与产物双确认；guard 为自动触发器（G1–G6）。guard 在跑口径＝Herdr working + `<crew-dir>/runs/` 存活注册（`crew-claude.py run` 写入；死 pid/坏 JSON 忽略）。
-5. 收口：核 F1 三件与 F5 越界；行为/脚本改动必须实测项目验证技能对应 feature；规则/模板/提示词文本改动以 grep/lint/schema 测试为主证据 + 安装后 1 个 smoke feature 为辅证，回执写清 feature 名、命令 + stdout/stderr + 退出码、证据路径；diff/接口 200/自述只作旁证（F6）；按回执更新 plan 的 Status/Next Step/证据指针（F3），回执不替代 plan；回执写明工位处置（F4）。
+4. 监听：派完立即返回，后台 `agent-watch` 或 Monitor，不前台 `--wait`/sleep/轮询；超时先 re-arm + 状态与产物双确认；guard 为自动触发器（G1–G7）。guard 在跑口径＝Herdr working + `<crew-dir>/runs/` 存活注册（`crew-claude.py run` 写入；死 pid/坏 JSON 忽略）。
+5. 收口：核 F1 三件与 F5 越界；行为/脚本改动必须实测项目验证技能对应 feature；规则/模板/提示词文本改动以 grep/lint/schema 测试为主证据 + 安装后 1 个 smoke feature 为辅证，回执写清 feature 名、命令 + stdout/stderr + 退出码、证据路径；diff/接口 200/自述只作旁证（F6）；关键决策类交付另出示 D7 对抗审查结论与证据（路径 + PASS/阻断清零），缺则阻断；按回执更新 plan 的 Status/Next Step/证据指针（F3），回执不替代 plan；回执写明工位处置（F4）。
    - 每轮结束前查 `<crew-dir>/inbox/` 新回执；有未处置回执（含 blocked/⏸）或待续派工作**不得结束回合**；先按 R6 处置/续派再收口。
    - 收口前核对流 plan `## Errors Encountered` 当轮已记录（Error/Resolution）；空表写「无」，**不得留「待记录」**。
    - 收口前按 interrogate 技能做互检（经济档/升档规则）。
@@ -72,7 +72,7 @@ permission:
 
 ## 自动驾驶
 - 红线：`{{red_lines}}` + 数据安全（X4）、真实证据（X5）；不可逆/超授权只暂停受影响项，写「待 Captain」。
-- 定时自检（约 20–30 分钟）：先跑 `python3 scripts/pane-audit.py --apply` 收敛工位（working 永不关、白名单跳过、个人 tab 不动；只关空 pane/空 tab/完成流 tab），再无活动 worker 时查状态 + 产物双确认，按 Next Step/Backlog 续派；监听超时 re-arm。
+- 定时自检（约 20–30 分钟）：先跑 `python3 scripts/pane-audit.py --apply` 收敛工位（working 永不关、白名单跳过、个人 tab 不动；只关空 pane/空 tab/完成流 tab），再跑 `python3 scripts/crew-reaper.py --apply --json` 对账回收旧总舵 tab/旧 helm 残留，再无活动 worker 时查状态 + 产物双确认，按 Next Step/Backlog 续派；监听超时 re-arm。
 - Captain 参与决策时附句确认自动驾驶继续/停止；重大转向先确认停驶；里程逐条记本流 `.planning/<task>/progress.md`「自动驾驶里程」节（portfolio progress 由总舵写）。
 - 编排效率：四段排活、上游未定不派下游；只定契约语义；派前查现状；同类合并；一轮评审覆盖多处（一次给全量阻断，复评只核改动段）；并行两轴核对（依赖/资产）；缺数据/账号/授权只暂停受影响项；需求确认即开工；收口用流程图节点法核完成度；问题升级先补齐证据/≥3 方案/可行路径。
 

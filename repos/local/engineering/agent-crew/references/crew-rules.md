@@ -9,13 +9,13 @@
 
 | 前缀 | 领域 | 编号 |
 |---|---|---|
-| D | 派单 | D1–D6 |
+| D | 派单 | D1–D7 |
 | R | 回执与反馈 | R1–R6 |
 | W | 工位 | W1–W5 |
 | O | 占用 | O1–O3 |
 | F | 收口 | F1–F16 |
 | P | 并发 | P1–P3 |
-| G | 值守 | G1–G6 |
+| G | 值守 | G1–G7 |
 | S | 状态机 | S1–S4 |
 | X | 边界红线 | X1–X5 |
 
@@ -37,6 +37,7 @@
 - **D4 最小改动**：worker 只做验收断言要求的事；不顺手重构、不校正范围外问题、不新增未要求的功能。
 - **D5 AMEND**：任何扩围必须先提交 AMEND（原因/文件/风险）并获确认；禁止静默扩围。
 - **D6 发现清单**：范围外问题只报不修；回执必须含发现清单，无发现写「无」。
+- **D7 关键决策对抗审查（硬）**：涉主数据、架构口径、验收口径、数据安全、范围变更的关键决策，实施前先派独立 Reviewer 以对抗立场审查（Captain 直令不豁免，取证可并行），阻断项清零才允许实施；结论与证据写 plan Decisions 或需求目录。未出示报告路径与 PASS/阻断清零记录即阻断，流程骨架见 `templates/playbooks/adversarial-review.md`。
 
 ## R 回执
 
@@ -63,7 +64,7 @@
 
 ## F 收口
 
-- **F1 核验三件**：收口必须核对 numstat（改动规模）、工作区状态（未提交与越界文件）、证据清单；缺证据不收口。
+- **F1 核验三件**：收口必须核对 numstat（改动规模）、工作区状态（未提交与越界文件）、证据清单；缺证据不收口。关键决策类交付另核 D7 对抗审查结论与证据（报告路径 + PASS/阻断清零记录），缺失不收口、不得报完成。
 - **F2 暂存范围**：只暂存回执列出的改动文件，不夹带无关改动。
 - **F3 plan 更新**：owner 收到回执后必须更新对应 plan 的阶段 Status、Next Step 与证据指针；回执不替代 plan，未更新视为未收口。
 - **F4 工位处置**：每段收口回执必须写明「工位处置：关闭 / 保留至 HH:MM」；不填视为未收口。
@@ -94,6 +95,7 @@
 - **G4 在跑口径**：在跑 = Herdr `agent_status=working` + `<crew-dir>/runs/` 存活注册（`crew-claude.py run` 运行时原子写入，含 pid/role/started_at/out_dir）；死 pid、坏 JSON、缺 pid 的注册忽略并记日志，注册失败只告警不阻断运行；blocked 单独作为「卡住」叫醒理由，叫醒带年龄与重复叫醒——达到 15 分钟未处置再叫醒，达到 blockedGrace（默认 30 分钟）提示「应关闭或升级」，不自动杀 agent；idle/done/unknown 不算在跑。
 - **G5 零输出与边界**：正常零输出；可提示「回执 done 但 plan 未更新」，不代写 plan；外置定时只检查 guard 存活；人工抽查工具不承担自动叫醒。
 - **G6 口头决策落盘**：Captain 口头/会话决策由收到指令的 owner **当轮**写入对应 plan 的 `## Decisions Made` 或 portfolio `progress.md`（含生效口径与时间），并在回复回显「已落盘：<文件>/<条目>」；未落盘不得当作已决执行；交接 digest 必须列「未落盘决策」（无则写「无」）。
+- **G7 guard 自动交接口径**：交接操作前以 `oldPane` 反查 `oldTab`（pane list 权威、agent list 兜底）；缺失/不一致以反查为准关闭并写回 `<crew-dir>/guard.handoff` + 告警，反查不到（pane/agent 消失）fail-soft，不按未验证 `oldTab` 关 tab。`phase=done` 后对残留旧 helm 做一次有界回收：仅 idle/done、非现役、非聚焦、非白名单才关；working/blocked/unknown 不关、只记日志。guard 周期调用 `crew-reaper.py --apply --json`（失败只记 guard.log、不阻断值守）；一键入口与安全边界见 [orchestration-guide.md](orchestration-guide.md) §5.12。
 
 ## S 状态机
 
