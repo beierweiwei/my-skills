@@ -2,17 +2,27 @@
 """编排回执通道：文件为真源，推送只是可选投递。
 
 回执落点：<git-common-dir>/crew/inbox/<receipt-id>.json（tmp + rename 原子写）。
+跨项目：推送前把回执副本原子写入收件方 `<git-common-dir>/crew/inbox/`；解析失败只报
+「未落收件方 inbox」不阻断推送（T28）。
 注册表：<git-common-dir>/crew/registry.json，只存 Herdr 不知道的路由；默认不创建。
 
 推送边界（2.1.7）：
 - opencode→opencode：POST /api/session/{id}/prompt，请求体 delivery=queue；
 - qoder→qoder：默认 `herdr agent prompt <目标名>` 直推（非交互、无跨会话审批）；
   `--via sendmessage` 显式回到 DELEGATE（需接收方人工确认，inbox 为真源）；
-  `--via herdr` 强制 herdr，失败时回退 DELEGATE 并返回诊断错误；
+  `--via herdr` 强制 herdr，herdr 调用失败时回退 DELEGATE 并返回诊断错误；
+- 聚焦守卫（T37）：qoder 直推前先查目标 pane 的 `focused`；聚焦则跳过注入，
+  回执落 inbox + Herdr 通知，投递结果记 `delivery=inbox_fallback`；
+  `herdr pane list` 不可用/字段缺失按 fail-safe 同样不注入（`--via herdr` 同此口径，
+  不注入、落 inbox + 通知，结果字段与 note 显式标注）；
+- 可达性（A-1）：目标不在本机 `herdr agent list`，或 agent list 调用失败/不可解析时，
+  按「目标不可达」处理——不注入、`ok=False`、退出码 3，不冒充 inbox_fallback 成功；
 - claude / codex：本期只做路由校验与接口占位，不真实投递；
 - 跨产品 / Herdr 目标：只写文件 + Herdr 通知；`--via` 只作用于同 runtime=qoder 的推送。
 - `--target-runtime auto` 只查 registry；无路由按 Herdr 目标处理（文件+通知）。需要 qoder
   直推时显式传 `--target-runtime qoder`。
+- 审计：投递成功后把 `delivery` 写回本地回执副本（`herdr` / `inbox_fallback` /
+  `sendmessage-delegate` 等）；收件方副本不含该字段。
 
 推送失败不回滚回执。退出码：0 成功；1 参数/注册表/回执错误；3 回执成立但投递失败。
 
@@ -347,14 +357,14 @@ def notify(title: str, body: str) -> bool:
     if os.environ.get("HERDR_ENV") != "1":
         return False
     try:
-        subprocess.run(
+        proc = subprocess.run(
             ["herdr", "notification", "show", title, "--body", body],
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=5,
         )
-        return True
+        return proc.returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
 
@@ -401,6 +411,143 @@ def _herdr_target_name(to: str | None) -> str:
     return name if HERDR_NAME_RE.fullmatch(name) else ""
 
 
+def pane_focus_state(name: str, timeout: float = 10.0) -> tuple[bool | None, str, bool]:
+    """目标 agent 的 pane 是否聚焦（T37）；None=无法判定，调用方按 fail-safe 不注入。
+
+    返回 (focused, reason, present)：present=False 表示目标不可达——不在本机
+    `herdr agent list`，或 agent list 调用失败/输出不可解析。调用方必须区分：
+    不可达 → 投递失败（ok=False，非 0 退出）；可达但 pane 聚焦/状态不可判定 →
+    fail-safe 不注入（inbox_fallback）。解析链：`herdr agent list` 取 pane_id →
+    `herdr pane list` 取该 pane 的 focused；pane list 不可用、pane 缺失或
+    focused 字段缺失一律返回 None + 原因。
+    """
+    if not name:
+        return None, "缺目标 agent 名", False
+    try:
+        proc = subprocess.run(
+            ["herdr", "agent", "list"],
+            text=True, capture_output=True, check=False, timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"herdr agent list 调用失败：{exc}", False
+    if proc.returncode != 0:
+        return None, f"herdr agent list 退出码 {proc.returncode}", False
+    try:
+        data = json.loads(proc.stdout)
+    except ValueError as exc:
+        return None, f"herdr agent list 输出非 JSON：{exc}", False
+    result = data.get("result") if isinstance(data, dict) else None
+    agents = result.get("agents") if isinstance(result, dict) else None
+    if not isinstance(agents, list):
+        return None, "herdr agent list 缺 agents", False
+    entry = next((agent for agent in agents
+                  if isinstance(agent, dict) and agent.get("name") == name), None)
+    if entry is None:
+        return None, f"目标 {name} 不在本机 herdr agent list", False
+    pane_id = str(entry.get("pane_id") or "").strip()
+    if not pane_id:
+        return None, f"agent list 缺 {name} 的 pane_id", True
+    try:
+        proc = subprocess.run(
+            ["herdr", "pane", "list"],
+            text=True, capture_output=True, check=False, timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"herdr pane list 调用失败：{exc}", True
+    if proc.returncode != 0:
+        return None, f"herdr pane list 退出码 {proc.returncode}", True
+    try:
+        data = json.loads(proc.stdout)
+    except ValueError as exc:
+        return None, f"herdr pane list 输出非 JSON：{exc}", True
+    result = data.get("result") if isinstance(data, dict) else None
+    panes = result.get("panes") if isinstance(result, dict) else None
+    if not isinstance(panes, list):
+        return None, "herdr pane list 缺 panes", True
+    pane = next((item for item in panes
+                 if isinstance(item, dict) and str(item.get("pane_id") or "") == pane_id), None)
+    if pane is None:
+        return None, f"herdr pane list 未找到 pane {pane_id}", True
+    focused = pane.get("focused")
+    if not isinstance(focused, bool):
+        return None, f"pane {pane_id} 缺 focused 字段", True
+    return focused, "", True
+
+
+def _resolve_peer_inbox(to: str | None, timeout: float = 10.0) -> tuple[Path | None, str]:
+    """目标 agent → 收件方 `<git-common-dir>/crew/inbox`（T28）。
+
+    返回 (inbox_dir, reason)；解析失败时 inbox_dir=None，reason 显式告知未落盘。
+    """
+    name = _herdr_target_name(to)
+    if not name:
+        return None, "目标不是 herdr agent 名，无法定位收件方项目"
+    try:
+        proc = subprocess.run(
+            ["herdr", "agent", "list"],
+            text=True, capture_output=True, check=False, timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"herdr agent list 调用失败：{exc}"
+    if proc.returncode != 0:
+        return None, f"herdr agent list 退出码 {proc.returncode}"
+    try:
+        data = json.loads(proc.stdout)
+    except ValueError as exc:
+        return None, f"herdr agent list 输出非 JSON：{exc}"
+    result = data.get("result") if isinstance(data, dict) else None
+    agents = result.get("agents") if isinstance(result, dict) else None
+    if not isinstance(agents, list):
+        agents = []
+    entry = next((agent for agent in agents
+                  if isinstance(agent, dict) and agent.get("name") == name), None)
+    if entry is None:
+        return None, f"目标 {name} 不在本机 herdr agent list"
+    cwd = str(entry.get("cwd") or entry.get("foreground_cwd") or "").strip()
+    if not cwd or not Path(cwd).is_dir():
+        return None, f"目标 {name} 缺可用 cwd"
+    try:
+        proc = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--git-common-dir"],
+            text=True, capture_output=True, check=False, timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"git 调用失败：{exc}"
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None, f"目标 {name} 不是 git 仓库（cwd={cwd}）"
+    common = Path(proc.stdout.strip())
+    if not common.is_absolute():
+        common = (Path(cwd) / common).resolve()
+    return common / "crew" / "inbox", ""
+
+
+def mirror_receipt_to_peer_inbox(
+    receipt: dict,
+    crew_dir: Path,
+    *,
+    to: str | None,
+    timeout: float = 10.0,
+) -> dict:
+    """把回执副本原子写入收件方 inbox（跨项目）；失败只报不抛，不阻断推送。"""
+    inbox, reason = _resolve_peer_inbox(to, timeout=timeout)
+    if inbox is None:
+        return {"status": "skipped", "path": None, "reason": reason}
+    try:
+        if inbox.resolve() == inbox_dir(crew_dir).resolve():
+            return {"status": "same", "path": str(inbox), "reason": None}
+    except OSError:
+        pass
+    path = inbox / f"{receipt['receipt_id']}.json"
+    if path.exists():
+        return {"status": "dedup", "path": str(path), "reason": None}
+    try:
+        atomic_write_json(path, receipt)
+    except OSError as exc:
+        return {"status": "skipped", "path": None,
+                "reason": f"收件方 inbox 写入失败：{exc}"}
+    return {"status": "written", "path": str(path), "reason": None}
+
+
 def _delegate_qoder(
     receipt: dict,
     to: str | None,
@@ -425,11 +572,40 @@ def _delegate_qoder(
     return result
 
 
+def _inbox_fallback_result(
+    receipt: dict,
+    crew_dir: Path,
+    target: str,
+    *,
+    focused: bool | None,
+    reason: str,
+) -> dict:
+    """聚焦/无法判定时跳过注入：回执落 inbox + Herdr 通知（T37）。"""
+    path = inbox_dir(crew_dir) / f"{receipt['receipt_id']}.json"
+    sent = notify(
+        f"回执 {receipt['status']}: {receipt['receipt_id']}（未注入）",
+        f"{reason}\n{receipt['summary']}\n{path}",
+    )
+    return {
+        "target": target,
+        "runtime": "qoder",
+        "delivery": "inbox_fallback",
+        "ok": True,
+        "focused": focused,
+        "notified": sent,
+        "note": (
+            f"{reason}；已跳过 herdr 注入，回执已落 inbox"
+            + (" 并推送 Herdr 通知" if sent else "（Herdr 通知未发送）")
+        ),
+    }
+
+
 def deliver_qoder(
     receipt: dict,
     *,
     to: str | None,
     via: str,
+    crew_dir: Path,
     timeout: float = 10.0,
 ) -> dict:
     if via == "sendmessage":
@@ -456,6 +632,29 @@ def deliver_qoder(
             note="无可用 herdr 名，回退 DELEGATE（兼容行为）",
             warning=QODER_APPROVAL_WARNING,
         )
+    focused, focus_reason, present = pane_focus_state(target, timeout=timeout)
+    if not present:
+        return _delegate_qoder(
+            receipt,
+            target,
+            ok=False,
+            note=(
+                "目标不可达：未执行 herdr 注入；回执已落发送方 inbox（R1），"
+                "请核对目标名/在线状态后重推，或用 SendMessage 转发 message"
+            ),
+            warning=QODER_APPROVAL_WARNING,
+            error=f"目标不可达：{focus_reason}",
+        )
+    if focused is not False:
+        reason = (
+            "目标 pane 聚焦（Captain 正在使用），按聚焦守卫跳过注入"
+            if focused
+            else f"无法判定目标 pane 聚焦状态（{focus_reason}），按 fail-safe 跳过注入"
+        )
+        if via == "herdr":
+            reason += "（--via herdr 强制模式同此口径：聚焦/不可判定不注入）"
+        return _inbox_fallback_result(
+            receipt, crew_dir, target, focused=focused, reason=reason)
     ok, error = herdr_prompt(target, format_message(receipt), timeout=timeout)
     if ok:
         return {
@@ -492,6 +691,14 @@ def deliver_receipt(
     if not to:
         return {"target": None, "runtime": None, "delivery": "none", "ok": True}
 
+    # R1 跨项目真源：回执副本先落收件方 inbox（失败不阻断推送，但必须显式告知）。
+    peer_inbox = mirror_receipt_to_peer_inbox(
+        receipt, crew_dir, to=to, timeout=timeout)
+
+    def finish(result: dict) -> dict:
+        result["peer_inbox"] = peer_inbox
+        return result
+
     route = routes.get(to)
     if target_runtime in (None, "auto"):
         runtime = route["runtime"] if route else "herdr"
@@ -506,7 +713,7 @@ def deliver_receipt(
     if runtime == "herdr":
         result = _notify_result(receipt, crew_dir, "herdr", "Herdr 目标：只写文件 + 通知")
         result["target"] = to
-        return result
+        return finish(result)
 
     if runtime != receipt.get("runtime"):
         result = _notify_result(
@@ -516,10 +723,11 @@ def deliver_receipt(
             f"跨产品（{receipt.get('runtime')}→{runtime}）：只写文件 + 通知",
         )
         result["target"] = to
-        return result
+        return finish(result)
 
     if runtime == "qoder":
-        return deliver_qoder(receipt, to=to, via=via, timeout=timeout)
+        return finish(deliver_qoder(
+            receipt, to=to, via=via, crew_dir=crew_dir, timeout=timeout))
 
     if route is None:
         raise RegistryError(f'目标 "{to}" 缺少 {runtime} 路由（registry.json）')
@@ -537,7 +745,7 @@ def deliver_receipt(
         try:
             status_code, body = http_post_json(url, payload, timeout=timeout)
         except urllib.error.HTTPError as exc:
-            return {
+            return finish({
                 "target": to,
                 "runtime": "opencode",
                 "delivery": "http",
@@ -545,18 +753,18 @@ def deliver_receipt(
                 "http_status": exc.code,
                 "url": url,
                 "error": f"HTTP {exc.code}: {exc.reason}",
-            }
+            })
         except Exception as exc:  # noqa: BLE001 - 推送失败是数据，不是崩溃
-            return {
+            return finish({
                 "target": to,
                 "runtime": "opencode",
                 "delivery": "http",
                 "ok": False,
                 "url": url,
                 "error": f"{type(exc).__name__}: {exc}",
-            }
+            })
         ok = 200 <= status_code < 300
-        return {
+        return finish({
             "target": to,
             "runtime": "opencode",
             "delivery": "http",
@@ -564,15 +772,40 @@ def deliver_receipt(
             "http_status": status_code,
             "url": url,
             "error": None if ok else f"HTTP {status_code}: {body[:200]!r}",
-        }
+        })
 
-    return {
+    return finish({
         "target": to,
         "runtime": runtime,
         "delivery": "placeholder",
         "ok": True,
         "note": f"{runtime} 本期只留路由与接口占位，未真实投递（回执已落文件）",
-    }
+    })
+
+
+def record_delivery(crew_dir: Path, receipt_id: str, delivery: str) -> tuple[bool, str]:
+    """把投递通道写回本地回执副本供事后审计（T37）；失败不阻断推送。"""
+    path = inbox_dir(crew_dir) / f"{receipt_id}.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return False, f"回执不可读：{exc}"
+    if not isinstance(data, dict):
+        return False, "回执不是 JSON 对象"
+    data["delivery"] = delivery
+    try:
+        atomic_write_json(path, data)
+    except OSError as exc:
+        return False, f"回执写入失败：{exc}"
+    return True, ""
+
+
+def audit_delivery(result: dict, via: str) -> str:
+    """投递结果 → 审计通道：显式 sendmessage 的 delegate 记为 sendmessage-delegate。"""
+    delivery = str(result.get("delivery") or "none")
+    if delivery == "delegate" and via == "sendmessage":
+        return "sendmessage-delegate"
+    return delivery
 
 
 def write_receipt(
@@ -593,9 +826,11 @@ def write_receipt(
             "path": str(path),
             "duplicate": True,
             "push": None,
+            "delivery_record": None,
         }
     atomic_write_json(path, receipt)
     result = None
+    delivery_record = None
     if push and to:
         result = deliver_receipt(
             receipt,
@@ -605,11 +840,15 @@ def write_receipt(
             via=via,
             timeout=timeout,
         )
+        recorded, record_error = record_delivery(
+            crew_dir, receipt["receipt_id"], audit_delivery(result, via))
+        delivery_record = {"ok": recorded, "error": record_error or None}
     return {
         "receipt_id": receipt["receipt_id"],
         "path": str(path),
         "duplicate": False,
         "push": result,
+        "delivery_record": delivery_record,
     }
 
 
@@ -625,6 +864,14 @@ def _print_push(result: dict) -> None:
     if result.get("error"):
         line += f" error={result['error']}"
     print(line)
+    peer = result.get("peer_inbox") or {}
+    if peer:
+        if peer.get("status") in ("written", "dedup"):
+            print(f"收件方 inbox：{peer['status']} {peer.get('path')}")
+        elif peer.get("status") == "same":
+            print("收件方 inbox：同一项目（本地回执即收件方真源）")
+        else:
+            print(f"未落收件方 inbox：{peer.get('reason') or '原因未知'}")
     if result.get("warning"):
         print(f"warning: {result['warning']}")
     if result.get("note"):
@@ -673,6 +920,9 @@ def _cmd_write(args, crew_dir: Path) -> int:
             _print_push(push_result)
         elif not args.no_push and not args.to:
             print("未指定 --to：只落文件，不推送")
+        record = result.get("delivery_record")
+        if record and not record.get("ok"):
+            print(f"warning: 回执未记录投递通道：{record.get('error')}", file=sys.stderr)
 
     push_result = result.get("push")
     if push_result and not push_result.get("ok"):
@@ -718,6 +968,10 @@ def _cmd_push(args, crew_dir: Path) -> int:
         via=args.via,
         timeout=args.timeout,
     )
+    recorded, record_error = record_delivery(
+        crew_dir, receipt["receipt_id"], audit_delivery(result, args.via))
+    if not recorded:
+        print(f"warning: 回执未记录投递通道：{record_error}", file=sys.stderr)
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
@@ -743,13 +997,18 @@ status=captain 表示 ⏸ 待 Captain。回执先原子落盘，推送失败不�
 
 推送边界：
 - qoder→qoder：默认 `herdr agent prompt <目标名>` 直推（非交互、无跨会话审批）；
+  直推前查目标 pane 的 focused（T37）：聚焦或无法判定 → 不注入，回执落 inbox +
+  Herdr 通知，结果记 delivery=inbox_fallback（`--via herdr` 同此口径）；
+  目标不在本机 agent list 或 agent list 不可用 → 目标不可达，ok=false + 退出码 3；
   `--via sendmessage` 保留 DELEGATE（由调用方用 SendMessage 转发）并告警需接收方
-  人工确认；`--via herdr` 强制 herdr，失败时回退 DELEGATE 并返回诊断错误；
+  人工确认；`--via herdr` 强制 herdr，herdr 调用失败时回退 DELEGATE 并返回诊断错误；
 - opencode→opencode：POST /api/session/{id}/prompt，请求体 delivery=queue；
 - claude / codex：本批仅校验路由并返回 placeholder，不真实投递；
 - 跨产品 / Herdr 目标：只写文件 + Herdr 通知；`--via` 只作用于同 runtime=qoder 的推送。
 - `--target-runtime auto` 只查 registry；无路由按 Herdr 目标处理（文件+通知）。需要 qoder
   直推时显式传 `--target-runtime qoder`。
+- 审计：投递通道写回本地回执副本 delivery（herdr / inbox_fallback /
+  sendmessage-delegate 等）。
 
 注册表 .git/crew/registry.json 只存 Herdr 不知道的路由，默认不创建；非法路由明确报错。
 退出码：0 成功；1 参数/注册表/回执错误；3 回执成立但投递失败。

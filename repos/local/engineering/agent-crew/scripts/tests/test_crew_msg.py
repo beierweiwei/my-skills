@@ -228,6 +228,31 @@ class RegistryTest(CrewDirTestBase):
 
 
 class DeliveryBoundaryTest(CrewDirTestBase):
+    def fake_herdr_run(self, prompt_rc=0, focused=False, pane_ok=True):
+        """T37：agent list → pane list → prompt；返回 (side_effect, prompt_calls)。"""
+        prompt_calls = []
+
+        def fake(argv, **kwargs):
+            if argv[:3] == ["herdr", "agent", "list"]:
+                return mock.Mock(
+                    returncode=0,
+                    stdout=json.dumps({"result": {"agents": [
+                        {"name": "helm-qoder", "pane_id": "wX:p1"}]}}),
+                    stderr="")
+            if argv[:3] == ["herdr", "pane", "list"]:
+                if not pane_ok:
+                    return mock.Mock(returncode=1, stdout="", stderr="pane list down")
+                return mock.Mock(
+                    returncode=0,
+                    stdout=json.dumps({"result": {"panes": [
+                        {"pane_id": "wX:p1", "focused": focused}]}}),
+                    stderr="")
+            prompt_calls.append(list(argv))
+            return mock.Mock(returncode=prompt_rc, stdout="",
+                             stderr="agent not found" if prompt_rc else "")
+
+        return fake, prompt_calls
+
     def test_qoder_sendmessage_returns_delegate_with_warning(self):
         receipt = make_receipt(runtime="qoder")
         result = cm.deliver_receipt(
@@ -242,8 +267,8 @@ class DeliveryBoundaryTest(CrewDirTestBase):
 
     def test_qoder_auto_uses_herdr_prompt_without_sendmessage(self):
         receipt = make_receipt(runtime="qoder")
-        completed = mock.Mock(returncode=0, stdout="", stderr="")
-        with mock.patch.object(cm.subprocess, "run", return_value=completed) as run:
+        fake, prompt_calls = self.fake_herdr_run()
+        with mock.patch.object(cm.subprocess, "run", side_effect=fake):
             result = cm.deliver_receipt(
                 receipt, self.crew, to="helm-qoder", target_runtime="qoder", via="auto"
             )
@@ -252,15 +277,47 @@ class DeliveryBoundaryTest(CrewDirTestBase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["target"], "helm-qoder")
         self.assertNotIn("SendMessage", result.get("note", ""))
-        argv = run.call_args.args[0]
+        argv = prompt_calls[0]
         self.assertEqual(argv[:4], ["herdr", "agent", "prompt", "helm-qoder"])
         self.assertIn(receipt["receipt_id"], argv[4])
         self.assertIn(receipt["summary"], argv[4])
 
+    def test_qoder_focused_pane_skips_injection_and_falls_back_to_inbox(self):
+        receipt = make_receipt(runtime="qoder")
+        fake, prompt_calls = self.fake_herdr_run(focused=True)
+        with mock.patch.object(cm.subprocess, "run", side_effect=fake), \
+                mock.patch.object(cm, "notify", return_value=True) as notify:
+            result = cm.deliver_receipt(
+                receipt, self.crew, to="helm-qoder", target_runtime="qoder", via="auto"
+            )
+
+        self.assertEqual(result["delivery"], "inbox_fallback")
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["focused"])
+        self.assertTrue(result["notified"])
+        self.assertEqual(prompt_calls, [])
+        notify.assert_called_once()
+        self.assertIn("聚焦", result["note"])
+
+    def test_qoder_pane_state_unknown_is_fail_safe(self):
+        receipt = make_receipt(runtime="qoder")
+        fake, prompt_calls = self.fake_herdr_run(pane_ok=False)
+        with mock.patch.object(cm.subprocess, "run", side_effect=fake), \
+                mock.patch.object(cm, "notify", return_value=False):
+            result = cm.deliver_receipt(
+                receipt, self.crew, to="helm-qoder", target_runtime="qoder", via="herdr"
+            )
+
+        self.assertEqual(result["delivery"], "inbox_fallback")
+        self.assertIsNone(result["focused"])
+        self.assertFalse(result["notified"])
+        self.assertEqual(prompt_calls, [])
+        self.assertIn("fail-safe", result["note"])
+
     def test_qoder_herdr_failure_falls_back_to_delegate_with_error(self):
         receipt = make_receipt(runtime="qoder")
-        completed = mock.Mock(returncode=1, stdout="", stderr="agent not found")
-        with mock.patch.object(cm.subprocess, "run", return_value=completed):
+        fake, _prompt_calls = self.fake_herdr_run(prompt_rc=1)
+        with mock.patch.object(cm.subprocess, "run", side_effect=fake):
             result = cm.deliver_receipt(
                 receipt, self.crew, to="helm-qoder", target_runtime="qoder", via="herdr"
             )

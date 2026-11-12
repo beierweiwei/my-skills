@@ -5,7 +5,7 @@
 ## 适用与退出条件
 
 - 适用：技能版本发布/升级——版本号与 CHANGELOG、全量测试与静态检查、同步与 push、用户目录刷新、项目 upgrade/init/doctor、升级后重启与可交接检查、安装后验证技能交付门与发布后维护循环。
-- 退出：五处版本一致且检查全绿；同步与 push 完成；用户目录与项目安装均为新版本；升级后 guard 重启验证通过、guard 存在核验（`python3 scripts/doctor.py --only runtime.guard` pass 且 detail 带 pid）通过、长驻角色处置与可交接性实测留证；收口回执发出；发布后维护循环结论（clean/changed/blocked）已落盘并写入发布回执。
+- 退出：五处版本一致且检查全绿；同步与 push 完成；用户目录与项目安装均为新版本；升级后 guard 重启验证通过、guard 存在核验（`python3 scripts/doctor.py --only runtime.guard` pass 且 detail 带 pid）通过、长驻角色处置与可交接性实测留证；收口回执发出；发布后维护循环结论（clean/changed/blocked）已落盘并写入发布回执；收口/终验报告落盘合规——禁止无引号 heredoc/命令替换；单引号 heredoc 写 `/tmp` 再 `cp`，或 Write 工具。
 
 ## Phases
 
@@ -33,6 +33,10 @@
 ### Phase 4: 用户目录刷新
 - owner: firstmate
 - [ ] scoped 刷新：在 my-skills 技能库仓根执行 `bash scripts/update-all.sh --skill agent-crew --agent qoder-cn,claude --skip-setup`（可先加 `--dry-run` 预览）
+- [ ] **代理不可用判定**：update 阶段 rc≠0 且输出 `Completed with failures` / `Failed to connect ... via <代理地址>` / git `Could not resolve proxy`（2.2.14 实测 http=000 rc=7；`Failed to connect ... port` 的 port 段是目标端口 443，不是代理端口，不作判据）→ 判代理不可用；先换可达 `--proxy URL` 或 `--no-proxy` 重试
+- [ ] **回退路径**：回退命令即同一条 scoped 刷新命令（无需手工改跑 install-skills.sh）：带 `--skill` 且所请求技能在本地可用（`repos/local` 或既有缓存）时，`update-all.sh` 自动跳过更新做 scoped install，rc=0 且输出 `update 失败 → 已回退安装（rc=N）`；update 失败信号保留在日志，证据注明「回退」；无 `--skill` 全量、远端技能无本地缓存、安装自身失败时保持非 0，不得静默放行
+- [ ] **离线模式**：不需要刷新远端缓存时显式 `bash scripts/update-all.sh --offline --skill agent-crew --agent qoder-cn,claude --skip-setup`（跳过 update 直接安装，rc 取安装结果）；证据写明改用离线的原因
+- [ ] **证据要求**：`user-install.txt` 记录最终命令、update 失败信号（如有）、回退/离线判定、rc、安装后版本对照
 - [ ] 校验用户目录 SKILL.md `version` 与技能源一致（全部已装技能逐项对照）；命令输出落 `.planning/<task>/evidence/release/user-install.txt`
 - [ ] **S2 diff 口径**：安装/比对用 `diff -rq -x __pycache__ -x .pytest_cache`（或等价排除），`__pycache__`/`.pytest_cache` 噪声不算差异；先记缓存基线再比对
 - **Status:** pending
@@ -40,6 +44,7 @@
 ### Phase 5: 项目升级与体检
 - owner: firstmate
 - [ ] `python3 scripts/upgrade.py --apply --confirm`：自动同步 config `skillVersion` 与 manifest（不要手工改 config，避免「版本已更新而脚本仍旧」的假象），记录 backup id；输出落 `.planning/<task>/evidence/release/upgrade-apply.txt`
+- [ ] **源新增受管脚本时 upgrade 需跑两次**：项目内旧 upgrade（pre-T34，只认本进程清单）首跑复制完旧清单脚本即 rc=0 并写版本，新脚本漏装。判定：首跑后 `python3 scripts/doctor.py --only install.scripts_source` 报 `项目缺失 N 项：scripts/...`（或首跑输出无 `补登` 而源清单已增）；处置：再运行一次 `python3 scripts/upgrade.py --apply --confirm`（此时项目内 upgrade 已是新版），输出应含 `补登 N 个受管脚本条目` 且 doctor pass；两次 upgrade 输出与 doctor 结果并入 `evidence/release/upgrade-apply.txt`
 - [ ] `python3 scripts/init.py --check`（输出落 `evidence/release/init-check.txt`）与 `python3 scripts/doctor.py --root . --profile release --strict --json`（输出落 `evidence/release/doctor-after.json`）：按当前基线核对通过数/失败数；`--strict` 下 warn 也会使 rc=1（既有语义），判定以 fail=0 为准，warn 计数记录并在证据注明触发原因（含 H2/H3 新增 warn），不得因 warn 停发；仅有未解释的 fail 才停，按输出 `next` 处置
 - [ ] 项目仓本地 commit（只提交发布相关改动）
 - **Status:** pending
@@ -65,6 +70,7 @@
 
 ### Phase 8: 收口回执
 - owner: firstmate
+- [ ] 报告落盘：禁止无引号 heredoc/命令替换；单引号 heredoc 写 `/tmp` 再 `cp`，或 Write 工具（无引号 heredoc 内的命令替换会触发 Qoder 权限弹窗并卡住会话）
 - [ ] 按 R2 写回执：版本/commit/push/用户目录/init/doctor/guard 新 pid/guard 存在核验（`doctor --only runtime.guard` 结果）/长驻角色处置/工位处置
 - [ ] 更新 plan 的 Status 与 Next Step，刷新看板（`python3 scripts/plan-status.py --write`）；交接前 `--check-fresh`
 - [ ] 回执包含 Phase 6 验证技能交付门证据（feature 名/命令/退出码/证据路径）与 Phase 7 维护 outcome（clean/changed/blocked）；两项缺失不得报发布收口

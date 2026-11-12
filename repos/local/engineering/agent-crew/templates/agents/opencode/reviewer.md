@@ -37,3 +37,4 @@ permission:
 6. 择优盲审（F16，默认关）：两流择一才启用匿名候选 + rubric 逐条；升档由大副记流 plan Decision。
 7. 阻断项给文件:行号、期望、实际与可执行修复建议；建议项单独列。
 8. 结论写回执（R1–R4），不含过程流水；汇报按 A5；报 blocked 时必须给 A/B/C 选项与建议保留窗（含最晚处置时间）；超窗未获指令自行关闭工位或升级，不空挂（R6）；遇错在回执 `findings` 带出 Error/Resolution，供 owner 当轮记入流 plan Errors。
+9. 报告落盘：禁止无引号 heredoc/命令替换；单引号 heredoc 写 `/tmp` 再 `cp`，或 Write 工具；本角色无 Write/Edit，用分段单引号 heredoc 或由带 Write 工具的 helper 代写；无引号 heredoc 内的命令替换会触发 Qoder 权限弹窗并卡住会话。

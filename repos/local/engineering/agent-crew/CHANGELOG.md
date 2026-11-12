@@ -1,5 +1,32 @@
 # Changelog
 
+## 2.2.15 — 2026-11-12
+
+报告落盘方式（T32）、AGENTS 块模板漂移（T35）、跨项目消息落点（T28）、升级安装源新增脚本（T34）、update-all 代理回退（T36）、回执/通知聚焦守卫（T37）、firstmate 写权口径（T38）、claude 后端包装（T39）、互检修复（A/B）与发布。
+
+### 新增
+
+- **T32/FB-029 报告落盘方式**：`templates/playbooks/release.md`（退出条件 + Phase 8）、`templates/playbooks/maintain-verification.md`、`templates/_templates/ticket.md`、qoder/opencode 的 `firstmate.md` 与 `runner.md` 固化「禁止无引号 heredoc / 命令替换；单引号 heredoc 写 `/tmp` 再 `cp`，或 Write 工具」；评审补充 qoder/opencode `reviewer.md`（含无 Write 退路：分段单引号 heredoc / helper 代写），防回退测试落点纳入 reviewer。新会话非交互实测报告落盘 rc=0、无权限弹窗。
+- **T35/FB-030 AGENTS 受管块模板漂移**：`scripts/init.py --check` 识别「技能模板渲染结果与项目块漂移」，rc=1 报 `[过期] AGENTS.md#block(template-drift)` 并提示 `--refresh-block --confirm`；`scripts/doctor.py` 新增 `agents.drift`（stale warn、strict rc=1、一致 pass、模板不可读 skip）；一致场景不误报。
+- **T28 跨项目消息落点**：`dispatch.py notify` 解析目标 cwd/git-common-dir，原子落收件方项目 `<git-common-dir>/crew/inbox/`（内容寻址去重，解析失败显式降级为 pane prompt）；`crew-msg.py` 跨项目回执同步落收件方 inbox；`plan-status.py --handover` 新增「未处理通知」段与 `notify --ack`；规则与 qoder/opencode helm/firstmate 同步。
+- **T34 upgrade 安装源新增受管脚本**：`scripts/upgrade.py` 受管集合改为「manifest entries ∪ 安装源 `SCRIPT_MANIFEST`」（AST 读源清单，兼容项目内旧 upgrade），源仅新增脚本时安装新脚本并写 entries，消除「doctor warn → 只能 upgrade」死路；rollback 校验新增脚本未改动后移除并去条目，被改动 rc=1。
+- **T36 update-all 代理回退**：`scripts/update-all.sh` 在 `--skill` 且本地可解析时代理失败自动回退 scoped install（rc=0，输出「update 失败 → 已回退安装」），`--offline` 直装；无 `--skill`/缺缓存/install 失败保持非 0；release 剧本 Phase 4 写明判定、回退、离线与证据。
+- **T37 回执/通知直推聚焦守卫**：`crew-msg.py`、`dispatch.py`（prompt/notify）、`crew-guard.py` 的 herdr 注入前按 agent→pane 查 `focused`；聚焦或无法判定一律不注入（crew-msg 落 inbox + 通知 `delivery=inbox_fallback`；dispatch prompt rc=2 拒绝；notify 落 inbox + 通知；guard 写 guard.wake + 通知），投递通道可审计；6 角色模板与 cheatsheet 同步。
+- **T39 claude 后端包装脚本**：新增受管 `scripts/crew-claude.py`（模型级联、`ANTHROPIC_MODEL` 传自定义网关不传 `--model`、只读 + 1500s 超时、报告/stderr/rc/meta 一次落盘、失败非零）；纳入 `SCRIPT_MANIFEST`，6 模板 + cheatsheet 统一入口。
+
+### 修复
+
+- **T38/FB-035 firstmate 写权口径**：qoder/opencode `firstmate.md` 统一为「portfolio 三文件由总舵写；本舵只写本流 `.planning/<task>/progress.md`」，保留 portfolio 总舵写权；组合产物 forbidden_scan 无残留。
+- **互检 A 组（A-1 阻断 + A-2/A-3/A-4）**：`crew-msg.py` present 语义恢复——目标不可达 `ok=false` + rc=3（原 rc=0 伪成功），目标在而聚焦/不可判定仍 `inbox_fallback`；`--via herdr` 契约统一并同步文档；三处通知检查 returncode；TOCTOU 限制在 cheatsheet 明示。
+- **互检 B 组（B-1/B-2）**：doctor/upgrade 受管覆盖集统一为「源 AST 清单 ∪ entries ∪ 本进程清单」；补 pre-T34 首升 → 二次补装夹具与 stale-init 回归；update-all 回退提示补「本地库/缓存可能落后远端」；release 剧本代理信号改 `via <代理地址>`、Phase 5 补两跑判定。
+- **R-1/R-2 文档口径**：`crew-claude.py` docstring 明确「模型空白＝通道默认（rc=0，不设 env）」；剧本 README 改统一入口并并入防回退测试；AMEND 仅改 `test_2213_rules` 旧字面量断言。
+
+### 测试
+
+- 新增 `test_2215_t32_report_writing.py`、`test_2215_agents_drift.py`、`test_2215_t28_cross_project_inbox.py`、`test_2215_upgrade_new_scripts.py`、`test_2215_t37_focused_guard.py`、`test_2215_t38_firstmate_write_scope.py`、`test_2215_t39_claude_wrapper.py`；补 `test_2213_rules.py`、`test_crew_guard.py`、`test_crew_msg.py`、`test_dispatch.py`、`test_upgrade.py` 用例。
+- 全量 pytest 0 fail（本版 961 passed + 904 subtests）；`crew-lint`（含 `--purity`）、`plan-status --selftest`/`--playbooks` 绿。
+- 版本 2.2.15：`SKILL.md` frontmatter 与标题、`init.py` fallback、本段、`test_crew_lint.py`、`test_220_final.py`、`test_224_retro.py`、`test_225_patch.py`、`test_2214_guard_presence.py` 版本断言同步。
+
 ## 2.2.14 — 2026-11-11
 
 值守存在性检查（T31/FB-028）、版本假绿防护（T33/FB-031）与发布。

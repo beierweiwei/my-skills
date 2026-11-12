@@ -8,8 +8,12 @@
            运行时使用 init/upgrade 安装的组合基础代理
            （Qoder `crew-<role>` / opencode `crew-<role>`）→ agent-log。
   prompt / notify / close / status / list / tab / pane  生命周期与工位操作（写 agent-log）。
-  notify   跨项目通知：只 `herdr agent prompt`，不查/不写 dispatch 注册表，不动生命周期；
-           `--workspace + --role` 按 workspace 与角色约定解析当前活跃代际，`--agent` 直发。
+  notify   跨项目通知：解析收件方 cwd/git common dir，先原子落盘收件方
+           `<git-common-dir>/crew/inbox/`，再 `herdr agent prompt`；不查/不写 dispatch
+           注册表，不动生命周期；`--workspace + --role` 按 workspace 与角色约定解析当前
+           活跃代际，`--agent` 直发；`--ack <id>` 把收件方 inbox 通知标 processed。
+           聚焦守卫（T37）：目标 pane 聚焦或聚焦状态无法判定（fail-safe）→ 不注入，
+           保留 inbox 并推送 Herdr 通知，投递通道记 `inbox_fallback`。
 
 继承组合规则：
 - 角色 = 技能基类（<skillRoot>/templates/agents/<runtime>/<role>.md）+ 项目角色文件；
@@ -858,6 +862,69 @@ def herdr_agents() -> list[dict]:
     return [agent for agent in agents if isinstance(agent, dict)]
 
 
+def pane_focus_state(name: str, agents: list[dict] | None = None
+                     ) -> tuple[bool | None, str, bool]:
+    """目标 agent 的 pane 是否聚焦（T37）；None=无法判定，调用方按 fail-safe 不注入。
+
+    返回 (focused, reason, present)：present=False 表示目标不在本机 herdr agent list
+    （没有可被覆盖的 pane，调用方可按原路径投递）。解析链：`herdr agent list` 取
+    pane_id → `herdr pane list` 取该 pane 的 focused；pane list 不可用、pane 缺失或
+    focused 字段缺失一律返回 None + 原因。agents 传入时跳过重复的 agent list 调用。
+    """
+    if agents is None:
+        try:
+            agents = herdr_agents()
+        except DispatchError as exc:
+            return None, f"herdr agent list 不可用：{exc}", True
+    entry = resolve_agent_entry(agents, name)
+    if entry is None:
+        return None, f"目标 {name} 不在本机 herdr agent list", False
+    pane_id = str(entry.get("pane_id") or "").strip()
+    if not pane_id:
+        return None, f"agent list 缺 {name} 的 pane_id", True
+    try:
+        output = run_herdr(["herdr", "pane", "list"])
+    except DispatchError as exc:
+        return None, f"herdr pane list 不可用：{exc}", True
+    try:
+        data = json.loads(output)
+    except ValueError as exc:
+        return None, f"herdr pane list 输出非 JSON：{exc}", True
+    result = data.get("result") if isinstance(data, dict) else None
+    panes = result.get("panes") if isinstance(result, dict) else None
+    if not isinstance(panes, list):
+        return None, "herdr pane list 缺 panes", True
+    pane = next((item for item in panes
+                 if isinstance(item, dict) and str(item.get("pane_id") or "") == pane_id), None)
+    if pane is None:
+        return None, f"herdr pane list 未找到 pane {pane_id}", True
+    focused = pane.get("focused")
+    if not isinstance(focused, bool):
+        return None, f"pane {pane_id} 缺 focused 字段", True
+    return focused, "", True
+
+
+def herdr_notify(title: str, body: str) -> bool:
+    """best-effort Herdr 通知（T37：聚焦回退时告知 Captain）；失败不阻断。
+
+    返回通知是否真实送达：`herdr notification show` 非 0 退出按失败返回 False，
+    供审计字段记录真实结果（A-3）。
+    """
+    if os.environ.get("HERDR_ENV") != "1":
+        return False
+    try:
+        proc = subprocess.run(
+            ["herdr", "notification", "show", title, "--body", body],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        return proc.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def role_name_matches(name: str, role: str) -> bool:
     """角色命名约定：helm 名称含 helm；firstmate 含 firstmate 或以 -firstmate 结尾；
     其他角色等于 <role> 或以 -<role> 结尾（均大小写不敏感）。"""
@@ -929,6 +996,111 @@ def resolve_notify_target(agents: list[dict], workspace: str | None, role: str) 
             f"目标不可用（{target['name']}，agent_status={shown}）；"
             "请先确认当前活跃 helm / 用 herdr agent list 核实", 1)
     return target["name"]
+
+
+# —— 跨项目通知落收件方 inbox（T28）——
+NOTIFY_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def project_identity(root: Path) -> str:
+    """发送方项目标识：配置 projectId > 目录名（配置缺失不阻断 notify）。"""
+    try:
+        config = load_config(root)
+    except DispatchError:
+        return root.name
+    project_id = str(config.get("projectId") or "").strip()
+    return project_id or root.name
+
+
+def sender_agent_name() -> str:
+    return (os.environ.get("CREW_AGENT_NAME") or os.environ.get("INONE_AGENT_NAME")
+            or "dispatch").strip() or "dispatch"
+
+
+def resolve_agent_entry(agents: list[dict], name: str) -> dict | None:
+    return next((agent for agent in agents if agent.get("name") == name), None)
+
+
+def resolve_peer_inbox(entry: dict | None) -> tuple[Path | None, str]:
+    """由 herdr agent 条目解析收件方 `<git-common-dir>/crew/inbox`。
+
+    返回 (inbox_dir, reason)；失败时 inbox_dir=None，reason 供输出/日志显式降级告知。
+    """
+    if not isinstance(entry, dict):
+        return None, "目标不在本机 herdr agent list"
+    cwd = str(entry.get("cwd") or entry.get("foreground_cwd") or "").strip()
+    if not cwd:
+        return None, "herdr agent list 缺 cwd"
+    if not Path(cwd).is_dir():
+        return None, f"目标 cwd 不存在：{cwd}"
+    try:
+        proc = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"git 调用失败：{exc}"
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None, f"目标不是 git 仓库（cwd={cwd}）"
+    common = Path(proc.stdout.strip())
+    if not common.is_absolute():
+        common = (Path(cwd) / common).resolve()
+    return common / "crew" / "inbox", ""
+
+
+def notification_id_for(source: str, target: str, message: str,
+                        receipt_required: bool) -> str:
+    """内容寻址的通知 id：同来源/目标/正文/回执要求重复发送即幂等去重。"""
+    material = "\x1f".join(
+        [source, target, message, "1" if receipt_required else "0"])
+    return "notify-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+
+
+def write_peer_notification(inbox: Path, payload: dict) -> tuple[str, Path]:
+    path = inbox / f"{payload['notification_id']}.json"
+    if path.exists():
+        return "dedup", path
+    write_json_atomic(path, payload)
+    return "written", path
+
+
+def cmd_notify_ack(ident: str, root: Path) -> int:
+    """把收件方 inbox 中指定通知标记 processed（未处理口径的终结动作）。"""
+    ident = ident.strip()
+    if not ident or not NOTIFY_ID_RE.match(ident):
+        raise DispatchError(f"非法通知 id：{ident!r}", 1)
+    inbox = crew_dir(root) / "inbox"
+    matches: list[tuple[Path, dict]] = []
+    if inbox.is_dir():
+        for path in sorted(inbox.glob("*.json")):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(data, dict) or data.get("kind") != "notification":
+                continue
+            if data.get("notification_id") == ident or path.stem == ident:
+                matches.append((path, data))
+    if not matches:
+        raise DispatchError(f"收件方 inbox 未找到通知：{ident}（{inbox}）", 1)
+    path, data = matches[0]
+    if str(data.get("status") or "").strip().lower() == "processed":
+        print(f"通知已处理（no-op）：{ident}")
+        return 0
+    data["status"] = "processed"
+    data["processed_ts"] = utc_now()
+    data["processed_by"] = sender_agent_name()
+    write_json_atomic(path, data)
+    append_log(root, {
+        "ts": data["processed_ts"],
+        "action": "notify-ack",
+        "notification_id": data.get("notification_id"),
+        "target": data.get("target"),
+        "path": str(path),
+        "result": "ok",
+    })
+    print(f"通知已标记 processed：{ident}（{path}）")
+    return 0
 
 
 def extract_pane_id(data: object, keys: tuple[str, ...] = ("pane_id", "paneId")) -> str | None:
@@ -1314,6 +1486,27 @@ def cmd_prompt(args: argparse.Namespace, root: Path) -> int:
     info = registry.get(args.agent)
     if not isinstance(info, dict):
         raise DispatchError(f"{args.agent} 不是 dispatch 托管的 agent；不能用 prompt 直发")
+    focused, focus_reason, _present = pane_focus_state(args.agent)
+    if focused is not False:
+        append_log(root, {
+            "ts": utc_now(),
+            "action": "prompt",
+            "agent": args.agent,
+            "role": info.get("role"),
+            "runtime": info.get("runtime"),
+            "delivery": "none",
+            "focus": "focused" if focused else "unknown",
+            "focus_reason": focus_reason or None,
+            "result": "refused",
+        })
+        if focused:
+            raise DispatchError(
+                f"目标 {args.agent} 的 pane 当前聚焦（Captain 正在使用）：已拒绝注入，"
+                "避免覆盖输入。请让 Captain 切走焦点后重试，"
+                "或改用 crew-msg.py write 落 inbox + 通知。", 2)
+        raise DispatchError(
+            f"无法判定目标 {args.agent} 的 pane 聚焦状态（{focus_reason}）："
+            "按 fail-safe 拒绝注入。先检查 `herdr pane list`，恢复后重试。", 2)
     run_herdr(["herdr", "agent", "prompt", args.agent, args.message])
     append_log(root, {
         "ts": utc_now(),
@@ -1321,15 +1514,25 @@ def cmd_prompt(args: argparse.Namespace, root: Path) -> int:
         "agent": args.agent,
         "role": info.get("role"),
         "runtime": info.get("runtime"),
+        "delivery": "herdr",
+        "focus": "unfocused",
         "result": "ok",
     })
     print(f"已发送提示：{args.agent}" if not args.json else json.dumps(
-        {"agent": args.agent, "result": "ok"}, ensure_ascii=False))
+        {"agent": args.agent, "result": "ok", "delivery": "herdr"}, ensure_ascii=False))
     return 0
 
 
 def cmd_notify(args: argparse.Namespace, root: Path) -> int:
-    """跨项目通知：只 herdr agent prompt，不查/不写注册表，不 start/close/碰 pane/tab。"""
+    """跨项目通知：先落收件方 inbox，再 herdr agent prompt；不查/不写注册表，
+    不 start/close/碰 pane/tab。目标 pane 聚焦或状态无法判定时不注入（T37），
+    保留 inbox 并推送 Herdr 通知；收件方 inbox 解析失败时显式告知。"""
+    if args.ack:
+        if args.message or args.agent or args.workspace or args.role:
+            raise DispatchError("--ack 只能单独使用（不发送、不解析目标）", 1)
+        return cmd_notify_ack(args.ack, root)
+    if not args.message:
+        raise DispatchError("缺少 --message（或使用 --ack <通知 id>）", 1)
     receipt_required = not args.no_require_receipt
     message = args.message
     if receipt_required and not message.rstrip("\n").endswith(RECEIPT_LINE):
@@ -1337,21 +1540,95 @@ def cmd_notify(args: argparse.Namespace, root: Path) -> int:
     if args.agent:
         if args.workspace or args.role:
             raise DispatchError("--agent 与 --workspace/--role 不能同时使用", 1)
-        target, delivery = args.agent, "literal"
+        target, resolution = args.agent, "literal"
+        try:
+            agents = herdr_agents()
+        except DispatchError as exc:
+            agents = []
+            target_entry = None
+            list_error = f"herdr agent list 不可用：{exc}"
+        else:
+            target_entry = resolve_agent_entry(agents, target)
+            list_error = ""
     else:
         if not args.role:
             raise DispatchError("--workspace/--role 解析模式必须提供 --role", 1)
-        target = resolve_notify_target(herdr_agents(), args.workspace, args.role)
-        delivery = "resolved"
-    run_herdr(["herdr", "agent", "prompt", target, message])
+        agents = herdr_agents()
+        target = resolve_notify_target(agents, args.workspace, args.role)
+        resolution = "resolved"
+        target_entry = resolve_agent_entry(agents, target)
+        list_error = ""
+
+    # 文件真源先落盘（R1/P3）；解析失败不阻断 prompt，但必须在输出与日志显式说明。
+    inbox, inbox_reason = resolve_peer_inbox(target_entry)
+    if inbox is None and list_error:
+        inbox_reason = list_error
+    inbox_status, inbox_path = "skipped", None
+    if inbox is not None:
+        source_project = project_identity(root)
+        from_agent = sender_agent_name()
+        payload_file = {
+            "kind": "notification",
+            "notification_id": notification_id_for(
+                f"{source_project}:{from_agent}", target, message, receipt_required),
+            "from": f"{source_project}:{from_agent}",
+            "from_project": source_project,
+            "from_agent": from_agent,
+            "from_root": str(root),
+            "target": target,
+            "target_project": str(target_entry.get("cwd")
+                                  or target_entry.get("foreground_cwd") or ""),
+            "target_inbox": str(inbox),
+            "ts": utc_now(),
+            "message": message,
+            "receipt_required": receipt_required,
+            "status": "pending",
+        }
+        try:
+            inbox_status, inbox_path = write_peer_notification(inbox, payload_file)
+        except OSError as exc:
+            inbox_status, inbox_path = "skipped", None
+            inbox_reason = f"收件方 inbox 写入失败：{exc}"
+
+    focused, focus_reason, present = pane_focus_state(
+        target, None if list_error else agents)
+    prompt_skipped = None
+    notified = False
+    channel = "herdr"
+    skip_reason = ""
+    if focused is True or (focused is None and present):
+        channel = "inbox_fallback"
+        prompt_skipped = "focused" if focused else "unknown"
+        skip_reason = (
+            "目标 pane 聚焦（Captain 正在使用）"
+            if focused
+            else f"无法判定目标 pane 聚焦状态（{focus_reason}）"
+        )
+        notified = herdr_notify(
+            "跨项目通知（未注入）",
+            f"{target}：{skip_reason}；已跳过注入，请查收件方 inbox。\n{message}",
+        )
+    else:
+        run_herdr(["herdr", "agent", "prompt", target, message])
+
+    result = "ok"
+    if prompt_skipped and inbox_status not in ("written", "dedup"):
+        result = "degraded"
     row = {
         "ts": utc_now(),
         "action": "notify",
         "agent": target,
         "target": target,
-        "delivery": delivery,
+        "delivery": channel,
+        "target_resolution": resolution,
+        "prompt_skipped": prompt_skipped,
+        "focus_reason": focus_reason or None,
+        "notified": notified,
         "receipt_required": receipt_required,
-        "result": "ok",
+        "inbox_status": inbox_status,
+        "inbox_path": str(inbox_path) if inbox_path else None,
+        "inbox_reason": inbox_reason or None,
+        "result": result,
     }
     if args.role:
         row["role"] = args.role
@@ -1359,9 +1636,17 @@ def cmd_notify(args: argparse.Namespace, root: Path) -> int:
     payload = {
         "agent": target,
         "target": target,
-        "delivery": delivery,
+        "delivery": channel,
+        "target_resolution": resolution,
+        "prompt_skipped": prompt_skipped,
+        "notified": notified,
         "receipt_required": receipt_required,
-        "result": "ok",
+        "inbox": {
+            "status": inbox_status,
+            "path": str(inbox_path) if inbox_path else None,
+            "reason": inbox_reason or None,
+        },
+        "result": result,
     }
     if args.role:
         payload["role"] = args.role
@@ -1369,9 +1654,25 @@ def cmd_notify(args: argparse.Namespace, root: Path) -> int:
         payload["workspace"] = args.workspace
     if args.json:
         print_json(payload)
+    elif prompt_skipped:
+        print(f"{skip_reason}：已跳过注入")
+        if inbox_status in ("written", "dedup"):
+            label = "已落" if inbox_status == "written" else "已存在（去重）"
+            print(f"通知{label}收件方 inbox：{inbox_path}")
+        else:
+            print(f"未落收件方 inbox：{inbox_reason or '原因未知'}")
+        print(f"Herdr 通知：{'已发送' if notified else '未发送（HERDR_ENV 未启用或失败）'}")
     else:
         print(f"已通知：{target}")
-    return 0
+        if inbox_status in ("written", "dedup"):
+            label = "已落" if inbox_status == "written" else "已存在（去重）"
+            print(f"通知{label}收件方 inbox：{inbox_path}")
+        else:
+            print(f"未落收件方 inbox：{inbox_reason or '原因未知'}"
+                  "（已降级为 pane prompt）")
+    if result != "ok":
+        print("通知未送达：请人工转达或检查收件方项目", file=sys.stderr)
+    return 0 if result == "ok" else 2
 
 
 def cmd_close(args: argparse.Namespace, root: Path) -> int:
@@ -1570,7 +1871,9 @@ def build_parser() -> argparse.ArgumentParser:
     start_p.add_argument("--json", action="store_true")
     start_p.set_defaults(func=cmd_start)
 
-    prompt_p = sub.add_parser("prompt", help="向 dispatch 托管的 agent 发提示")
+    prompt_p = sub.add_parser(
+        "prompt",
+        help="向 dispatch 托管的 agent 发提示（目标 pane 聚焦/无法判定时拒绝注入，rc=2）")
     prompt_p.add_argument("--agent", required=True)
     prompt_p.add_argument("--message", required=True)
     prompt_p.add_argument("--json", action="store_true")
@@ -1578,13 +1881,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     notify_p = sub.add_parser(
         "notify",
-        help="跨项目通知：只 herdr agent prompt；--workspace+--role 解析活跃代际，--agent 直发")
+        help="跨项目通知：先落收件方 inbox，再 herdr agent prompt（目标聚焦则只落"
+             " inbox + 通知，delivery=inbox_fallback）；"
+             "--workspace+--role 解析活跃代际，--agent 直发，--ack 标记已处理")
     notify_p.add_argument("--agent", help="外部 agent 名（旧用法，直发）")
     notify_p.add_argument("--workspace", help="workspace_id（与 --role 同用）")
     notify_p.add_argument("--role",
                           help="角色名（与 --workspace 同用）；helm 按代际解析，"
                                "其他角色要求唯一匹配，多实例用 --agent")
-    notify_p.add_argument("--message", required=True)
+    notify_p.add_argument("--message", help="通知正文（--ack 时不需要）")
+    notify_p.add_argument("--ack", metavar="ID",
+                          help="把收件方 inbox 中的通知标记 processed（终结未处理口径）")
     notify_p.add_argument("--no-require-receipt", action="store_true",
                           help="不自动追加回执要求行")
     notify_p.add_argument("--json", action="store_true")

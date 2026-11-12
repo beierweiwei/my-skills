@@ -15,9 +15,9 @@
     python3 scripts/plan-status.py --archive docs/历史/进度追踪-截至20260101.md --write
                                               # 一次性在看板头部写入归档链接（显式动作）
     python3 scripts/plan-status.py --handover
-                                              # ≤40 行交接摘要到 stdout（只读：Goal/Next Step/
-                                              # 活跃流/待 Captain/最近 3 条 progress/最近 3 条完成/
-                                              # 证据入口/看板新鲜；progress 只读尾部）
+                                              # ≤49 行交接摘要到 stdout（只读：Goal/Next Step/
+                                              # 活跃流/待 Captain/未处理通知/最近 3 条 progress/
+                                              # 最近 3 条完成/证据入口/看板新鲜；progress 只读尾部）
     python3 scripts/plan-status.py --rotate [--keep N] [--apply]
                                               # portfolio progress 轮转：默认 dry-run 只打印
                                               # before/after、保留区间与归档路径；--apply 才写
@@ -92,11 +92,12 @@ WRITE_HINT = "请运行 `python3 scripts/plan-status.py --write` 重刷看板"
 # 阈值以常量落代码（--help 与模块 docstring 同步；单测直接构造边界夹具）：
 #   progress ≥ PROGRESS_WARN_BYTES 字节或 ≥ PROGRESS_WARN_ENTRIES 条 → --write stderr 告警；
 #   --handover 恒 ≤ HANDOVER_MAX_LINES 行（结构上限：活跃流/待 Captain 各 8 条 + 溢出注
-#   1 行 + 预算块最多 3 行 = 42；上限 43 留 1 行余量）；
+#   1 行 + 未处理通知 3 条 + 溢出注 1 行 + 预算块最多 3 行 = 48；上限 49 留 1 行余量）；
 #   --rotate 默认 dry-run；apply 走 flock + 临时文件 + os.replace，只归档不删除。
-HANDOVER_MAX_LINES = 43
+HANDOVER_MAX_LINES = 49
 HANDOVER_MAX_STREAMS = 8
 HANDOVER_MAX_CAPTAIN = 8
+HANDOVER_MAX_NOTIFICATIONS = 3
 HANDOVER_RECENT = 3
 # 交接必读字节预算（H1）：摘要 + 看板 + 活跃流 Next Step/Status + feedback 待复盘命中 +
 # guard.handoff；Decisions/Deviation/Backlog 不整读、不计入；超阈值只提示先摘要/grep。
@@ -597,9 +598,61 @@ def _handover_budget(root: Path, cfg: dict, pdir: str, active_plans: list[Plan],
     }
 
 
+def _pending_notifications(root: Path) -> list[tuple[Path, dict]]:
+    """收件方 inbox 未处理跨项目通知（kind=notification 且 status=pending）。
+
+    未处理口径可终结：收件方处置后 `dispatch.py notify --ack <id>` 置 processed，
+    下一次 handover 不再列出；非通知文件/非 pending/无法解析一律跳过。
+    """
+    try:
+        folder = crew_dir(root) / "inbox"
+    except CrewPathsError:
+        return []
+    if not folder.is_dir():
+        return []
+    items: list[tuple[Path, dict]] = []
+    for path in sorted(folder.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict) or data.get("kind") != "notification":
+            continue
+        if str(data.get("status") or "").strip().lower() != "pending":
+            continue
+        items.append((path, data))
+    items.sort(key=lambda item: str(item[1].get("ts") or ""), reverse=True)
+    return items
+
+
+def _notification_lines(root: Path, items: list[tuple[Path, dict]]) -> list[str]:
+    if not items:
+        return ["## 未处理通知", "- 无"]
+    header = (
+        f"## 未处理通知（{len(items)} 条；"
+        "`python3 scripts/dispatch.py notify --ack <id>` 标记已处理）")
+    lines = [header]
+    for path, data in items[:HANDOVER_MAX_NOTIFICATIONS]:
+        try:
+            display = path.relative_to(root).as_posix()
+        except ValueError:
+            display = str(path)
+        preview = " ".join(str(data.get("message") or "").split())
+        if len(preview) > 40:
+            preview = preview[:40] + "…"
+        ident = data.get("notification_id") or path.stem
+        lines.append(
+            f"- `{display}` — {ident} {data.get('from') or '?'}：{preview or '（无正文）'}")
+    hidden = len(items) - HANDOVER_MAX_NOTIFICATIONS
+    if hidden > 0:
+        lines.append(f"- …另有 {hidden} 条（见 {items[0][0].parent}）")
+    return lines
+
+
 def handover(root: Path, cfg: dict, plans: list[Plan]) -> int:
-    """≤HANDOVER_MAX_LINES 行交接摘要到 stdout；只读 .planning，不写任何文件。
-    末尾附「交接必读预算」（H1：本次必读字节 + 阈值 32768，超限提示先摘要/grep）。"""
+    """≤HANDOVER_MAX_LINES 行交接摘要到 stdout；只读 .planning 与 crew inbox，
+    不写任何文件。末尾附「交接必读预算」（H1：本次必读字节 + 阈值 32768，
+    超限提示先摘要/grep）。"""
     pattern = cfg["portfolioMatch"]
     portfolio = next((p for p in plans if fnmatch.fnmatch(p.path.parent.name, pattern)), None)
     pdir = str(cfg.get("portfolioDir") or ".planning/portfolio").rstrip("/")
@@ -640,6 +693,7 @@ def handover(root: Path, cfg: dict, plans: list[Plan]) -> int:
     out += ["## Next Step", _one_line(portfolio.sections.get("Next Step", [])) if portfolio else "—"]
     out += ["## 活跃流"] + (active or ["- 无"])
     out += ["## 待 Captain"] + (captain or ["无"])
+    out += _notification_lines(root, _pending_notifications(root))
     out += ["## 最近 progress（顶部最新 3 条）"] + _recent_progress(_progress_path(root, cfg))
     out += ["## 最近完成（最近 3 条）"] + (recent_done[:HANDOVER_RECENT] or ["—"])
     out += [

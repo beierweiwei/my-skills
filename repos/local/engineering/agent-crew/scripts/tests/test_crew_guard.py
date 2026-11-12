@@ -159,6 +159,22 @@ class GuardTestBase(unittest.TestCase):
         self.pane_reads.append((pane, lines))
         return self.pane_outputs.get(pane, "")
 
+    @staticmethod
+    def agent_entry(agent: dict) -> dict:
+        """T37：聚焦守卫按 pane_id 查 pane list；夹具为缺省 agent 补稳定 pane_id。"""
+        entry = dict(agent)
+        entry.setdefault("pane_id", f"pane-{entry.get('name', 'agent')}")
+        return entry
+
+    def pane_entries(self) -> list[dict]:
+        if self.panes:
+            return self.panes
+        return [
+            {"pane_id": self.agent_entry(agent)["pane_id"],
+             "focused": bool(agent.get("focused"))}
+            for agent in self.agents
+        ]
+
     def fake_dispatch(self, root: Path, args: list[str]) -> tuple[int, str, str]:
         self.dispatch_calls.append(list(args))
         if self.dispatch_override is not None:
@@ -196,8 +212,8 @@ class GuardTestBase(unittest.TestCase):
             helm="helm-1",
             interval=120,
             clock=lambda: self.now[0],
-            list_agents=lambda: self.agents,
-            list_panes=lambda: self.panes,
+            list_agents=lambda: [self.agent_entry(agent) for agent in self.agents],
+            list_panes=self.pane_entries,
             prompt=lambda name, message: (
                 self.prompt_calls.append((name, message)) or self.prompt_ok
             ),
@@ -745,6 +761,54 @@ class WakeChannelTest(GuardTestBase):
         wake = (self.crew / "guard.wake").read_text(encoding="utf-8")
         self.assertIn("guard 叫醒", wake)
         self.assertIn("待办A", wake)
+
+    def test_unknown_pane_state_uses_wake_file(self):
+        self.write_fixture()
+        self.agents = [
+            {"name": "helm-1", "agent_status": "idle", "pane_id": "wX:p1"},
+            {"name": "worker-1", "agent_status": "idle"},
+        ]
+
+        def broken():
+            raise RuntimeError("pane list down")
+
+        guard = self.make_guard(list_panes=broken)
+        guard.run_once()
+        guard.run_once()
+
+        self.assertEqual(self.prompt_calls, [])
+        self.assertEqual(len(self.notify_calls), 1)
+        self.assertTrue((self.crew / "guard.wake").exists())
+        self.assertTrue(any("聚焦状态无法判定" in line for line in self.logs))
+
+    def test_missing_focused_field_uses_wake_file(self):
+        self.write_fixture()
+        self.agents = [
+            {"name": "helm-1", "agent_status": "idle", "pane_id": "wX:p1"},
+            {"name": "worker-1", "agent_status": "idle"},
+        ]
+        self.panes = [{"pane_id": "wX:p1"}]
+        guard = self.make_guard()
+        guard.run_once()
+        guard.run_once()
+
+        self.assertEqual(self.prompt_calls, [])
+        self.assertTrue((self.crew / "guard.wake").exists())
+        self.assertTrue(any("缺 focused 字段" in line for line in self.logs))
+
+    def test_unfocused_pane_prompts(self):
+        self.write_fixture()
+        self.agents = [
+            {"name": "helm-1", "agent_status": "idle", "pane_id": "wX:p1"},
+            {"name": "worker-1", "agent_status": "idle"},
+        ]
+        self.panes = [{"pane_id": "wX:p1", "focused": False}]
+        guard = self.make_guard()
+        guard.run_once()
+        guard.run_once()
+
+        self.assertEqual(len(self.prompt_calls), 1)
+        self.assertFalse((self.crew / "guard.wake").exists())
 
     def test_prompt_failure_falls_back_to_wake_file(self):
         self.write_fixture()

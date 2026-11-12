@@ -51,7 +51,7 @@ TEMPLATES = SKILL_DIR / "templates"
 MARK_START = "<!-- agent-crew:orchestration:start -->"
 MARK_END = "<!-- agent-crew:orchestration:end -->"
 MARK_PREFIX = "<!-- agent-crew:orchestration:"
-SKILL_VERSION_FALLBACK = "2.2.14"
+SKILL_VERSION_FALLBACK = "2.2.15"
 
 CONFIG_REL = Path(".planning/orchestration.json")
 MANIFEST_REL = Path("docs/crew/manifest.json")
@@ -105,6 +105,7 @@ SCRIPT_MANIFEST = [
     "crew-guard.py",
     "crew-ticket.py",
     "crew-msg.py",
+    "crew-claude.py",
     "pane-audit.py",
 ]
 COPY_BASENAMES = ("crew-rules.md", "crew-acceptance.md",
@@ -938,6 +939,31 @@ def render_agents_section(templates: Path, ctx: dict) -> str:
     return section
 
 
+def rendered_agents_block_body(root: Path, templates: Path, skill_version: str,
+                               source_dir: Path) -> str | None:
+    """按当前技能模板 + 项目配置渲染 AGENTS 受管块体（T35 模板漂移检查）。
+
+    返回 None 表示不可判定（配置/技能源/模板不可读、skillRoot 无法解析）：
+    调用方按 skip 处理，不误报。渲染口径与 --refresh-block 一致。
+    """
+    try:
+        cfg, _ = load_config(root, templates)
+        cfg = prepare_config(root, cfg, None, skill_version, source_dir=source_dir)
+        raw_root = cfg.get("skillRoot")
+        if not isinstance(raw_root, str) or not raw_root.strip():
+            return None
+        skill_path = Path(raw_root).expanduser()
+        if not skill_path.is_absolute():
+            skill_path = (root / skill_path).resolve()
+        render_templates = skill_path / "templates"
+        if not (render_templates / "AGENTS-编排节.md").is_file():
+            return None
+        scan = marker_scan(render_agents_section(render_templates, render_context(cfg, root)))
+        return scan["body"] if scan["state"] == "ok" else None
+    except (InitError, OSError, RuntimeError, UnicodeDecodeError):
+        return None
+
+
 def rendered_agents_text(current: str | None, section: str) -> str:
     if current is None:
         return AGENT_SKELETON_HEADER + "\n" + section + "\n"
@@ -1167,10 +1193,13 @@ def run_check(root: Path, templates: Path, skill_version: str) -> int:
         return 2
     source_dir = resolve_source(root)
     source_mismatches = script_source_mismatches(root, source_dir)
+    expected_block_body = rendered_agents_block_body(
+        root, templates, skill_version, source_dir)
     manifest_version = str(manifest.get("skillVersion") or "")
     problems: list[str] = []
     stale: list[str] = []
     modified: list[str] = []
+    template_drift = False
     pending_state = False
     ok = 0
     if manifest_version != skill_version and source_mismatches:
@@ -1210,10 +1239,14 @@ def run_check(root: Path, templates: Path, skill_version: str) -> int:
                 pending_state = True
             elif scan["state"] == "invalid":
                 problems.append("AGENTS.md 标记非法：" + "；".join(scan["errors"]))
-            elif sha256_text(scan["body"]) == str(entry.get("blockSha256") or "").removeprefix("sha256:"):
-                ok += 1
-            else:
+            elif sha256_text(scan["body"]) != str(entry.get("blockSha256") or "").removeprefix("sha256:"):
                 stale.append(f"{rel}#block")
+            elif expected_block_body is not None and scan["body"] != expected_block_body:
+                # T35：manifest 与项目块一致，但当前技能模板渲染已变（模板升级/配置变更）
+                stale.append(f"{rel}#block(template-drift)")
+                template_drift = True
+            else:
+                ok += 1
     if not agents_path.is_file():
         pending_state = True
     else:
@@ -1234,6 +1267,10 @@ def run_check(root: Path, templates: Path, skill_version: str) -> int:
     if config_version != skill_version:
         stale.append(f"{CONFIG_REL.as_posix()}#skillVersion({config_version}→{skill_version})")
     hints: list[str] = []
+    if template_drift:
+        hints.append(
+            "AGENTS 受管块与当前技能模板渲染不一致（技能模板已升级或渲染配置已变更）；"
+            "下一步：python3 scripts/init.py --refresh-block --confirm 重渲染受管块")
     if source_mismatches and manifest_version == skill_version:
         hints.append(
             "受管脚本与安装源存在本地差异"

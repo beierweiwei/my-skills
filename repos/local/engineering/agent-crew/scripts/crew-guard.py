@@ -3,7 +3,8 @@
 
 正常路径零 stdout；事件与异常写 <crew-dir>/guard.log。
 单实例锁：<crew-dir>/guard.lock（第二实例静默退出）。
-叫醒：优先 `herdr agent prompt <helm>`；总舵 pane 处于聚焦时改为写
+叫醒：优先 `herdr agent prompt <helm>`；总舵 pane 聚焦（T37：按 agent 的 pane_id
+查 `herdr pane list` 的 focused）或聚焦状态无法判定（fail-safe）时改为写
 <crew-dir>/guard.wake + Herdr 通知。每 5 分钟顺带执行 plan-status.py --write；
 叫醒时执行 plan-status.py --check-fresh 并把结果带进叫醒消息。
 guard.wake 首行 `generated_at: <ISO8601 Z>`（兼容旧格式裸 ISO 首行）；超过 2h
@@ -581,17 +582,18 @@ def run_dispatch(root: Path, args: list[str]) -> tuple[int, str, str]:
 
 
 def herdr_notify(title: str, body: str) -> bool:
+    """返回通知是否真实送达；非 0 退出按失败返回 False（A-3 审计真实性）。"""
     if os.environ.get("HERDR_ENV") != "1":
         return False
     try:
-        subprocess.run(
+        proc = subprocess.run(
             ["herdr", "notification", "show", title, "--body", body],
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=5,
         )
-        return True
+        return proc.returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
 
@@ -1494,19 +1496,42 @@ class Guard:
         self.log(f"guard.wake 已过期/已忽略（generated_at={stamp}，"
                  f"阈值 {DEFAULT_WAKE_TTL_SECONDS}s）：已删除")
 
+    def _pane_focus_state(self, agent: dict) -> tuple[bool | None, str]:
+        """目标 agent 的 pane 是否聚焦（T37）；None=无法判定，按 fail-safe 不注入。"""
+        pane_id = str(agent.get("pane_id") or "").strip()
+        if not pane_id:
+            return None, "agent list 缺 pane_id"
+        try:
+            panes = self.list_panes()
+        except Exception as exc:  # noqa: BLE001 - pane list 故障按无法判定处理
+            return None, f"herdr pane list 不可用：{type(exc).__name__}: {exc}"
+        pane = next((item for item in panes
+                     if isinstance(item, dict)
+                     and str(item.get("pane_id") or "") == pane_id), None)
+        if pane is None:
+            return None, f"pane list 未找到 {pane_id}"
+        focused = pane.get("focused")
+        if not isinstance(focused, bool):
+            return None, f"pane {pane_id} 缺 focused 字段"
+        return focused, ""
+
     def _wake(self, message: str, agents: list[dict]) -> str:
         helm_agent = next(
             (agent for agent in agents if str(agent.get("name") or "") == self.helm),
             None,
         )
-        if helm_agent is not None and helm_agent.get("focused"):
-            self._write_wake_file(message)
-            try:
-                self.notify("guard 叫醒", message)
-            except Exception as exc:  # noqa: BLE001
-                self.log(f"guard 通知失败：{exc}")
-            self.log(f"叫醒（总舵 pane 聚焦，写 guard.wake）：{message.splitlines()[0]}")
-            return "wake-file"
+        if helm_agent is not None:
+            focused, focus_reason = self._pane_focus_state(helm_agent)
+            if focused is not False:
+                self._write_wake_file(message)
+                try:
+                    self.notify("guard 叫醒", message)
+                except Exception as exc:  # noqa: BLE001
+                    self.log(f"guard 通知失败：{exc}")
+                state = ("总舵 pane 聚焦" if focused
+                         else f"聚焦状态无法判定（{focus_reason}）")
+                self.log(f"叫醒（{state}，写 guard.wake）：{message.splitlines()[0]}")
+                return "wake-file"
 
         try:
             prompted = bool(self.prompt(self.helm, message))

@@ -2,13 +2,17 @@
 """upgrade.py — v2.1 受管脚本升级 / 回滚（只本地，不做 3-way/baseline）。
 
 范围（arch-proposal-v1 §8.2）：
-- 只处理 manifest 中 kind:file 的受管脚本（scripts/*.py|*.sh）；不碰 AGENTS 块、
+- 受管脚本集合 = 安装源 `scripts/init.py` 的 SCRIPT_MANIFEST ∪ manifest 中
+  kind:file 条目（scripts/*.py|*.sh）：源新增脚本会被安装并补登 manifest entries
+  （T34，修复 2.2.14 O1「doctor warn → 只能 upgrade」死路）；不碰 AGENTS 块、
   项目角色文件、项目文案、规则/验收（项目无副本）。
 - `--diff`：只读列出脚本内容/版本差异；`--apply --confirm`：加锁 → 备份到
-  <common>/crew/backups/<UTC>/ + backup-manifest.json → 原子替换 → 复核受管脚本
-  与安装源一致（不一致 rc=1、不写版本）→ 同步 config 的
-  skillVersion（仅此一项）→ 更新 manifest 哈希/版本 → install-log。
-- `--rollback <backup-id>`：按备份 manifest 逐字节还原受管脚本并校验 sha256。
+  <common>/crew/backups/<UTC>/ + backup-manifest.json（含本版新增脚本 addedFiles）
+  → 原子替换 → 复核受管脚本与安装源一致（不一致 rc=1、不写版本）→ 同步 config 的
+  skillVersion（仅此一项）→ 补登/更新 manifest entries 哈希 → 版本 → install-log。
+- `--rollback <backup-id>`：按备份 manifest 逐字节还原受管脚本并校验 sha256；
+  本版新增（备份中不存在）的脚本在校验未被改动后备份到备份目录 `removed/` 再删除、
+  同步移除 manifest 条目；被改动则拒绝回滚（不静默丢文件）。
 - 不做 3-way、不做 baseline、不做路径/其他配置迁移；除 skillVersion 外不改 orchestration.json。
 
 退出码：0 成功；1 校验/状态错误；2 待人工（缺 --confirm / 锁）；3 环境缺失。
@@ -17,6 +21,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import sys
@@ -53,24 +58,87 @@ def source_text(name: str, source_dir: Path) -> str | None:
         return None
 
 
-def managed_script_names(manifest: dict) -> list[str]:
+def source_script_manifest(source_dir: Path) -> list[str]:
+    """安装源声称的受管脚本清单（AST 读取 <source>/scripts/init.py）。
+
+    用项目已安装的 upgrade.py 跑升级时，本进程 import 的 init 是旧清单；源新增的
+    受管脚本只有读源清单才能发现（T34）。读取失败或结构不符时回退本地清单。
+    """
+    try:
+        tree = ast.parse(
+            (source_dir / "scripts" / "init.py").read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return list(init_lib.SCRIPT_MANIFEST)
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if not (isinstance(target, ast.Name) and target.id == "SCRIPT_MANIFEST"):
+            continue
+        try:
+            value = ast.literal_eval(node.value)
+        except (ValueError, SyntaxError):
+            break
+        if isinstance(value, list) and all(isinstance(name, str) for name in value):
+            return value
+        break
+    return list(init_lib.SCRIPT_MANIFEST)
+
+
+def managed_script_names(manifest: dict, source_names: list[str]) -> list[str]:
+    """受管脚本集合 = 源 SCRIPT_MANIFEST ∪ manifest kind:file 条目（去重，源清单在前）。"""
     names: list[str] = []
+    seen: set[str] = set()
+    for name in source_names:
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
     for entry in manifest.get("entries", []):
         if not isinstance(entry, dict) or entry.get("kind") != "file":
             continue
         rel = str(entry.get("path") or "")
         if rel.startswith("scripts/") and rel.endswith((".py", ".sh")):
-            names.append(Path(rel).name)
+            name = Path(rel).name
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
     return names
 
 
-def missing_source_scripts(source_dir: Path) -> list[str]:
-    """init.SCRIPT_MANIFEST 中安装源缺失的受管脚本相对路径（T33 覆盖集缺口）。"""
+def missing_source_scripts(source_dir: Path, source_names: list[str]) -> list[str]:
+    """源清单中安装源缺失的受管脚本相对路径（T33 覆盖集缺口）。"""
     return [
         (Path("scripts") / name).as_posix()
-        for name in init_lib.SCRIPT_MANIFEST
+        for name in source_names
         if not (source_dir / "scripts" / name).is_file()
     ]
+
+
+def managed_script_mismatches(root: Path, source_dir: Path,
+                              names: list[str]) -> list[str]:
+    """给定覆盖集内受管脚本与安装源内容不一致的相对路径（B-1 复核口径）。
+
+    只比较源侧存在的脚本；复制后复核阶段项目侧缺失也计为不一致（漏装/写盘
+    异常不应假绿）。比较口径与 manifest 一致（sha256_text：CRLF 归一化）。
+    """
+    mismatches: list[str] = []
+    for name in names:
+        rel = Path("scripts") / name
+        origin = source_dir / rel
+        if not origin.is_file():
+            continue
+        target = root / rel
+        if not target.is_file():
+            mismatches.append(rel.as_posix())
+            continue
+        try:
+            same = (init_lib.sha256_text(target.read_text(encoding="utf-8"))
+                    == init_lib.sha256_text(origin.read_text(encoding="utf-8")))
+        except (OSError, UnicodeDecodeError):
+            same = False
+        if not same:
+            mismatches.append(rel.as_posix())
+    return mismatches
 
 
 def names_preview(names: list[str], limit: int = 5) -> str:
@@ -81,7 +149,7 @@ def names_preview(names: list[str], limit: int = 5) -> str:
 def diff_report(root: Path, manifest: dict, version: str, source_dir: Path) -> dict:
     installed_version = manifest.get("skillVersion")
     rows: list[dict] = []
-    for name in managed_script_names(manifest):
+    for name in managed_script_names(manifest, source_script_manifest(source_dir)):
         content = source_text(name, source_dir)
         if content is None:
             continue
@@ -136,6 +204,28 @@ def _refresh_manifest_hashes(root: Path, manifest: dict) -> None:
             entry["sha256"] = init_lib.sha256_text(target.read_text(encoding="utf-8"))
 
 
+def _sync_manifest_file_entries(root: Path, manifest: dict,
+                                source_names: list[str]) -> list[str]:
+    """补登源受管清单中项目已存在但 manifest 未登记的 file 条目；返回新增路径。"""
+    entries = [entry for entry in manifest.get("entries", [])
+               if isinstance(entry, dict)]
+    known = {str(entry.get("path") or "") for entry in entries
+             if entry.get("kind") == "file"}
+    added: list[str] = []
+    for name in source_names:
+        rel = Path("scripts") / name
+        target = root / rel
+        if not name or rel.as_posix() in known or not target.is_file():
+            continue
+        entries.append({"kind": "file", "path": rel.as_posix(),
+                        "sha256": init_lib.sha256_text(
+                            target.read_text(encoding="utf-8"))})
+        known.add(rel.as_posix())
+        added.append(rel.as_posix())
+    manifest["entries"] = entries
+    return added
+
+
 def _config_skill_version(config_path: Path) -> str | None:
     try:
         config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -149,8 +239,9 @@ def apply_upgrade(root: Path, confirm: bool, version: str, source_dir: Path) -> 
     if not confirm:
         print("upgrade --apply 需要 --confirm（不会自动覆盖受管脚本）。")
         return 2
+    source_names = source_script_manifest(source_dir)
     # T33 覆盖集缺口：源缺失受管脚本时不得早退/写版本（否则版本假绿）
-    missing = missing_source_scripts(source_dir)
+    missing = missing_source_scripts(source_dir, source_names)
     if missing:
         print(
             f"upgrade 中止：安装源缺失受管脚本 {len(missing)} 项"
@@ -168,6 +259,7 @@ def apply_upgrade(root: Path, confirm: bool, version: str, source_dir: Path) -> 
         if hint:
             print(hint)
         return 0
+    registered: list[str] = []
     try:
         with init_lib.init_lock(root):
             manifest = _load_manifest(root)
@@ -176,11 +268,8 @@ def apply_upgrade(root: Path, confirm: bool, version: str, source_dir: Path) -> 
             backup_paths = [root / "scripts" / name for name in names]
             if config_path.is_file():
                 backup_paths.append(config_path)
-            backup_id = init_lib.create_backup(
-                root, "upgrade", backup_paths,
-                extra={"skillVersionBefore": manifest.get("skillVersion")})
             before: dict[str, str] = {}
-            after: dict[str, str] = {}
+            contents: dict[str, str] = {}
             for name in names:
                 rel = Path("scripts") / name
                 target = root / rel
@@ -189,14 +278,40 @@ def apply_upgrade(root: Path, confirm: bool, version: str, source_dir: Path) -> 
                     if target.is_file() else ""
                 )
                 content = source_text(name, source_dir)
+                if content is not None:
+                    contents[rel.as_posix()] = content
+            # 本版新增脚本（升级前不存在）登记进备份，回滚据此清理（T34）
+            added_files = [
+                {"path": rel, "sha256": init_lib.sha256_text(contents[rel])}
+                for rel in sorted(before) if not before[rel] and rel in contents
+            ]
+            backup_id = init_lib.create_backup(
+                root, "upgrade", backup_paths,
+                extra={"skillVersionBefore": manifest.get("skillVersion"),
+                       "addedFiles": added_files})
+            after: dict[str, str] = {}
+            for name in names:
+                rel = Path("scripts") / name
+                target = root / rel
+                content = contents.get(rel.as_posix())
                 if content is None:
                     continue
                 mode = 0o755 if rel.suffix == ".sh" else None
                 init_lib.atomic_write_text(target, content, mode=mode)
                 after[rel.as_posix()] = init_lib.sha256_text(
                     target.read_text(encoding="utf-8"))
-            # T33 复核：复制后、写 manifest 版本前确认受管脚本已与安装源对齐
+            # T33/B-1 复核：复制后、写 manifest 版本前确认受管脚本已与安装源对齐。
+            # 覆盖集=本进程 init 清单 ∪ 源 AST 清单 ∪ manifest entries：项目内旧
+            # upgrade 只认本进程清单，源新增脚本必须由源侧清单补核，否则首升假绿。
+            local_names = set(init_lib.SCRIPT_MANIFEST)
             mismatches = init_lib.script_source_mismatches(root, source_dir)
+            extra_names = [
+                name for name in managed_script_names(
+                    manifest,
+                    list(dict.fromkeys([*source_names, *init_lib.SCRIPT_MANIFEST])))
+                if name not in local_names
+            ]
+            mismatches += managed_script_mismatches(root, source_dir, extra_names)
             if mismatches:
                 print(
                     "upgrade 复核失败：受管脚本与安装源仍不一致"
@@ -220,7 +335,8 @@ def apply_upgrade(root: Path, confirm: bool, version: str, source_dir: Path) -> 
                         root, skill_root=source_dir)
                 except init_lib.InitError as exc:
                     raise UpgradeError(f"组合基础代理重建失败：{exc}") from exc
-                _refresh_manifest_hashes(root, manifest)
+            registered = _sync_manifest_file_entries(root, manifest, source_names)
+            _refresh_manifest_hashes(root, manifest)
             manifest["skillVersion"] = version
             _write_manifest(root, manifest)
             init_lib.append_install_log(root, {
@@ -248,7 +364,11 @@ def apply_upgrade(root: Path, confirm: bool, version: str, source_dir: Path) -> 
         print(f"upgrade 失败：{exc}", file=sys.stderr)
         return 1
     if report["changed"]:
-        print(f"upgrade 完成：{len(report['changed'])} 个受管脚本更新；backup={backup_id}")
+        extra = f"；补登 {len(registered)} 个受管脚本条目" if registered else ""
+        print(f"upgrade 完成：{len(report['changed'])} 个受管脚本更新{extra}；"
+              f"backup={backup_id}")
+    elif registered:
+        print(f"upgrade 完成：补登 {len(registered)} 个受管脚本条目；backup={backup_id}")
     else:
         print(f"upgrade 完成：仅同步版本戳 {version}；backup={backup_id}")
     hint = init_lib.guard_absent_hint(root)
@@ -276,8 +396,31 @@ def rollback(root: Path, backup_id: str) -> int:
         return 1
     files = data.get("files") if isinstance(data.get("files"), list) else []
     restored: list[str] = []
+    removed: list[str] = []
+    # 本版新增脚本（升级前不存在）：回滚恢复升级前状态时移除；被改动则拒绝（T34）
+    added: list[tuple[str, str]] = []
+    for item in data.get("addedFiles") if isinstance(data.get("addedFiles"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        rel = str(item.get("path") or "")
+        if not (rel.startswith("scripts/") and rel.endswith((".py", ".sh"))) \
+                or ".." in Path(rel).parts:
+            continue
+        added.append((rel, str(item.get("sha256") or "").removeprefix("sha256:")))
     try:
         with init_lib.init_lock(root):
+            for rel, expected in added:
+                target = root / rel
+                if not target.is_file():
+                    continue
+                try:
+                    current = init_lib.sha256_text(target.read_text(encoding="utf-8"))
+                except (OSError, UnicodeDecodeError) as exc:
+                    raise UpgradeError(f"本版新增脚本读取失败：{rel}（{exc}）") from exc
+                if expected and current != expected:
+                    raise UpgradeError(
+                        f"本版新增脚本已被修改：{rel}；为避免丢失改动，未执行回滚。"
+                        "请先备份或移走该文件后重试")
             for entry in files:
                 rel = str(entry.get("path") or "")
                 if not (rel.startswith("scripts/") or rel == init_lib.CONFIG_REL.as_posix()):
@@ -293,6 +436,25 @@ def rollback(root: Path, backup_id: str) -> int:
                 init_lib.atomic_write(target, source.read_bytes(),
                                       mode=0o755 if target.suffix == ".sh" else None)
                 restored.append(rel)
+            for rel, _expected in added:
+                target = root / rel
+                if not target.is_file():
+                    continue
+                # 删除前备份到本次备份目录（X2）：removed/<rel>
+                keep = directory / "removed" / rel
+                try:
+                    init_lib.atomic_write(keep, target.read_bytes())
+                    target.unlink()
+                except OSError as exc:
+                    raise UpgradeError(f"本版新增脚本移除失败：{rel}（{exc}）") from exc
+                removed.append(rel)
+            if removed:
+                entries = [entry for entry in manifest.get("entries", [])
+                           if isinstance(entry, dict)]
+                manifest["entries"] = [
+                    entry for entry in entries
+                    if not (entry.get("kind") == "file"
+                            and str(entry.get("path") or "") in removed)]
             _refresh_manifest_hashes(root, manifest)
             if data.get("skillVersionBefore"):
                 manifest["skillVersion"] = data["skillVersionBefore"]
@@ -306,7 +468,9 @@ def rollback(root: Path, backup_id: str) -> int:
                 "root": str(root),
                 "backupId": backup_id,
                 "files": [{"path": rel, "kind": "file", "status": "restored"}
-                          for rel in restored],
+                          for rel in restored]
+                         + [{"path": rel, "kind": "file", "status": "removed"}
+                            for rel in removed],
                 "conflicts": [],
                 "result": "ok",
                 "next": "",
@@ -327,7 +491,8 @@ def rollback(root: Path, backup_id: str) -> int:
         if expected and init_lib.sha256_file_raw(target) != expected:
             print(f"rollback 校验失败：{rel}", file=sys.stderr)
             return 1
-    print(f"rollback 完成：{len(restored)} 个文件逐字节还原（backup={backup_id}）")
+    suffix = (f"、{len(removed)} 个本版新增脚本已移除" if removed else "")
+    print(f"rollback 完成：{len(restored)} 个文件逐字节还原{suffix}（backup={backup_id}）")
     return 0
 
 
