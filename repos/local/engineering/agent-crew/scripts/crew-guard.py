@@ -2057,13 +2057,17 @@ class Guard:
         return alive
 
     def _scan_worker_ctx(self, workers: list[dict], now: float) -> list[dict]:
-        """T69②：逐非 helm worker 扫 ctx（>40%/≥60% 收集）；失败可见不静默。
+        """T69②：逐非编排角色 worker 扫 ctx（>40%/≥60% 收集）；失败可见不静默。
 
-        firstmate 按 dispatch registry role 排除（4c③：编排角色非切片 worker，
-        其 ctx 归角色纪律与总舵监督，40/60 worker 口径不适用）；探针 agent
-        不扫（无编排意义）。pane 缺失或 ctx 解析不出：不误报，但**必须可见**
-        （4c②）——按 agent 去重记一行日志，恢复可读后复位。返回
-        [{name, ratio}]，ratio ∈ (0.40, 1]。
+        firstmate/helm 按 dispatch registry role 排除（4c③：编排角色非切片
+        worker，其 ctx 归角色纪律与总舵监督，40/60 worker 口径不适用）。
+        发布门修复（2026-11-14 guard.log 17:19 事故）：helm 工位名带代号漂移
+        （如 crew-orchestrator-helm-10 ≠ 配置名）时 workers 名单按配置名排除
+        失效——这里统一以 registry 最新 role 记录为准，漂移名同样命中
+        role=helm 排除，不止比配置名。探针 agent 不扫（无编排意义）。
+        pane 缺失或 ctx 解析不出：不误报，但**必须可见**（4c②）——按 agent
+        去重记一行日志，恢复可读后复位。返回 [{name, ratio}]，
+        ratio ∈ (0.40, 1]。
         """
         try:
             registry = self._dispatch_registry()
@@ -2076,8 +2080,9 @@ class Guard:
                 continue
             name = self._blocked_label(agent)
             info = registry.get(name) if isinstance(registry, dict) else None
-            if isinstance(info, dict) and str(
-                    info.get("role") or "").strip().lower() == "firstmate":
+            role = (str(info.get("role")) if isinstance(info, dict)
+                    else "").strip().lower()
+            if role in ("helm", "firstmate"):
                 continue
             pane = self._agent_pane(agent)
             if not pane:

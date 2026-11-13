@@ -198,6 +198,42 @@ class DoctorRoleTest(unittest.TestCase):
         self.assertEqual(1, rc, report)
         self.assertIn("composedPath", self.fx.item(report, "role.delivery")["detail"])
 
+    def test_role_delivery_claude_composed_path_legal(self):
+        """发布门修复：.claude/agents 组合产物落点入 doctor role.delivery 白名单。
+
+        T57 起 `dispatch start --runtime claude` 组合产物落
+        `.claude/agents/crew-*.md`；白名单此前缺该落点 → 本仓 4 条合法
+        claude 启动记录全报「composedPath 位置非法」。同表锁 qoder/opencode
+        落点不回归。
+        """
+        for runtime, rel in (
+                ("claude", ".claude/agents/crew-proj-builder.md"),
+                ("qoder", ".qoder/agents/crew/proj-builder.md"),
+                ("opencode", ".opencode/agent/proj-builder.md")):
+            with self.subTest(runtime=runtime):
+                self.fx.write_role(runtime, "builder")
+                _, compose = self.fx.compose("builder", runtime)
+                run_dir = self.fx.root / f".git/crew/compose/run-{runtime}"
+                run_dir.mkdir(parents=True)
+                composed = self.fx.root / rel
+                composed.parent.mkdir(parents=True, exist_ok=True)
+                composed.write_text("BASE_ONLY_MARKER\nPROJECT_ONLY_MARKER\n",
+                                    encoding="utf-8")
+                row = {
+                    "ts": "2026-11-09T00:00:00Z", "action": "start",
+                    "role": "builder", "runtime": runtime,
+                    "agent": "proj-builder", "delivery": "composed-agent",
+                    "baseRef": f"2.2.0:templates/agents/{runtime}/builder.md",
+                    "composedSha256": compose["composedSha256"],
+                    "composePath": str(run_dir), "promptPath": str(composed),
+                    "composedPath": str(composed),
+                }
+                self.fx.write_agent_log([row])
+                rc, report = self.fx.doctor_json("--only", "role.delivery")
+                self.assertEqual(0, rc, report)
+                self.assertEqual(
+                    "pass", self.fx.item(report, "role.delivery")["status"])
+
     def test_s9_02_three_group_migration(self):
         legacy_bodies = {
             "qoder/reviewer": "# Reviewer\n\n## 项目职责\n\n- 逐行核对评审意见并给出阻断/建议。\n- 正文保持 legacy 原样，不抽取。\n",
