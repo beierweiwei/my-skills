@@ -309,13 +309,13 @@ class WakeConditionTest(GuardTestBase):
         first = guard.run_once()
         self.assertFalse(first["woke"])
         self.assertEqual(first["consecutive"], 0)
-        self.assertEqual(guard.prev_working, 1)
+        self.assertEqual(guard.prev_working, {"worker-1"})
 
         self.agents = [{"name": "worker-1", "agent_status": "idle"}]
         second = guard.run_once()
         self.assertTrue(second["woke"])
         self.assertEqual(second["consecutive"], 1)
-        self.assertIn("上一轮 1 个 working 已转 idle", self.prompt_calls[0][1])
+        self.assertIn("worker 完成待核收：worker-1", self.prompt_calls[0][1])
         self.assertIn("T1 可执行任务", self.prompt_calls[0][1])
 
         # 冷却内不再重复叫醒
@@ -324,7 +324,8 @@ class WakeConditionTest(GuardTestBase):
         self.assertEqual(len(self.prompt_calls), 1)
         self.assertTrue(any("冷却中" in line for line in self.logs))
 
-    def test_working_to_idle_without_pending_does_not_wake(self):
+    def test_working_to_idle_without_pending_wakes_receipt_check(self):
+        """FB-057①：无待办的完成边沿也叫醒核收（旧契约「不叫醒」已废除）。"""
         self.write_fixture(stream=EMPTY_STREAM, portfolio=EMPTY_PORTFOLIO)
         self.agents = [{"name": "worker-1", "agent_status": "working"}]
         guard = self.make_guard()
@@ -332,9 +333,9 @@ class WakeConditionTest(GuardTestBase):
 
         self.agents = [{"name": "worker-1", "agent_status": "idle"}]
         result = guard.run_once()
-        self.assertFalse(result["woke"])
-        self.assertEqual(result["consecutive"], 0)
-        self.assertEqual(self.prompt_calls, [])
+        self.assertTrue(result["woke"])
+        self.assertIn("worker 完成待核收：worker-1", self.prompt_calls[0][1])
+        self.assertIn("回执", self.prompt_calls[0][1])
 
     def test_consecutive_idle_with_pending_keeps_two_round_debounce(self):
         self.write_fixture()
@@ -344,7 +345,7 @@ class WakeConditionTest(GuardTestBase):
         first = guard.run_once()
         self.assertFalse(first["woke"])
         self.assertEqual(first["consecutive"], 1)
-        self.assertEqual(guard.prev_working, 0)
+        self.assertEqual(guard.prev_working, set())
 
         second = guard.run_once()
         self.assertTrue(second["woke"])
@@ -2022,7 +2023,9 @@ class Fb008CtxHandoffTest(GuardTestBase):
 
         result = guard.run_once()
         self.assertEqual("warn", result["handoff"]["action"])
-        self.assertEqual([(self.OLD_PANE, 80)], self.pane_reads)
+        # T69② 起 worker ctx 扫描也会读 pane（漂移名未排除、读同一 pane）；
+        # 断言收紧为「只读该 pane、无其他 pane」。
+        self.assertEqual({(self.OLD_PANE, 80)}, set(self.pane_reads))
         self.assertEqual("helm-1-renamed", guard.helm)
         self.assertEqual("helm-1-renamed", self.handoff_fields()["old"])
         self.assertTrue(any("漂移" in line for line in self.logs))
@@ -2058,7 +2061,9 @@ class Fb008CtxHandoffTest(GuardTestBase):
             result = guard.run_once()
             self.assertEqual("none", result["handoff"]["action"])
         self.assertFalse((self.crew / "guard.handoff").exists())
-        self.assertEqual([], self.pane_reads)
+        # T69② 起 worker ctx 扫描合法读 worker pane（builder-1）；helm pane
+        # 未解析 → 不得有任何 helm pane read，dispatch 交接零动作。
+        self.assertTrue(all(pane == "wX:pB" for pane, _ in self.pane_reads))
         self.assertEqual([], self.dispatch_calls)
         self.assertTrue(any("ctx 检查跳过" in line for line in self.logs))
 
@@ -2391,7 +2396,8 @@ class Fb008HandoffEdgeCaseTest(GuardTestBase):
         result = guard.run_once()
         self.assertEqual("none", result["handoff"]["action"])
         self.assertEqual("helm-1", guard.helm)
-        self.assertEqual([], self.pane_reads)
+        # T69② 起 worker ctx 扫描合法读 worker pane；helm pane 不得被读
+        self.assertTrue(all(pane == "wX:pB" for pane, _ in self.pane_reads))
         self.assertEqual([], self.dispatch_calls)
         self.assertFalse((self.crew / "guard.handoff").exists())
         self.assertTrue(any("不可解释" in line for line in self.logs))
@@ -3055,6 +3061,9 @@ class IdleBackoffWakeTest(GuardTestBase):
         self.agents = [HELM_IDLE]
         for i in range(3):
             result = guard.run_once()
+            # FB-057①：worker 消失轮触发完成边沿叫醒（冷却计时起点），轮间推进
+            # 跨过全局冷却，保证最后一段断言的是兜底通道而非冷却抑制。
+            self.now[0] += 700
         self.assertTrue(result["woke"], "重新积累满 3 轮后兜底叫醒")
 
     def test_idle_backoff_counter_resets_when_pending_appears(self):

@@ -354,9 +354,12 @@ class DeliveryBoundaryTest(CrewDirTestBase):
         run.assert_not_called()
 
     def test_via_is_ignored_for_non_qoder_paths(self):
-        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
-            cm, "notify", return_value=False
-        ) as notify:
+        # FB-053：herdr agent list 调用失败（环境问题，无法断言名单）→ 不判
+        # unrouted，维持 notification 兜底；明确不在名单才 unrouted（另测）。
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(cm.subprocess, "run",
+                                  side_effect=OSError("herdr down")), \
+                mock.patch.object(cm, "notify", return_value=False) as notify:
             herdr_result = cm.deliver_receipt(
                 make_receipt(runtime="qoder"), self.crew, to="herdr-peer", via="herdr"
             )
@@ -404,7 +407,11 @@ class DeliveryBoundaryTest(CrewDirTestBase):
         self.assertTrue(result["ok"])
 
     def test_unknown_peer_falls_back_to_notification(self):
-        with mock.patch.dict(os.environ, {}, clear=True):
+        # FB-053：agent list 环境性失败 → notification 兜底（无法断言名单不误伤）；
+        # 明确不在本机名单 → unrouted 拒投，见 test_2228_fb053_push_unrouted.py。
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(cm.subprocess, "run",
+                                  side_effect=OSError("herdr down")):
             result = cm.deliver_receipt(make_receipt(), self.crew, to="herdr-peer")
         self.assertEqual(result["delivery"], "notification")
         self.assertEqual(result["runtime"], "herdr")
@@ -604,8 +611,12 @@ class ReadCursorTest(CrewDirTestBase):
         self.assertFalse(self.cursor_file.exists())
         self.assertEqual(self._unread_ids(), ["r-1"])
 
-    def test_mark_all_skips_filename_receipt_id_mismatch(self):
-        """S13：--all 只标实际存在 <receipt_id>.json 的回执；文件名不一致项跳过并告警。"""
+    def test_mark_all_marks_filename_receipt_id_mismatch(self):
+        """FB-051：--all 对文件名与内容 id 不一致项照常标记（canonical=内容 id）。
+
+        旧契约（2.2.17 S13）是跳过并告警，导致 CASE 侧带时间戳前缀文件名的
+        回执永久未读；2.2.28 改为两键任一命中即可标读，游标统一写内容 id。
+        """
         self._write_receipts("r-1")
         inbox = cm.inbox_dir(self.crew)
         legacy = inbox / "20261111T063200Z-legacy-case.json"
@@ -618,15 +629,13 @@ class ReadCursorTest(CrewDirTestBase):
         code, out, err = self._ls("--mark-read", "--all", "--json")
         self.assertEqual(code, 0, err)
         payload = json.loads(out)
-        self.assertEqual(payload["marked"], ["r-1"])
-        self.assertEqual(payload["skipped"], ["case-legacy-1"])
-        self.assertIn("跳过 1 条", err)
-        self.assertIn("receipt_id", err)
+        self.assertEqual(payload["marked"], ["r-1", "case-legacy-1"])
+        self.assertEqual(payload["skipped"], [])
         cursor = json.loads(self.cursor_file.read_text(encoding="utf-8"))
-        self.assertEqual(set(cursor["read"]), {"r-1"})
-        self.assertTrue(legacy.exists(), "跳过项不得删除或改写回执")
-        # 显式 receipt_id 缺失仍按原契约整体拒绝
-        code, _, err = self._ls("--mark-read", "case-legacy-1")
+        self.assertEqual(set(cursor["read"]), {"r-1", "case-legacy-1"})
+        self.assertTrue(legacy.exists(), "标记不得删除或改写回执")
+        # 显式 receipt_id 缺失（两键都不命中）仍按原契约整体拒绝
+        code, _, err = self._ls("--mark-read", "case-missing-1")
         self.assertEqual(code, 1)
         self.assertIn("不存在", err)
 

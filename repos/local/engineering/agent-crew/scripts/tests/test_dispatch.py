@@ -737,8 +737,18 @@ class DispatchTest(unittest.TestCase):
         self.assertEqual("wX:tNEW", payload["tab"])
         self.assertEqual("wX:pNEW", payload["pane"])  # pane 键保留（start-helm.sh 兼容）
         self.assertEqual(
-            [["tab", "create", "--workspace", "wX", "--cwd", str(self.root),
+            [["tab", "create", "--cwd", str(self.root), "--workspace", "wX",
               "--label", "总舵", "--no-focus"]],
+            self.herdr_calls(),
+        )
+
+    def test_tab_create_default_cwd_injected(self):
+        """S9：不给 --cwd → dispatch 缺省补 --cwd <root>（防工位落 home）。"""
+        proc = self.run_dispatch("tab", "create", "--label", "s9", "--no-focus")
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        self.assertEqual(
+            [["tab", "create", "--cwd", str(self.root),
+              "--label", "s9", "--no-focus"]],
             self.herdr_calls(),
         )
 
@@ -1054,8 +1064,9 @@ class NotifyCommandTest(unittest.TestCase):
         self.assertIn("agent_status", str(ctx.exception))
 
     def test_non_whitelisted_status_rejected(self):
-        # S3：归一化后仅 idle/working 放行；Done/空白/未知值一律拒绝
-        for status in ("Done", " ", "unknown-state", "starting"):
+        # S3：归一化后 idle/working/done 放行（FB-052：done=待命≠不可达）；
+        # 空白/未知值一律拒绝
+        for status in (" ", "unknown-state", "starting"):
             with self.subTest(status=status):
                 self.agents = [{"name": "helm-x-3", "workspace_id": "w1",
                                 "agent_status": status}]
@@ -1069,7 +1080,7 @@ class NotifyCommandTest(unittest.TestCase):
                 self.assertIn("herdr agent list", str(ctx.exception))
 
     def test_status_normalized_whitelist_accepted(self):
-        # S3：大小写/空白归一化后 idle/working 正常放行
+        # S3：大小写/空白归一化后 idle/working 正常放行；FB-052 后 done 同列可选
         for status in (" Working ", "IDLE"):
             with self.subTest(status=status):
                 self.agents = [{"name": "helm-x-3", "workspace_id": "w1",

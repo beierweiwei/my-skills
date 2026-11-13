@@ -6,7 +6,8 @@
 ② 同项目 + 聚焦 → 不注入，delivery=inbox_fallback（T37 守卫保留）；
 ③ 同项目 + 聚焦无法判定（pane list 失败/缺 focused 字段）→ inbox_fallback；
 ④ 跨项目 → notification 且未调用 prompt（T28 语义不破）；
-⑤ 目标不可达 → notification（ok=true，与显式 qoder 的 A-1 失败语义区分）；
+⑤ 目标不可达（明确不在本机 agent list）→ unrouted 拒投（FB-053，2.2.28 起
+   不再静默 ok；agent list 环境性失败仍 notification 兜底）；
 ⑥ 显式 `--target-runtime herdr` → 保持 notification（尊重显式选择）；
 ⑦ `--via sendmessage` → DELEGATE 不变，不注入；
 ⑧ S3：`ls --mark-read` 只补新增 id 的标记时间，既有 id 历史时间戳不变。
@@ -192,17 +193,21 @@ class WakeOnReceiptTest(unittest.TestCase):
             (self.other / ".git" / "crew" / "inbox").glob("*.json"))
         self.assertEqual(1, len(peer_files))
 
-    def test_unreachable_target_keeps_notification_ok(self):
+    def test_unreachable_target_is_unrouted(self):
+        """FB-053：明确不在本机 agent list（空名单）→ unrouted 拒投，不再静默 ok。
+
+        旧契约（FB-039 ⑤）是 notification ok=true；2.2.28 起「与已知 agent 名
+        都不匹配」必须显式失败，agent list 环境性失败仍走 notification 兜底。
+        """
         fake = FakeHerdr([])
         result, data = self.run_write(fake)
 
         push = result["push"]
-        self.assertEqual("notification", push["delivery"])
-        self.assertTrue(push["ok"])
-        self.assertIn("未注入", push["note"])
-        self.assertIn("不在本机 herdr agent list", push["note"])
+        self.assertEqual("unrouted", push["delivery"])
+        self.assertFalse(push["ok"])
+        self.assertIn("不在本机 herdr agent list", push["error"])
         self.assertEqual([], fake.prompt_calls())
-        self.assertEqual("notification", data["delivery"])
+        self.assertEqual("unrouted", data["delivery"])
 
     def test_explicit_herdr_target_runtime_keeps_notification(self):
         fake = FakeHerdr(

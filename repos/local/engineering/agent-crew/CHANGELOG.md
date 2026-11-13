@@ -1,5 +1,43 @@
 # Changelog
 
+## 2.2.28 — 2026-11-14
+
+批修：FB-051/052/053/054/041+048(a)/042/043/055/057 + T65 + T69（S1–S7 修复批，含两轴评审与 subA/subB 互检共 13 项收敛）+ S9 工位 cwd 修复（AMEND-5）+ AMEND-6 compact 操作口径进两层剧本。
+
+### 新增
+
+- **FB-051 已读游标两键映射**：`crew-msg.py` 新增 `inbox_receipt_index`（stem 表与内容 id 表分表，4b① 键碰撞时内容 id 优先解析并进 warning——CASE 侧时间戳前缀文件名的回执不再永久未读，也不再标错对象）；游标统一写 canonical 内容 id。
+- **FB-053 unrouted 显式失败**：`push --to` 目标与已知 agent 名/registry 路由都不匹配 → `delivery=unrouted`、ok=false、rc=3，stderr 告警并提示可用目标；结构化原因码（4b② `UNROUTED_NOT_IN_LIST`/`UNROUTED_NOT_AGENT_NAME`，子串匹配降兜底）；agent list 环境性失败维持 notification 兜底不误伤。
+- **FB-055 Phase 0 升技能层**：新增剧本 `templates/playbooks/dispatch-preflight.md`（原设计意图审查 + 行为参数给依据）；crew-rules D 节新增 D9。
+- **T65 `dispatch.py tab create --near <agent>`**：herdr socket API（NDJSON unix socket）封装 `tab.move`——新 tab 就近建在目标 agent 所在 tab 之后一位（锚重取防并发漂移；move 失败消息附新 tab id 便于清理）。
+- **T69 worker ctx 硬门（Captain 口径 >40% compact、≥60% 关闭重建）**：`dispatch.py prompt` 前置 ctx 门（>40% 拒派 + compact 保真清单、≥60% 拒派要求关闭重建、ctx 解析不出 fail-closed 拒派 + `--allow-unknown-ctx` 逃生门；helm/firstmate 编排角色豁免；拒派落 agent-log `result=refused-ctx`）；`crew-guard.py` `_scan_worker_ctx` 逐 worker 扫描（>40% 入叫醒附保真清单、≥60% 附重建建议、解析失败按 agent 去重记日志不静默、firstmate 按 registry role 排除）；`agent-log` prompt 行补 `sender`/`task`/`ctx`；**compact 保真清单**（Captain 硬要求原文）进拒派输出/guard 告警/两层剧本/模板；三栈 worker ctx 口径统一 30%→>40%/≥60%（herdr-cheatsheet、firstmate-dispatch、autonomous-run 同步），helm/firstmate 自身交接阈值（30% warn/50% 交接）不动。
+- **FB-057① guard 快速叫醒差集边沿**：`prev_working` 由总数改名单集合（herdr + claude runs 口径 `claude:{role}:{pid}`，探针排除），任一 worker 完成即叫醒核收（不要求全部转 idle/有待办）；被冷却吞掉的边沿记 guard.log；消息带完成名单与核收指引。
+
+### 修复
+
+- **FB-052**：notify 对 done 目标不再判「目标不可用」——跳过 pane 注入、落收件方 inbox 兜底（`delivery=inbox_fallback`）。
+- **FB-054 审批残留**：agent idle/done 的开口视为审批结束，抑制只在 guard 叫醒判定层（crew_approvals 公共返回不动，注入前安全检查不受影响）；callId 畸形只标注不抑制；超龄 >30 分钟记残留日志（4c① 按 agent|callId keyed 去重，时变年龄不再刷屏）；匹配失配 fail-open。
+- **FB-041/048(a)+FB-057③ worker 回执纪律**：三栈 runner/scout 模板加「报告+回执成对、无回执不得结束回合」硬门槛（reviewer 同步 needle 短语）；`dispatch.py prompt` 自动追加回执要求行（`--no-require-receipt` 可关）。
+- **FB-057②**：见上（prompt 自动回执行）。
+- **4b③**：`worker_ctx_ratio` pane read 命令异常归一 (None, reason) 统一进 fail-closed（逃生门对该路径有效）。
+- **4c④**：guard pending 心跳豁免扩为 `not (fast_wake or ctx_alerts)`（纯 ctx 告警不被心跳误压 15 分钟）。
+- **FB-042/043**：核对为 2.2.18 已闭环，本版不重做（`canonical_rel` 键归一 + release.md 现役 runtime 判读已在）。
+- **S9 工位 cwd 落 home**：`dispatch.py tab create`/`pane split` 缺省补 `--cwd <root>`（显式值优先；T65 `--near` 同补且 move 语义不变）；`cmd_start` 启动后校验工位 cwd==项目根（不符 stderr 告警 + agent-log `cwdMismatch`，不阻断）；tab/pane/start 的 agent-log 行补 cwd/cwdExpected 字段。
+
+### 文档
+
+- crew-rules G2 快速叫醒条款 + FB-054 抑制口径 + idleWakeRounds 默认值漂移修正（5≈10→30≈60，T64 遗留）；G2 冷却语句去重。
+- verify-crew（项目层）新增 `worker-receipt-pairing.md`、`worker-ctx-gate.md` 两 feature。
+
+### 测试
+
+- 新增 11 个 `test_2228_*.py`（FB-051/052/053/054/055/057a/057b/041-worker/t65/t69/s9-cwd），全量 1669 passed / 1326 subtests；既有契约测试按行为变更同步（unrouted、done 兜底、差集边沿、40/60 口径、claude runs key、tab/pane 缺省 cwd）。
+
+### 资产与验证注记
+
+- S-6：工单 S2 文字「reviewer/**verifier**/runner/scout」中的 verifier 在三栈 `templates/agents/` 无独立模板（终验语义由 reviewer 承载）——按实际资产 reviewer/runner/scout 实施，非模板缺失。
+- 终验注记：S9 路径③「已有 pane 直接 pane split」live 复现缺位（herdr 对测试 pane 执行 split rc=1，属 herdr 侧行为）——同构以代码+夹具佐证（test_2228_s9_cwd_default 覆盖缺省注入/显式优先/--near 三路径），真实动作证据覆盖 tab create 与 start 校验路径（s9-fix-live.txt）。
+
 ## 2.2.27 — 2026-11-13
 
 T57：dispatch claude runtime 三栈一等公民（切片 A+B 同批，评估报告方案 A）。修复 R1（claude statusline ctx 假 0 → guard 自动交接静默失效）与 R2（guard 交接按 runtime=qoder 单值假设错启动继任舵）两枚阻断级连锁风险；顺带 T64（idle 兜底默认 10→60 分钟）。

@@ -23,8 +23,10 @@ guard.wake 首行 `generated_at: <ISO8601 Z>`（兼容旧格式裸 ISO 首行）
 cwd 隔离：只统计 cwd 在本仓或 `git worktree list --porcelain` 列出的 linked worktree
 内的 agent；外部项目（其他仓）不参与 running/blocked/快速叫醒。cwd 缺失或不可解析时
 沿用旧口径包含（无法确认归属时不改变既有行为）。
-快速叫醒：上一轮有 working、本轮全部转 idle 且有待办时立即叫醒（受全局冷却
-`guard.wakeCooldownMinutes`，默认 10 分钟；不受 pending 心跳间隔压制）。
+快速叫醒（FB-057①）：完成差集边沿——任一 worker 从 working 消失（herdr 或
+claude runs 口径，探针排除）即叫醒核收，不要求全部转 idle、不要求有待办；
+受全局冷却 `guard.wakeCooldownMinutes`（默认 10 分钟），被冷却吞掉的边沿记
+guard.log；不受 pending 心跳间隔压制；消息带完成名单与核收指引。
 blocked 年龄与重复叫醒：按 agent 身份（name，缺省 pane_id）记录首次 blocked 时间；
 首次叫醒沿用全局冷却（`guard.wakeCooldownMinutes`，默认 10，夹取 1–240）；仍 blocked
 且距该 agent 上次 blocked 叫醒 ≥ config `guard.blockedRepeatMinutes`（默认 15，夹取
@@ -163,6 +165,25 @@ DEFAULT_PENDING_HEARTBEAT_MINUTES = 15
 # idle/done → 报平安 + Backlog 全量清单（含 ⏸ 条目）。0=关闭。
 DEFAULT_IDLE_WAKE_ROUNDS = 30
 IDLE_WAKE_ROUNDS_MAX = 240
+# FB-054（2.2.28 S0 裁定，不得改数）：①agent idle/done 即视为审批结束、从卡住
+# 集合移除（只在 guard 叫醒判定层；crew_approvals 公共返回不动）；超龄残留按
+# 30 分钟记去重日志（与 approvalRepeatMinutes/blockedGraceMinutes 同量级）。
+APPROVAL_RESIDUAL_MINUTES = 30
+# B2：callId 形态异常只标注不抑制（保守性不倒退）；正常形态 = call_ 开头且
+# 紧跟数字（call_01 / call_00_<随机> 均合法，call_x 为日志侧产物）。
+CALL_ID_NORMAL_RE = re.compile(r"call_\d")
+# T69②（2.2.28 Captain 口径，与 dispatch.py 同值同清单）：worker ctx 扫描阈值——
+# >40% 告警附 compact 指令；≥60% 附关闭重建建议。helm 由 _excluded 排除；
+# firstmate 按 dispatch registry role 排除（4c③：编排角色非切片 worker，其 ctx
+# 归角色纪律与总舵监督，不适用 40/60 worker 口径；helm 的 30/50 交接阈值是
+# 另一机制 helm.ctxWarn/helm.ctxHandoff，只作用 helm）。
+WORKER_CTX_COMPACT = 0.40
+WORKER_CTX_REBUILD = 0.60
+COMPACT_CHECKLIST = (
+    "compact 保真清单（compact 前确保 plan/progress/findings 写全）：目标、"
+    "当前 Phase、Next Step、Decisions、Deviation、在途任务三时间戳、待回执/"
+    "待核收、证据路径、占用/工位、验收断言；compact 后先读回 plan/progress/"
+    "findings 再继续。")
 # 2.2.26 T63 AMEND ⏸ 两态：Backlog ⏸ 行仅当含外部条件语义才排除（待外部），
 # 其余 ⏸ 为纯排队（不即时叫醒、由空闲兜底承载）。
 BACKLOG_EXTERNAL_PAUSE_MARKS = (
@@ -256,7 +277,12 @@ def wake_expired(generated: datetime | None, now: float) -> bool:
 
 
 def is_probe_agent(agent: dict) -> bool:
-    """测试探针：按 agent 名或 cwd 判定，仅用于排除 blocked 叫醒。"""
+    """测试探针：按 agent 名或 cwd 判定（4c⑥ 更新用途清单）。
+
+    现用于：blocked 叫醒排除（原始用途）、fast_wake working 集合过滤
+    （FB-057① S0 A1）、worker ctx 扫描排除（T69②）。三者动机一致：
+    探针会话的短暂状态不构成编排事件，误报即 FB-002 刷屏形态。
+    """
     name = str(agent.get("name") or "").strip().lower()
     if name.startswith(PROBE_NAME_PREFIXES):
         return True
@@ -1027,7 +1053,9 @@ class Guard:
     # awaiting_approval 检测器：None = crew_approvals.pending_approvals（可注入便于单测）。
     stuck_detect: Callable[[list[dict], float], list[dict]] | None = None
     consecutive: int = field(default=0, init=False)
-    prev_working: int = field(default=0, init=False)
+    # FB-057①（2.2.28 S0 A1）：上一轮 working 名单集合（herdr + claude runs 口径，
+    # 探针排除）；差集边沿替代旧「全部清零」总数边沿，部分完成也触发快速叫醒。
+    prev_working: set[str] = field(default_factory=set, init=False)
     # 2.2.26 T63：空闲兜底计数——无 pending/无在跑/无卡住且 helm idle/done 的连续轮数
     idle_quiet_rounds: int = field(default=0, init=False)
     last_wake_at: float | None = field(default=None, init=False)
@@ -1038,6 +1066,11 @@ class Guard:
     approval_last_wake: dict[str, float] = field(default_factory=dict, init=False)
     approval_max_logged: set[str] = field(default_factory=set, init=False)
     approval_logged: set[str] = field(default_factory=set, init=False)
+    # 4c①：审批残留日志按 agent|callId keyed 去重（消息含时变年龄，按文本去重
+    # 永不命中——subA 实证 4 轮 4 条）；随 _track_approvals 按 ask 存活集清理。
+    residual_logged: set[str] = field(default_factory=set, init=False)
+    # 4c②：worker ctx 解析失败已告警过的 agent（恢复可读时移除，防每轮刷屏）。
+    ctx_unresolved_logged: set[str] = field(default_factory=set, init=False)
     handoff_attempted: bool = field(default=False, init=False)
     handoff_failed_noted: bool = field(default=False, init=False)
     handoff_wait_rounds: int = field(default=0, init=False)
@@ -2023,6 +2056,77 @@ class Guard:
             })
         return alive
 
+    def _scan_worker_ctx(self, workers: list[dict], now: float) -> list[dict]:
+        """T69②：逐非 helm worker 扫 ctx（>40%/≥60% 收集）；失败可见不静默。
+
+        firstmate 按 dispatch registry role 排除（4c③：编排角色非切片 worker，
+        其 ctx 归角色纪律与总舵监督，40/60 worker 口径不适用）；探针 agent
+        不扫（无编排意义）。pane 缺失或 ctx 解析不出：不误报，但**必须可见**
+        （4c②）——按 agent 去重记一行日志，恢复可读后复位。返回
+        [{name, ratio}]，ratio ∈ (0.40, 1]。
+        """
+        try:
+            registry = self._dispatch_registry()
+        except Exception:  # noqa: BLE001 - registry 不可读不阻断扫描
+            registry = {}
+        alerts: list[dict] = []
+        unresolved: list[str] = []
+        for agent in workers:
+            if is_probe_agent(agent):
+                continue
+            name = self._blocked_label(agent)
+            info = registry.get(name) if isinstance(registry, dict) else None
+            if isinstance(info, dict) and str(
+                    info.get("role") or "").strip().lower() == "firstmate":
+                continue
+            pane = self._agent_pane(agent)
+            if not pane:
+                unresolved.append(f"{name}（缺 pane_id）")
+                continue
+            try:
+                text = self.pane_read(pane, 80)
+            except Exception as exc:  # noqa: BLE001 - 读失败不误报但可见
+                self.log(f"worker ctx 读取失败（{name}，pane {pane}）："
+                         f"{type(exc).__name__}: {exc}")
+                continue
+            ctx_k = parse_ctx_k(text)
+            if ctx_k is None:
+                unresolved.append(f"{name}（pane {pane}）")
+                continue
+            self.ctx_unresolved_logged.discard(name)
+            ratio = ctx_k / 1000.0
+            if ratio > WORKER_CTX_COMPACT:
+                alerts.append({"name": name, "pane": pane, "ratio": ratio})
+        fresh = [item for item in unresolved
+                 if item.split("（")[0] not in self.ctx_unresolved_logged]
+        if fresh:
+            for item in fresh:
+                self.ctx_unresolved_logged.add(item.split("（")[0])
+            self.log("worker ctx 解析失败（不误报、本轮不可见，恢复后复位）："
+                     + "；".join(sorted(fresh)))
+        return alerts
+
+    def _working_keys(self, running: list[dict], claude_runs: list[dict]) -> set[str]:
+        """FB-057①：working 名单集合（herdr `_blocked_key` + claude runs pid）。
+
+        探针 agent（is_probe_agent）不进集合——S0 A1 并入修法：cwd 在本仓的
+        探针结束时不得触发快速叫醒（FB-002 刷屏教训）。
+        """
+        keys: set[str] = set()
+        for agent in running:
+            if is_probe_agent(agent):
+                continue
+            key = self._blocked_key(agent)
+            if key:
+                keys.add(key)
+        for run in claude_runs:
+            pid = run.get("pid")
+            if pid:
+                # 4c⑤：带 role——总舵看到「刚完成待核收」能对应到工位。
+                role = str(run.get("role") or "").strip() or "?"
+                keys.add(f"claude:{role}:{pid}")
+        return keys
+
     def _excluded(self, agent: dict) -> bool:
         name = str(agent.get("name") or "")
         return name == self.helm or name.startswith("Captain")
@@ -2134,15 +2238,110 @@ class Guard:
         except (TypeError, ValueError):
             return 0
 
-    def _track_approvals(self, approvals: list[dict]) -> None:
-        """ask 消失即清除年龄/去重状态（只保留本轮仍存在的 agent+callId）。"""
+    def _track_approvals(self, approvals: list[dict],
+                         extra_active: set[str] | None = None) -> None:
+        """ask 消失即清除年龄/去重状态（只保留本轮仍存在的 agent+callId）。
+
+        extra_active：被抑制的残留项键（4c①）——并入存活集参与清理，使
+        residual_logged 在 ask 消失（settle 补写）后复位、复现为新事件。
+        """
         active = {self._approval_key(item) for item in approvals}
+        if extra_active:
+            active |= extra_active
         for key in list(self.approval_last_wake):
             if key not in active:
                 del self.approval_last_wake[key]
         for key in list(self.approval_max_logged):
             if key not in active:
                 self.approval_max_logged.discard(key)
+        for key in list(self.residual_logged):
+            if key not in active:
+                self.residual_logged.discard(key)
+
+    @staticmethod
+    def _agent_status_index(agents: list[dict]) -> tuple[dict[str, str], dict[str, str]]:
+        """herdr agent 状态索引（name / pane_id → 归一化 status）。"""
+        by_name: dict[str, str] = {}
+        by_pane: dict[str, str] = {}
+        for agent in agents or []:
+            if not isinstance(agent, dict):
+                continue
+            status = str(agent.get("agent_status") or "").strip().lower()
+            if not status:
+                continue
+            name = str(agent.get("name") or "").strip()
+            if name:
+                by_name[name] = status
+            pane = str(agent.get("pane_id") or agent.get("pane") or "").strip()
+            if pane:
+                by_pane[pane] = status
+        return by_name, by_pane
+
+    def _suppress_finished_stuck(
+        self, agents: list[dict], stuck: list[dict],
+    ) -> tuple[list[dict], list[tuple[dict, str]]]:
+        """FB-054 ①：agent idle/done 即视为审批结束，从卡住集合移除。
+
+        只作用于 guard 叫醒判定层（S0 B1）：crew_approvals.pending_approvals
+        公共返回不动（crew-msg/dispatch 注入前安全检查依赖它）；helm 走
+        `_helm_has_pending_ask` 独立路径，不受影响。agent↔entry 匹配失配时
+        fail-open 照常保留叫醒（S7，宁可误报不漏报）。
+        """
+        if not stuck:
+            return stuck, []
+        by_name, by_pane = self._agent_status_index(agents)
+        kept: list[dict] = []
+        suppressed: list[tuple[dict, str]] = []
+        for entry in stuck:
+            name = str(entry.get("agent") or "").strip()
+            pane = str(entry.get("pane") or "").strip()
+            status = by_name.get(name) if name else None
+            if status is None and pane:
+                status = by_pane.get(pane)
+            if status is None:
+                kept.append(entry)
+            elif status in ("idle", "done"):
+                suppressed.append((entry, status))
+            else:
+                kept.append(entry)
+        return kept, suppressed
+
+    def _log_residual_approvals(self, suppressed: list[tuple[dict, str]]) -> None:
+        """S6（4c① keyed 去重）：超龄（>APPROVAL_RESIDUAL_MINUTES）被抑制项记残留日志。
+
+        按 agent|callId keyed 去重（消息含时变年龄，按文本去重永不命中——
+        subA 实证 4 轮 4 条）；键随 _track_approvals 的 ask 存活集清理。
+        """
+        for entry, status in suppressed:
+            age = self._approval_age(entry)
+            if age < APPROVAL_RESIDUAL_MINUTES * 60:
+                continue
+            key = (f"{self._approval_label(entry)}|{entry.get('call_id') or '?'}")
+            if key in self.residual_logged:
+                continue
+            self.residual_logged.add(key)
+            self.log(
+                f"审批残留（已抑制叫醒，agent {status}）："
+                f"{self._approval_label(entry)} callId {entry.get('call_id') or '?'}，"
+                f"ask 开口 {age // 60} 分钟无 settle——疑日志未写 settle/滚出窗口，"
+                "审批数据链缺陷待排查（FB-054）；同键不重复记录")
+
+    def _note_abnormal_call_ids(self, stuck: list[dict]) -> None:
+        """B2：callId 非 call_数字 形态只标注不抑制（叫醒判定照常）。"""
+        for entry in stuck:
+            call_id = str(entry.get("call_id") or "").strip()
+            if call_id and not CALL_ID_NORMAL_RE.match(call_id):
+                self._approval_log(
+                    f"callId 形态异常（{call_id}，非 call_N）："
+                    f"{self._approval_label(entry)}——疑审批数据链缺陷，"
+                    "叫醒判定照常（FB-054 S0 B2）")
+
+    @staticmethod
+    def _call_id_note(entry: dict) -> str:
+        call_id = str(entry.get("call_id") or "").strip()
+        if call_id and not CALL_ID_NORMAL_RE.match(call_id):
+            return f"；callId 形态异常（{call_id}），疑数据链缺陷"
+        return ""
 
     def _approval_due(
         self,
@@ -2187,7 +2386,7 @@ class Guard:
             age = self._approval_age(entry)
             text = (f"- {self._approval_label(entry)}：等待审批 {age // 60} 分钟"
                     f"（callId {entry.get('call_id') or '?'}"
-                    f"，tool={entry.get('tool') or '?'}）")
+                    f"，tool={entry.get('tool') or '?'}）{self._call_id_note(entry)}")
             preview = str(entry.get("command_preview") or "").strip()
             if preview:
                 text += f"；命令预览：{preview}"
@@ -2392,8 +2591,16 @@ class Guard:
         # 年龄表先于 handoff 分支更新：交接期间 blocked 时长继续累计。
         blocked_since = self._track_blocked(now, blocked)
         # awaiting_approval：等待权限对话框的 worker（herdr 仍可能是 working）。
+        # FB-054 ①：agent idle/done 的开口先从卡住集合移除（超龄记残留日志）；
+        # B2：畸形 callId 只标注，判定照常。
         stuck = self._detect_stuck(workers, now)
-        self._track_approvals(stuck)
+        stuck, residual = self._suppress_finished_stuck(agents, stuck)
+        residual_keys = {
+            f"{self._approval_label(entry)}|{entry.get('call_id') or '?'}"
+            for entry, _status in residual}
+        self._log_residual_approvals(residual)
+        self._note_abnormal_call_ids(stuck)
+        self._track_approvals(stuck, extra_active=residual_keys)
         guard_cfg = load_config(self.root)["guard"]
         approval_due, approval_repeat_due = self._approval_due(now, stuck, guard_cfg)
         pending, residual, paused = scan_todos(self.root)
@@ -2401,11 +2608,12 @@ class Guard:
         for todo in residual:
             self.log(f"已完成 Phase 残留 [ ]（仅记日志）：{todo.label}")
 
-        current_working = len(running) + len(claude_runs)
-        prev_working = self.prev_working
-        # worker 从 working 全部转 idle 且仍有待办：立即叫醒，不等连续 2 轮
-        fast_wake = prev_working > 0 and current_working == 0 and bool(pending)
-        self.prev_working = current_working
+        working_keys = self._working_keys(running, claude_runs)
+        finished = self.prev_working - working_keys
+        # FB-057①：完成差集边沿——任一 worker 从 working 消失即触发快速叫醒，
+        # 不再要求「全部清零且有待办」（S0 A1；冷却沿用全局 wakeCooldownMinutes）。
+        fast_wake = bool(finished)
+        self.prev_working = working_keys
 
         condition = bool(pending) and not running and not claude_runs
         if condition:
@@ -2440,15 +2648,14 @@ class Guard:
         if stuck:
             detail = ", ".join(
                 f"{self._approval_label(item)}（callId {item.get('call_id') or '?'}，"
-                f"{self._approval_age(item) // 60} 分钟）"
+                f"{self._approval_age(item) // 60} 分钟）{self._call_id_note(item)}"
                 for item in stuck
             )
             reason_parts.append(f"worker 等待审批（awaiting_approval）：{detail}")
         if not reason_parts:
             if fast_wake:
                 reason_parts.append(
-                    f"有待办 {len(pending)} 条且无在跑 worker"
-                    f"（上一轮 {prev_working} 个 working 已转 idle）"
+                    f"worker 完成待核收：{', '.join(sorted(finished))}"
                 )
             elif pending_idle and self.consecutive >= 2:
                 reason_parts.append(
@@ -2456,6 +2663,21 @@ class Guard:
                     f"（连续 {self.consecutive} 轮）"
                 )
         reason = "；".join(reason_parts)
+        # T69②：worker ctx 扫描在 reason 定型后追加——与 blocked/stuck 并列可见
+        # （不互挤，S0 S4 教训），纯 ctx 告警也能独立成 reason 触发叫醒。
+        ctx_alerts = self._scan_worker_ctx(workers, now)
+        if ctx_alerts:
+            parts = []
+            for item in ctx_alerts:
+                text = f"{item['name']} {item['ratio']:.0%}"
+                if item["ratio"] >= WORKER_CTX_REBUILD:
+                    text += "（≥60%，建议关闭该工位并重建）"
+                else:
+                    text += "（>40%，请 /compact，compact 前按保真清单写全 "
+                    "plan/progress/findings）"
+                parts.append(text)
+            reason_parts.append("worker ctx 超阈值：" + "；".join(parts))
+            reason = "；".join(reason_parts)
 
         plan_path = pending[0].plan if pending else ""
         if plan_path and not Path(plan_path).is_absolute():
@@ -2563,16 +2785,21 @@ class Guard:
                 self.log(f"冷却中，跳过叫醒：{reason}")
                 return result
         else:
-            if not pending_idle:
+            if not (pending_idle or fast_wake or ctx_alerts):
                 # 只有未到阈值的 awaiting_approval/blocked：本轮不叫醒。
                 return result
             if self.last_wake_at is not None and now - self.last_wake_at < cooldown:
-                self.log(f"冷却中，跳过叫醒：{reason}")
+                # FB-057①：被冷却吞掉的完成边沿记日志（S0 S3；不补叫——prev 集合
+                # 已更新，退化为慢通道/60 分钟兜底，不加持久化状态）。
+                if fast_wake:
+                    self.log(f"快速叫醒冷却中，完成边沿被吞（不补叫）：{reason}")
+                else:
+                    self.log(f"冷却中，跳过叫醒：{reason}")
                 return result
             # C 周期心跳：pending 真 idle 持续时按配置间隔重复叫醒（受冷却约束）。
             # 快速叫醒是新的活动边沿，只受全局冷却，不被心跳间隔压制。
             heartbeat = guard_cfg["pendingHeartbeatMinutes"] * 60
-            if (not fast_wake and self.last_pending_wake_at is not None
+            if (not (fast_wake or ctx_alerts) and self.last_pending_wake_at is not None
                     and now - self.last_pending_wake_at < heartbeat):
                 self.log(f"pending 心跳未到间隔，跳过叫醒：{reason}")
                 return result
@@ -2586,6 +2813,12 @@ class Guard:
         if approval_due:
             lines.append("等待审批时长：")
             lines.extend(self._approval_wake_lines(approval_due, guard_cfg))
+        if fast_wake:
+            lines.append(f"刚完成待核收：{', '.join(sorted(finished))}")
+            lines.append("请核收：查收对应工位 inbox 回执"
+                         "（`crew-msg.py ls --unread`）与 pane 终态；工位处置按 F4。")
+        if ctx_alerts:
+            lines.append(COMPACT_CHECKLIST)
         if pending:
             lines.append(f"待办（前 {min(5, len(pending))} 条）：")
             lines.extend(f"- {todo.label}" for todo in pending[:5])
@@ -2619,9 +2852,11 @@ class Guard:
 
 def build_parser() -> argparse.ArgumentParser:
     epilog = """\
-叫醒口径：有待办 + 无在跑 worker 连续 2 轮；若上一轮有 working、本轮全部转 idle
-则立即叫醒（受 guard.wakeCooldownMinutes 全局冷却，默认 10 分钟）；blocked 与
-awaiting_approval 单独叫醒；pending 真 idle 按 guard.pendingHeartbeatMinutes 心跳；
+叫醒口径：有待办 + 无在跑 worker 连续 2 轮；完成差集边沿（FB-057①）——任一
+worker 从 working 消失（探针排除）即叫醒核收（不要求全部转 idle/有待办；受
+guard.wakeCooldownMinutes 全局冷却，默认 10 分钟，被吞边沿记 guard.log）；
+blocked 与 awaiting_approval 单独叫醒；pending 真 idle 按
+guard.pendingHeartbeatMinutes 心跳；
 空闲兜底（2.2.26）：无待办/无在跑/无卡住且 helm idle/done 连续 guard.idleWakeRounds
 轮（默认 30≈60 分钟（T64，对齐每小时心跳口径），0=关闭）报平安 + Backlog 清单（不含已完成；可派/⏸/⛔ 全列）；
 Backlog ⏸ 两态：含外部条件语义（待 Captain/待 C/留 Captain/待拍板/待评审/待授权/

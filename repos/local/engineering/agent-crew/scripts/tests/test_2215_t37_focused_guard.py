@@ -87,6 +87,9 @@ class FakeHerdr:
                 {"result": {"panes": self.panes}}))
         if argv[:3] == ["herdr", "notification", "show"]:
             return mock.Mock(returncode=self.notify_rc, stdout="", stderr="")
+        if argv[:3] == ["herdr", "pane", "read"]:
+            # T69 ctx 门夹具：低 ctx 过门，焦点/审批守卫语义由本测试原有断言承载
+            return mock.Mock(returncode=0, stdout="ctx 100k/1M", stderr="")
         return mock.Mock(returncode=self.prompt_rc, stdout="",
                          stderr="prompt failed" if self.prompt_rc else "")
 

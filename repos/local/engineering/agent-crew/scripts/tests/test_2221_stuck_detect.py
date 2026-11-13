@@ -643,7 +643,10 @@ class InjectionFallbackTest(GuardHarness):
                 mock.patch.object(dispatch, "pending_approvals",
                                   return_value=[approval_entry()]), \
                 mock.patch.object(dispatch, "herdr_notify", return_value=True), \
-                mock.patch.object(dispatch, "run_herdr", side_effect=fake_run_herdr), \
+                mock.patch.object(dispatch, "run_herdr",
+                                  side_effect=lambda argv: (
+                                      "ctx 100k/1M" if argv[:3] == ["herdr", "pane", "read"]
+                                      else fake_run_herdr(argv))), \
                 redirect_stdout(out), redirect_stderr(err):
             code = dispatch.main(["--root", str(root), "prompt",
                                   "--agent", "worker-1", "--message", "hi"])

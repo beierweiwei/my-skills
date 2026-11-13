@@ -275,6 +275,43 @@ def list_receipts(crew_dir: Path, status: str | None = None) -> list[dict]:
     return receipts
 
 
+def inbox_receipt_index(crew_dir: Path) -> tuple[dict[str, str], dict[str, str],
+                                                 list[str]]:
+    """inbox 两键索引（FB-051）：stem 表与内容 id 表分表返回。
+
+    返回 (content_map, stem_map, conflicts)：
+    - content_map：{内容 receipt_id → 自身}（canonical 键，--unread 过滤键同源）；
+    - stem_map：{文件名 stem → 内容 receipt_id}；
+    - conflicts：键碰撞告警（4b①：某文件 stem 恰是另一文件内容 id 且 canonical
+      不同——旧单值 dict 后写覆盖先写会标错对象，分表后内容 id 优先解析，
+      冲突进 warning 提示）。
+
+    损坏文件按 stem 兜底（与 list_receipts 的退化口径相同）。
+    """
+    folder = inbox_dir(crew_dir)
+    content_map: dict[str, str] = {}
+    stem_map: dict[str, str] = {}
+    conflicts: list[str] = []
+    if not folder.is_dir():
+        return content_map, stem_map, conflicts
+    for path in sorted(folder.glob("*.json")):
+        receipt_id = path.stem
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and str(data.get("receipt_id") or "").strip():
+                receipt_id = str(data["receipt_id"]).strip()
+        except (OSError, ValueError):
+            pass
+        if path.stem in content_map and content_map[path.stem] != receipt_id:
+            conflicts.append(
+                f"键 {path.stem} 同时是内容 id（canonical "
+                f"{content_map[path.stem]}）与文件 {path.stem}.json 的 stem"
+                f"（内容 {receipt_id}）；按内容 id 优先解析")
+        stem_map[path.stem] = receipt_id
+        content_map[receipt_id] = receipt_id
+    return content_map, stem_map, conflicts
+
+
 def read_cursor_path(crew_dir: Path) -> Path:
     return Path(crew_dir) / CURSOR_FILENAME
 
@@ -308,17 +345,29 @@ def mark_receipts_read(crew_dir: Path, receipt_ids: list[str],
                        skip_missing: bool = False) -> dict:
     """把 receipt_id 标记为已读；只写游标，不改回执文件与状态（R1 文件仍为真源）。
 
-    显式 id 中有不存在的回执时整体拒绝、不标任何一条。`skip_missing=True`
-    （`ls --mark-read --all`）时改为跳过 inbox 中不存在 `<receipt_id>.json` 的历史
-    条目（文件名与 receipt_id 不一致），跳过项计入返回值 skipped，不整体失败（S13）。
-    游标损坏时按空游标重建并在返回值 warning 中说明。重写游标时保留既有 id 的历史
-    标记时间，只补新增键（S3）。flock 串行化读改写，tmp+rename 原子替换（P2/P3）。
+    显式 id 中两键（文件名 stem / 内容 receipt_id）都不存在的回执时整体拒绝、
+    不标任何一条。`skip_missing=True`（`ls --mark-read --all`）时跳过两键均未
+    命中的条目，跳过项计入返回值 skipped，不整体失败（FB-051 后仅理论兜底：
+    --all 的 id 来自 list_receipts，正常全部命中）。任一键命中即按 canonical
+    （内容 receipt_id）标记，游标键与 `--unread` 过滤键一致，带时间戳前缀
+    文件名的回执不再永久未读（FB-051）。游标损坏时按空游标重建并在返回值
+    warning 中说明。重写游标时保留既有 id 的历史标记时间，只补新增键（S3）。
+    flock 串行化读改写，tmp+rename 原子替换（P2/P3）。
     """
     crew = Path(crew_dir)
     ids = list(dict.fromkeys(receipt_ids))
     for receipt_id in ids:
         validate_receipt_id(receipt_id)
-    missing = [rid for rid in ids if not (inbox_dir(crew) / f"{rid}.json").exists()]
+    # FB-051：stem 与内容 receipt_id 任一命中即可标读；游标写 canonical 内容 id。
+    # 4b①：content_map 优先解析（stem 碰撞时不标错对象），冲突进 warning。
+    content_map, stem_map, conflicts = inbox_receipt_index(crew)
+
+    def _lookup(rid: str) -> str | None:
+        if rid in content_map:
+            return content_map[rid]
+        return stem_map.get(rid)
+
+    missing = [rid for rid in ids if _lookup(rid) is None]
     skipped: list[str] = []
     if missing:
         if not skip_missing:
@@ -333,18 +382,25 @@ def mark_receipts_read(crew_dir: Path, receipt_ids: list[str],
             }
     cursor = read_cursor_path(crew)
     result: dict = {"marked": [], "already_read": [], "skipped": skipped,
-                    "cursor": str(cursor), "warning": None}
+                    "cursor": str(cursor),
+                    "warning": "；".join(conflicts) if conflicts else None}
     if not ids:
         return result
+    canonical = {rid: _lookup(rid) for rid in ids}
+    marked_ids = list(dict.fromkeys(canonical.values()))
     crew.mkdir(parents=True, exist_ok=True)
     try:
         with open(crew / CURSOR_LOCK_FILENAME, "a+", encoding="utf-8") as handle:
             try:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
                 current, warning = load_read_cursor(crew)
-                result["warning"] = warning
-                result["marked"] = [rid for rid in ids if rid not in current]
-                result["already_read"] = [rid for rid in ids if rid in current]
+                if warning:
+                    # 游标诊断不覆盖键冲突告警（4b①）；两者都非空时拼接。
+                    result["warning"] = (
+                        f"{result['warning']}；{warning}"
+                        if result.get("warning") else warning)
+                result["marked"] = [rid for rid in marked_ids if rid not in current]
+                result["already_read"] = [rid for rid in marked_ids if rid in current]
                 if result["marked"]:
                     now = utc_now()
                     for receipt_id in result["marked"]:
@@ -644,51 +700,66 @@ def pending_approval_block(name: str, timeout: float = 10.0) -> tuple[bool, str]
         f"tool={first.get('tool') or '?'}，等待 {age_minutes} 分钟）")
 
 
-def _resolve_peer_inbox(to: str | None, timeout: float = 10.0) -> tuple[Path | None, str]:
+# 4b②：unrouted 判定结构化原因码（enum 优先，reason 子串匹配降级兜底）。
+UNROUTED_NOT_AGENT_NAME = "not_agent_name"      # 名字形态非法，必非 agent 名
+UNROUTED_NOT_IN_LIST = "not_in_list"            # 明确不在本机 herdr agent list
+UNROUTED_CODES = (UNROUTED_NOT_AGENT_NAME, UNROUTED_NOT_IN_LIST)
+
+
+def _resolve_peer_inbox(to: str | None,
+                        timeout: float = 10.0) -> tuple[Path | None, str,
+                                                        list[str], str]:
     """目标 agent → 收件方 `<git-common-dir>/crew/inbox`（T28）。
 
-    返回 (inbox_dir, reason)；解析失败时 inbox_dir=None，reason 显式告知未落盘。
+    返回 (inbox_dir, reason, agent_names, code)；解析失败时 inbox_dir=None，
+    reason 显式告知未落盘；code 为结构化原因码（4b②：unrouted 判定优先用
+    code，reason 子串匹配降级兜底）；agent_names 是本机 herdr agent 名单
+    （解析中断时为空表），供 unrouted 时提示可用目标。
     """
     name = _herdr_target_name(to)
     if not name:
-        return None, "目标不是 herdr agent 名，无法定位收件方项目"
+        return (None, "目标不是 herdr agent 名，无法定位收件方项目", [],
+                UNROUTED_NOT_AGENT_NAME)
     try:
         proc = subprocess.run(
             ["herdr", "agent", "list"],
             text=True, capture_output=True, check=False, timeout=timeout,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        return None, f"herdr agent list 调用失败：{exc}"
+        return None, f"herdr agent list 调用失败：{exc}", [], "list_failed"
     if proc.returncode != 0:
-        return None, f"herdr agent list 退出码 {proc.returncode}"
+        return None, f"herdr agent list 退出码 {proc.returncode}", [], "list_failed"
     try:
         data = json.loads(proc.stdout)
     except ValueError as exc:
-        return None, f"herdr agent list 输出非 JSON：{exc}"
+        return None, f"herdr agent list 输出非 JSON：{exc}", [], "list_failed"
     result = data.get("result") if isinstance(data, dict) else None
     agents = result.get("agents") if isinstance(result, dict) else None
     if not isinstance(agents, list):
         agents = []
+    names = [str(agent.get("name")) for agent in agents
+             if isinstance(agent, dict) and agent.get("name")]
     entry = next((agent for agent in agents
                   if isinstance(agent, dict) and agent.get("name") == name), None)
     if entry is None:
-        return None, f"目标 {name} 不在本机 herdr agent list"
+        return (None, f"目标 {name} 不在本机 herdr agent list", names,
+                UNROUTED_NOT_IN_LIST)
     cwd = str(entry.get("cwd") or entry.get("foreground_cwd") or "").strip()
     if not cwd or not Path(cwd).is_dir():
-        return None, f"目标 {name} 缺可用 cwd"
+        return None, f"目标 {name} 缺可用 cwd", names, "no_cwd"
     try:
         proc = subprocess.run(
             ["git", "-C", cwd, "rev-parse", "--git-common-dir"],
             text=True, capture_output=True, check=False, timeout=timeout,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        return None, f"git 调用失败：{exc}"
+        return None, f"git 调用失败：{exc}", names, "git_failed"
     if proc.returncode != 0 or not proc.stdout.strip():
-        return None, f"目标 {name} 不是 git 仓库（cwd={cwd}）"
+        return None, f"目标 {name} 不是 git 仓库（cwd={cwd}）", names, "not_git"
     common = Path(proc.stdout.strip())
     if not common.is_absolute():
         common = (Path(cwd) / common).resolve()
-    return common / "crew" / "inbox", ""
+    return common / "crew" / "inbox", "", names, "ok"
 
 
 def mirror_receipt_to_peer_inbox(
@@ -698,10 +769,15 @@ def mirror_receipt_to_peer_inbox(
     to: str | None,
     timeout: float = 10.0,
 ) -> dict:
-    """把回执副本原子写入收件方 inbox（跨项目）；失败只报不抛，不阻断推送。"""
-    inbox, reason = _resolve_peer_inbox(to, timeout=timeout)
+    """把回执副本原子写入收件方 inbox（跨项目）；失败只报不抛，不阻断推送。
+
+    FB-053：skipped 时携带本机 agent 名单（agent_names），供 deliver_receipt
+    判定 unrouted 并提示可用目标。
+    """
+    inbox, reason, agent_names, code = _resolve_peer_inbox(to, timeout=timeout)
     if inbox is None:
-        return {"status": "skipped", "path": None, "reason": reason}
+        return {"status": "skipped", "path": None, "reason": reason,
+                "agent_names": agent_names, "unrouted_code": code}
     try:
         if inbox.resolve() == inbox_dir(crew_dir).resolve():
             return {"status": "same", "path": str(inbox), "reason": None}
@@ -853,6 +929,23 @@ def deliver_qoder(
     )
 
 
+def _unrouted_reason(peer_inbox: dict) -> str | None:
+    """FB-053：明确「目标不存在」时返回原因；环境问题返回 None（不误伤）。
+
+    4b②：优先用结构化原因码（UNROUTED_CODES），reason 子串匹配降级兜底
+    （兼容无 code 的旧调用方）。agent list 调用失败、缺 cwd 等环境原因无法
+    断言名单，维持 notification 兜底。
+    """
+    if peer_inbox.get("status") != "skipped":
+        return None
+    if peer_inbox.get("unrouted_code") in UNROUTED_CODES:
+        return str(peer_inbox.get("reason") or "")
+    reason = str(peer_inbox.get("reason") or "")
+    if "不在本机 herdr agent list" in reason or "不是 herdr agent 名" in reason:
+        return reason
+    return None
+
+
 def deliver_receipt(
     receipt: dict,
     crew_dir: Path,
@@ -902,6 +995,23 @@ def deliver_receipt(
             )
 
     if runtime == "herdr":
+        # FB-053：目标与已知 agent 名/registry 路由都不匹配 → 明确拒绝，
+        # 不再静默「通知成功」（done/idle 之外的不可达才走这里）。
+        unrouted = _unrouted_reason(peer_inbox)
+        if unrouted:
+            available = [str(name) for name in (peer_inbox.get("agent_names") or [])]
+            hint = (
+                f"可用目标: {', '.join(available[:8])}"
+                + (" 等" if len(available) > 8 else "")
+            ) if available else "本机 agent list 为空或不可用"
+            return finish({
+                "target": to,
+                "runtime": "herdr",
+                "delivery": "unrouted",
+                "ok": False,
+                "unrouted_code": peer_inbox.get("unrouted_code") or "unmatched",
+                "error": f"目标 {to} 无法路由（{unrouted}）；{hint}",
+            })
         if target_runtime == "herdr":
             note = "Herdr 目标（显式 --target-runtime herdr）：只写文件 + 通知"
         elif peer_inbox.get("status") == "same":
@@ -1162,8 +1272,8 @@ def _cmd_ls(args, crew_dir: Path) -> int:
             more = " 等" if len(mark_result["skipped"]) > 3 else ""
             warnings.append(
                 f"ls --mark-read --all 跳过 {len(mark_result['skipped'])} 条"
-                f"文件名与 receipt_id 不一致的回执（{preview}{more}）："
-                "其 <receipt_id>.json 不在 inbox，未标记（inbox 文件仍是真源）"
+                f"文件名与 receipt_id 均未命中的回执（{preview}{more}）："
+                "未标记（inbox 文件仍是真源）"
             )
         if mark_result["warning"]:
             warnings.append(mark_result["warning"])
@@ -1236,6 +1346,8 @@ def _cmd_push(args, crew_dir: Path) -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
         _print_push(result)
+    if not result.get("ok") and result.get("error"):
+        print(f"error: 推送失败（回执仍成立）: {result['error']}", file=sys.stderr)
     return EXIT_OK if result.get("ok") else EXIT_PUSH_FAILED
 
 
@@ -1272,8 +1384,11 @@ status=captain 表示 ⏸ 待 Captain。回执先原子落盘，推送失败不�
   note 写明未注入）。auto 已判定同项目后，二次 `herdr agent list` 失败或目标从
   列表消失按 A-1 情形③处理（delegate ok=false + 退出码 3，note 写明原因）。
 - 跨产品：只写文件 + Herdr 通知；`--via` 只作用于同 runtime=qoder 的推送。
+- FB-053：`--to` 与已知 agent 名（本机 herdr agent list）和 registry 路由都不
+  匹配 → delivery=unrouted、ok=false、rc=3，stderr 告警并提示可用目标；
+  agent list 调用失败等环境问题无法断言名单时维持 notification 兜底（rc=0）。
 - 审计：投递通道写回本地回执副本 delivery（herdr / inbox_fallback /
-  sendmessage-delegate / notification 等）。
+  sendmessage-delegate / notification / unrouted 等）。
 
 已读游标：`<git-common-dir>/crew/inbox-read-cursor.json`
 （`{"version": 1, "read": {"<receipt_id>": "<标记时间>"}}`，flock + tmp/rename 原子写）。
@@ -1344,8 +1459,8 @@ status=captain 表示 ⏸ 待 Captain。回执先原子落盘，推送失败不�
     ls.add_argument(
         "--all",
         action="store_true",
-        help="配合 --mark-read：标记 --status 范围内全部回执；文件名与 receipt_id "
-             "不一致且 <receipt_id>.json 不存在的条目跳过并告警（rc=0）",
+        help="配合 --mark-read：标记 --status 范围内全部回执；文件名 stem 与内容 "
+             "receipt_id 均未命中的条目跳过并告警（rc=0）",
     )
     ls.add_argument(
         "receipt_ids",
