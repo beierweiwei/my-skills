@@ -110,6 +110,7 @@ python3 scripts/dispatch.py --root . pane close --pane <pane_id>
 - 后台监听：`python3 scripts/agent-watch.py --interval 15`（可加 `--workspace` / `--agent`）轮询 `herdr agent list`，状态变化发 Herdr 通知；不要前台 `--wait` 长时间阻塞。`worktree-watch.py` 只监控 worktree，不监控 Agent。状态去重文件默认 `.git/agent-watch.state`（全 worktree 共用一份，键为 `workspace/agent`，可用 `--state-file` 另指）；手工抽查用 `python3 scripts/agent-watch.py --once --no-notify --state-file /tmp/aw-check.state`，不要污染常驻监听的基线；通知只在 `HERDR_ENV=1`（Herdr 内）生效，Herdr 外只打印不通知。
 - 后台建 tab / 启动 Agent 用 `--no-focus`，不要抢当前输入；dispatch 的 prompt 不抢焦点，但目标 pane 聚焦时不注入（见 §5 聚焦守卫）。
 - worktree：`python3 scripts/worktree-watch.py` 看未合并/未提交；常驻监控用 `--interval 60`，状态变化会发 Herdr 通知。合并与清理必须经 Captain 同意，由大副执行。
+- 批量切模型：`python3 scripts/crew-model.py settings|panes --runtime qoder|claude --model <id> [--apply]`（默认 dry-run，写/注入须显式 `--apply`）。settings 改 qoder `agents.overrides` / claude 顶层 `model`（opencode 拒绝）；panes 只处理本 workspace，`working` 跳过、未见提示符不硬切、切换后回读核验，转 idle 后重跑补切。
 - 不要裸跑 `herdr` 做命令发现，它会启动 TUI；用 `herdr <命令组>` 看帮助。
 
 ## 8. 工位与技能配合（可选）
