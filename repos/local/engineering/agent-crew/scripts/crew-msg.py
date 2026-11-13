@@ -185,6 +185,7 @@ def build_receipt(
     findings: list[str] | None = None,
     receipt_id: str | None = None,
     ts: str | None = None,
+    handoff_read_bytes: int | None = None,
 ) -> dict:
     if runtime not in SENDER_RUNTIMES:
         raise CrewMsgError(f"未知 runtime: {runtime!r}（可选: {', '.join(SENDER_RUNTIMES)}）")
@@ -193,9 +194,18 @@ def build_receipt(
     for field, value in (("from", from_), ("task", task), ("summary", summary)):
         if not isinstance(value, str) or not value.strip():
             raise CrewMsgError(f"--{field} 不能为空")
+    # S6：可选字段，非负 int；bool 是 int 子类需显式排除；非法即拒绝、不落文件。
+    if handoff_read_bytes is not None and (
+        isinstance(handoff_read_bytes, bool)
+        or not isinstance(handoff_read_bytes, int)
+        or handoff_read_bytes < 0
+    ):
+        raise CrewMsgError(
+            f"--handoff-read-bytes 须为非负整数，收到: {handoff_read_bytes!r}"
+        )
     rid = receipt_id or make_receipt_id(from_)
     validate_receipt_id(rid)
-    return {
+    receipt = {
         "receipt_id": rid,
         "from": from_,
         "runtime": runtime,
@@ -209,6 +219,9 @@ def build_receipt(
         "summary": summary,
         "ts": ts or utc_now(),
     }
+    if handoff_read_bytes is not None:
+        receipt["handoff_read_bytes"] = handoff_read_bytes
+    return receipt
 
 
 def validate_receipt(receipt: dict) -> None:
@@ -1209,6 +1222,7 @@ def _cmd_write(args, crew_dir: Path) -> int:
         work_slot=args.work_slot,
         findings=args.finding,
         receipt_id=args.receipt_id,
+        handoff_read_bytes=args.handoff_read_bytes,
     )
     try:
         result = write_receipt(
@@ -1298,14 +1312,18 @@ def _cmd_ls(args, crew_dir: Path) -> int:
             print(json.dumps(receipts, ensure_ascii=False, indent=2))
         return EXIT_OK
     if mark_result is not None:
+        # S1：默认只回计数与游标路径（200+ 条回显约 17KB 噪声）；--verbose 保留旧展开能力。
         line = f"已读游标：标记 {len(mark_result['marked'])} 条"
-        if mark_result["marked"]:
+        if args.verbose and mark_result["marked"]:
             line += f"（{', '.join(mark_result['marked'])}）"
         line += (
             f"，此前已读 {len(mark_result['already_read'])} 条；"
             f"游标 {mark_result['cursor']}"
         )
         print(line)
+        if not args.verbose:
+            print("（标记明细用 --verbose 展开；结构化用 --json）")
+            return EXIT_OK
     if not receipts:
         print("(无未读回执)" if args.unread else "(无回执)")
         return EXIT_OK
@@ -1430,6 +1448,13 @@ status=captain 表示 ⏸ 待 Captain。回执先原子落盘，推送失败不�
         "--finding", action="append", default=[], metavar="TEXT", help="发现清单（可重复；无则留空）"
     )
     write.add_argument("--receipt-id", help="默认按时间+发送方自动生成")
+    write.add_argument(
+        "--handoff-read-bytes",
+        type=int,
+        default=None,
+        metavar="N",
+        help="可选：本次接手实际读取的交接字节数（非负 int；非法拒绝且不落文件）",
+    )
     write.add_argument("--to", help="推送目标 peer；不填只落文件")
     write.add_argument(
         "--target-runtime",
@@ -1461,6 +1486,11 @@ status=captain 表示 ⏸ 待 Captain。回执先原子落盘，推送失败不�
         action="store_true",
         help="配合 --mark-read：标记 --status 范围内全部回执；文件名 stem 与内容 "
              "receipt_id 均未命中的条目跳过并告警（rc=0）",
+    )
+    ls.add_argument(
+        "--verbose",
+        action="store_true",
+        help="配合 --mark-read：展开标记的 receipt_id 列表（默认只回计数与游标路径）",
     )
     ls.add_argument(
         "receipt_ids",

@@ -292,15 +292,16 @@ class OrderCompatTest(_TmpRepoTest):
         self.assertLess(board.index("## 待 Captain"), board.index("## 流表"))
 
     def test_stream_table_one_line_next_step_only(self):
-        # 流表与 --brief 同表头；Next Step 只留首条一句话，不塞多条 todo
+        # 流表与 --brief 同表头；Next Step 只留未完成首条一句话（S5：跳过 - [x]，
+        # 已完成折叠计数），不塞多条 todo
         body = chain_body(SAMPLE_ROWS, title="流 plan A",
                           next_step="- [x] 件一完成（已推送）\n- [ ] 件二进行中")
         board = self._render({"x-portfolio": portfolio_body(), "stream-a": body})
         table = board.split("## 流表", 1)[1].split("## 最近完成", 1)[0]
         self.assertIn(ps.BRIEF_TABLE_HEADER, table)
         self.assertIn("| 流A |", table)
-        self.assertIn("件一完成", table)
-        self.assertNotIn("件二进行中", table)  # 只留首条
+        self.assertIn("件二进行中（另有 1 条已完成）", table)  # 未完成首条 + 折叠计数
+        self.assertNotIn("件一完成", table)  # 已完成项不再充当下一步
 
     def test_stream_todo_details_not_exported(self):
         # 各流 todo 全量 bullet 不再进看板；详情由证据/plan 指针承载
@@ -309,9 +310,9 @@ class OrderCompatTest(_TmpRepoTest):
             next_step="- [x] 件一完成（已推送）\n- [ ] 件二进行中\n- 件三普通行\n- [⏸] 件四放行")
         board = self._render({"x-portfolio": portfolio_body(), "stream-a": body})
         self.assertNotIn("#### ", board)
-        self.assertNotIn("件二进行中", board)
-        self.assertNotIn("件三普通行", board)
-        self.assertIn("件一完成", board)
+        self.assertIn("件二进行中", board)  # S5：未完成首条做下一步（单行摘要）
+        self.assertNotIn("件三普通行", board)  # 首条之后的行不导出
+        self.assertNotIn("件一完成", board)  # 已完成项不进下一步
         self.assertIn("详情 grep", board)
 
     def test_deviation_lifecycle_coexists(self):

@@ -358,8 +358,8 @@ HANDOVER_WHITELIST_ITEMS = (
     "只读白名单＝`python3 scripts/plan-status.py --brief` 一屏",
     "`python3 scripts/plan-status.py --handover` 摘要",
     # S-5：Status grep 仅是核对手段，不计入交接必读预算（语义等价迁移，仍锁白名单项）。
-    "活跃流 plan 的 Next Step 首条（grep；Status 仅核对进度时按需 grep，"
-    "不计入交接必读预算）",
+    "活跃流 plan 的 Next Step **未完成**首条（跳过 `- [x]` 已完成项，折叠计数；"
+    "grep；Status 仅核对进度时按需 grep，不计入交接必读预算）",
     "feedback 待复盘条目（grep）",
     "`<crew-dir>/guard.handoff`",
     "看板仅按关键词 grep",

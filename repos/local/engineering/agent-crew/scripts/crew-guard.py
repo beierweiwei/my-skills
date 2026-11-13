@@ -1537,7 +1537,8 @@ class Guard:
             "单文件 >20KB 不整读；看板仅按关键词 grep。\n"
             "交接必读 ≤32KB（含 `--handover` 输出与必读文件），超阈值先摘要/grep、"
             "写明只读段再定向补读。\n"
-            "完成接手首报（当前进度/在跑 agent/待办/下一步），首报前不接新活；"
+            "完成接手首报（当前进度/在跑 agent/待办/下一步，须带 handoff_read_bytes=<n>），"
+            "首报前不接新活；"
             "首报后 guard 会确认并关闭旧舵 pane 与旧 tab。"
         )
         code, output, error = self.dispatch(

@@ -301,8 +301,14 @@ class HandoverTest(_TmpRepoTest):
         self.assertEqual(rc, 0)
         self.assertLessEqual(len(out.splitlines()), ps.HANDOVER_MAX_LINES)
         recent = out.split("## 最近 progress", 1)[1].split("## 最近完成", 1)[0]
-        for needle in ("条目 001", "条目 002", "条目 003", "续行尾-TAIL-MARK"):
+        for needle in ("条目 001", "条目 002", "条目 003"):
             self.assertIn(needle, recent)
+        # S4 起输出自身硬 ≤8KB（渲染层另按 512 字符 clip）：扩窗正确性在读取层断言，
+        # 第 3 条跨边界续行尾必须完整。
+        blocks = ps._recent_progress(repo / ".planning/portfolio/progress.md")
+        self.assertEqual(len(blocks), 3)
+        self.assertIn("续行尾-TAIL-MARK", blocks[2])
+        self.assertLessEqual(len(out.encode("utf-8")), ps.HANDOVER_MAX_BYTES)
 
     def test_fallback_top_entries_stop_at_heading(self):
         # 无 `## 自动驾驶里程` 节：按日期前缀全文件兜底取顶部 3 条；

@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.2.29 — 2026-11-14
+
+上下文瘦身批（CASE 新舵接手 188k 实测驱动）：工具输出默认瘦身 + 交接读取口径，所有默认瘦身均保留显式展开开关（`--verbose`/`--all`/`--full`/`--json` 不变，不删调试能力、不破坏机器解析）。
+
+### 变更
+
+- **S1 `crew-msg.py ls --mark-read` 默认只回计数**：默认输出仅「标记 N 条 + 游标路径」（原 219 条回执全回显 ≈17KB）；`--verbose` 保留旧展开能力；`--json` 结构不变。
+- **S2 `dispatch.py status` 默认只列在线 agent**（working/idle/blocked/pending），历史/done 折叠为「历史/done N 个（--all 展开）」计数行；新增 `--all` 展开全量；`--json` 保持全量结构并新增 `agentsDetail`。
+- **S3 `crew-preflight.py` 未读展示默认 ≤3 条** + 「…另有 N 条（--full 展开）」；新增 `--full` 展开全量；`--json` 结构不变。
+- **S4 `plan-status.py --handover` 人类输出硬上限 32KB→8KB**：超限按既有 SHRINK_STEPS 确定性收缩 + 硬截断并标注「已截断，详情见 plan」；必读预算 32KB 语义不变（封顶/超预算判定与阈值显示仍按 32768，完整信息在 plan）；helm 模板「输出自身硬 ≤8KB」同步。
+- **S5 交接 Next Step 只取未完成首条**：`--handover` 活跃流/portfolio Next Step 与 `--brief` 流表同口径——跳过 `- [x]`/`- ✅`/行首 `✅`（容忍缩进空行），已完成项折叠计数「（另有 N 条已完成）」；helm 三 runtime 模板「Next Step **未完成**首条（跳过 `- [x]` 已完成项，折叠计数；grep）」+ firstmate 三 runtime 换舵段同步。
+- **S6 首报带 `handoff_read_bytes=<n>`**：`crew-msg.py write` 新增可选 `--handoff-read-bytes <int>`（非负 int 校验，非法拒绝且不落文件；字段可选不阻断旧调用）；helm 三 runtime 模板首报格式 + guard 继任 prompt 同步提醒。
+
 ## 2.2.28 — 2026-11-14
 
 批修：FB-051/052/053/054/041+048(a)/042/043/055/057 + T65 + T69（S1–S7 修复批，含两轴评审与 subA/subB 互检共 13 项收敛）+ S9 工位 cwd 修复（AMEND-5）+ AMEND-6 compact 操作口径进两层剧本。

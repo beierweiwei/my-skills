@@ -32,7 +32,8 @@ ps = importlib.util.module_from_spec(_spec)
 sys.modules["plan_status_2219_handover"] = ps  # dataclass 注解解析需要模块已注册
 _spec.loader.exec_module(ps)
 
-BUDGET = 32768
+OUTPUT_CAP = 8192      # S4：`--handover` stdout 硬上限（原 BUDGET 断言改 8192）
+THRESHOLD = 32768      # 必读预算阈值（语义不变）
 HELM = (
     "templates/agents/qoder/helm.md",
     "templates/agents/opencode/helm.md",
@@ -193,7 +194,7 @@ class HandoverStructureTest(_TmpRepoTest):
         repo = self._repo()
         rc, out, err = run(repo, "--handover")
         self.assertEqual(rc, 0, err)
-        self.assertLessEqual(len(out.encode("utf-8")), BUDGET)
+        self.assertLessEqual(len(out.encode("utf-8")), OUTPUT_CAP)
         for header in ("## Goal", "## Next Step", "## 活跃流", "## 待 Captain",
                        "## 未处理通知", "## 最近 progress", "## 最近完成",
                        "## 证据入口", "## 看板", "## 交接必读预算"):
@@ -298,19 +299,19 @@ class HandoverFeedbackCapTest(_TmpRepoTest):
         _rc, out_ten, _err = run(ten, "--handover")
         fields_ten = budget_fields(out_ten)
         self.assertEqual(ps.HANDOVER_FEEDBACK_MAX_BYTES, fields_ten["feedback"])
-        self.assertLessEqual(fields_ten["total"], BUDGET)  # A1：total 也硬 ≤32KB
+        self.assertLessEqual(fields_ten["total"], THRESHOLD)  # A1：total 也硬 ≤32KB
         self.assertIn("已封顶", out_ten)
         self.assertIn("其余按需 grep", out_ten)
         self.assertIn("超预算", out_ten)  # 原始必读仍超 → 摘要/grep 提示保留
-        self.assertLessEqual(len(out_ten.encode("utf-8")), BUDGET)
+        self.assertLessEqual(len(out_ten.encode("utf-8")), OUTPUT_CAP)
 
         # 20 行（前 10 行内容相同 + 追加 10 行）不得继续推高 feedback 分项。
         more = self._repo(20)
         _rc, out_more, _err = run(more, "--handover")
         fields_more = budget_fields(out_more)
         self.assertEqual(fields_ten["feedback"], fields_more["feedback"])
-        self.assertLessEqual(fields_more["total"], BUDGET)
-        self.assertLessEqual(len(out_more.encode("utf-8")), BUDGET)
+        self.assertLessEqual(fields_more["total"], THRESHOLD)
+        self.assertLessEqual(len(out_more.encode("utf-8")), OUTPUT_CAP)
 
 
 class CappedHonestyTest(_TmpRepoTest):
@@ -349,8 +350,8 @@ class CappedHonestyTest(_TmpRepoTest):
         self.assertEqual(0, _rc, err)
         fields = budget_fields(out)
         raw = raw_budget_fields(out)
-        self.assertLessEqual(fields["total"], BUDGET)
-        self.assertLessEqual(len(out.encode("utf-8")), BUDGET)
+        self.assertLessEqual(fields["total"], THRESHOLD)
+        self.assertLessEqual(len(out.encode("utf-8")), OUTPUT_CAP)
         self.assertEqual(20480, raw["handoff"])  # 被截分项原值 = 文件真实字节
         self.assertGreater(raw["raw_total"], fields["total"])  # 封顶前必读更高
         self.assertEqual(raw["raw_total"], sum(raw[key] for key in (
@@ -371,7 +372,7 @@ class CappedHonestyTest(_TmpRepoTest):
         _rc, out, _err = run(repo, "--handover")
         raw = raw_budget_fields(out)
         self.assertEqual(61440, raw["handoff"])
-        self.assertGreater(raw["raw_total"], BUDGET)
+        self.assertGreater(raw["raw_total"], THRESHOLD)
         capped = next(line for line in out.splitlines() if "已封顶" in line)
         self.assertIn("handoff", capped)
         self.assertNotIn("feedback 待复盘命中", capped)
@@ -415,14 +416,14 @@ class RawBudgetBoundaryTest(_TmpRepoTest):
     def test_raw_total_exact_boundary(self):
         base = self._base()
         # 单行 feedback 使 raw_total 恰好落在阈值线上（cost 含行尾换行）。
-        at_limit = self._repo("at-limit", feedback_cost=BUDGET - base)
+        at_limit = self._repo("at-limit", feedback_cost=THRESHOLD - base)
         _rc, out_ok, _err = run(at_limit, "--handover")
         self.assertNotIn("超预算", out_ok)
-        self.assertEqual(BUDGET, raw_budget_fields(out_ok)["raw_total"])
-        one_over = self._repo("one-over", feedback_cost=BUDGET + 1 - base)
+        self.assertEqual(THRESHOLD, raw_budget_fields(out_ok)["raw_total"])
+        one_over = self._repo("one-over", feedback_cost=THRESHOLD + 1 - base)
         _rc, out_over, _err = run(one_over, "--handover")
         self.assertIn("超预算", out_over)
-        self.assertEqual(BUDGET + 1, raw_budget_fields(out_over)["raw_total"])
+        self.assertEqual(THRESHOLD + 1, raw_budget_fields(out_over)["raw_total"])
 
 
 class HandoverExtremeTest(_TmpRepoTest):
@@ -444,13 +445,18 @@ class HandoverExtremeTest(_TmpRepoTest):
             ),
         }
         for i in range(1, 10):
+            # S4：输出硬 ≤8KB——流 1 保留超长 Next Step 验证 clip；流 2–9 短 Next Step
+            # 使浅收缩档即可收敛（max_streams=8 语义与「另有 1 个活跃流」断言保持）。
             plans[f"stream-{i}"] = stream_body(
                 [("阶段一", "complete"),
-                 ("阶段二 " + "阶" * 50000, "in_progress")],
-                next_step=f"流{i}下一步-START " + "推" * 50000,
+                 ("阶段二 " + ("阶" * 50000 if i == 1 else ""), "in_progress")],
+                next_step=(f"流{i}下一步-START " + "推" * 50000 if i == 1
+                           else f"流{i}推进下一条。"),
             )
+        # S4：输出硬 ≤8KB——progress 渲染条目缩短使「预算已封顶」行在输出内可见；
+        # raw_total 仍超 32KB 阈值（feedback 10 行 × 数 KB），封顶/超预算提示不受影响。
         progress = progress_body([
-            (f"2026-11-0{i}", f"超长进度 {i} " + "进" * 30000)
+            (f"2026-11-0{i}", f"超长进度 {i} " + "进" * 150)
             for i in range(1, 4)
         ])
         repo = make_repo(self.tmp, plans, progress=progress)
@@ -464,9 +470,9 @@ class HandoverExtremeTest(_TmpRepoTest):
 
         _rc, out, err = run(repo, "--handover")
         self.assertEqual(0, _rc, err)
-        self.assertLessEqual(len(out.encode("utf-8")), BUDGET)
+        self.assertLessEqual(len(out.encode("utf-8")), OUTPUT_CAP)
         fields = budget_fields(out)
-        self.assertLessEqual(fields["total"], BUDGET)  # A1：病理夹具 total 也硬 ≤32KB
+        self.assertLessEqual(fields["total"], THRESHOLD)  # A1：病理夹具 total 也硬 ≤32KB
         self.assertIn("已封顶", out)
         self.assertIn("其余按需 grep", out)
         for header in ("## Goal", "## Next Step", "## 活跃流", "## 待 Captain",
@@ -502,7 +508,7 @@ class TemplateRulesSyncTest(unittest.TestCase):
                     line for line in text.splitlines() if "读取量预算（硬）" in line)
                 self.assertIn("实际要求读的段", budget)
                 self.assertIn("整看板/整 plan 不计入", budget)
-                self.assertIn("输出自身硬 ≤32KB", budget)
+                self.assertIn("输出自身硬 ≤8KB", budget)
                 self.assertIn("已截断，详情见 plan", budget)
 
     def test_plan_discipline_and_crew_rules_synced(self):
@@ -526,7 +532,7 @@ class TemplateRulesSyncTest(unittest.TestCase):
             whitelist = next(
                 line for line in read(rel).splitlines() if "交接读取范围（硬）" in line)
             with self.subTest(rel=rel):
-                self.assertIn("Next Step 首条", whitelist)
+                self.assertIn("Next Step **未完成**首条", whitelist)
                 self.assertIn("Status 仅核对", whitelist)
                 self.assertIn("不计入", whitelist)
 
