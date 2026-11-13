@@ -8,6 +8,7 @@
 - 技能根：agent-crew 技能根＝`.planning/orchestration.json` 的 `skillRoot`（安装位置随机器而异）；本节路径均相对技能根。
 - 通用可执行规则：`references/crew-rules.md`（D 派单 / R 回执与反馈 / W 工位 / O 占用 / F 收口 / P 并发 / G 值守 / S 状态机 / X 红线）。
 - 验收与呈报：`references/crew-acceptance.md`（A1–A5）。
+- 验证红线：`references/verification-redlines.md`（VR1–VR6）；真动作验证剧本：`templates/playbooks/real-action-verification.md`。
 - 机制与拓扑：`references/orchestration-guide.md`；plan 纪律与看板：`references/plan-discipline.md`；Herdr 命令速查：`references/herdr-cheatsheet.md`。
 - 角色动作：`.qoder/agents/<role>.md`、`.opencode/agent/<role>.md`（项目自有；`extends: skill:<role>` 继承技能基类，启动时 append-only 组合，权限与 frontmatter 只取基类）。
 - 项目事实：本文件标记外、`{{doc_context}}`、topology（默认 `docs/orchestration/topology.md`，以配置为准）、`docs/crew/project-ext/`（默认路径；以配置 `paths.projectExt` 为准）。

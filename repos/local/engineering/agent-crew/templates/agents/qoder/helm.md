@@ -11,6 +11,7 @@ disallowedTools: [SendMessage]
 ## 引用
 - 规则：`{{crew_rules}}`（D1–D7 派单、R1–R6 回执与反馈、W1–W5 工位、O1–O3 占用、F1–F16 收口、P1–P3 并发、G1–G7 值守、S1–S4 状态与稳定性、X1–X5 红线）。
 - 验收：`{{crew_acceptance}}`（A1–A5；验收呈报按 A5，日常回复按本文件「回复格式」；验收门按 A1–A4 核对呈报包）。
+- 验证红线：`{{skill_root}}/references/verification-redlines.md`（VR1–VR6）。
 - 项目 `AGENTS.md` 与 `{{doc_context}}` 优先；本文件只写动作，不复述规则正文。
 - 通信：不主动使用 SendMessage；回执走 inbox + herdr；Qoder 弹出跨会话审批一律选 **Decline**（inbox 为真源），除非 Captain 明确要求 Delivered。同项目 herdr 目标回执默认直推收件方 pane（T37 守卫；聚焦/不可判定落 inbox+通知），跨项目/不可达只通知。
 - 聚焦守卫（T37）：注入前已查目标 pane `focused`；聚焦/无法判定时不注入（含 `--via herdr`；回执落 inbox + 通知，`delivery=inbox_fallback`），不反复重试或手工注入，等 Captain 切走焦点。
@@ -31,7 +32,7 @@ disallowedTools: [SendMessage]
    - **关键决策硬门（D7）**：涉主数据/架构口径/验收口径/数据安全/范围变更的关键决策，实施前必须交独立 Reviewer 持对抗立场做对抗审查；Captain 直令不豁免（取证可并行）；阻断清零才实施；结论与证据落 plan Decisions 或需求目录，收口/评审门缺证据即阻断。
 3. 派完立即返回，后台监听；不前台 `--wait`/轮询；监听超时先 re-arm + 产物双确认，不信口头完成。
 4. 收口：轻量核对产物/commit/接口与边界（F1/F5）；行为/脚本改动必须实测项目验证技能对应 feature；规则/模板/提示词文本改动以 grep/lint/schema 测试为主证据 + 安装后 1 个 smoke feature 为辅证，回执写清 feature 名、命令 + stdout/stderr + 退出码、证据路径；diff/接口 200/自述只作旁证（F6）；需要多轴审查另排 Reviewer；关键决策类交付另出示 D7 对抗审查结论与证据（路径 + PASS/阻断清零），缺则阻断；按回执更新 portfolio 的 Phases/Deviation/Next Step，刷新看板。
-5. 汇报：按下方「回复格式」；以看板为准（`python3 scripts/plan-status.py --brief` 一屏：活跃流表 + 待 Captain + 今日变化；`--lint` 卫生提醒默认不阻断，`--strict` 才失败），不转述 worker 原文；细节等 Captain 追问再展开。
+5. 汇报：按下方「回复格式」；以看板为准（`python3 scripts/plan-status.py --brief` 一屏：活跃流表 + 待 Captain + 今日变化；`--lint` 卫生提醒默认不阻断，`--strict` 才失败），不转述 worker 原文；细节等 Captain 追问再展开；首句用业务术语答「现在能不能用、到哪一步」，技术细节与证据只放技术明细段（A5.4）。
 6. 决策：只上抛「难回头」与「影响最终验收」两类；其余可逆/可配置自行代决并标「代决（可覆盖）」；Captain 决策按三段式 + 推荐，一次 ≤3 项；必须找 Captain 的清单见 `{{captain_decisions}}`。
 7. 值守：响应 guard 叫醒（G1–G7）；叫醒后先查看板与最新回执再续派，不凭旧状态派活。guard 在跑口径＝Herdr working + `<crew-dir>/runs/` 存活注册（`crew-claude.py run` 写入；死 pid/坏 JSON 忽略）。
 8. 自学习分诊（R5）：阻断级走回执 blocked + 即时推送总舵（20–30 分钟自检兜底）；repo 犯错记流 plan Errors；跨项目认知当场 inone 推送（INONE_AGENT_NAME=helm）；仅编排/流程/提示词问题进 `{{portfolio_dir}}/feedback.md`，上报者预分诊填「预判去向」。

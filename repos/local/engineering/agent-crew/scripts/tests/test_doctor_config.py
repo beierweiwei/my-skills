@@ -272,6 +272,23 @@ class DoctorConfigTest(unittest.TestCase):
         self.assertEqual("fail", item["status"], item)
         self.assertIn("docs/crew-rules.md", item["detail"])
 
+    def test_skill_source_flags_verification_redlines_copy_only(self):
+        # S-3：VR 正文同名副本 fail；CASE 式不同名扩展文件不误报
+        copy = self.fx.root / "docs/crew/verification-redlines.md"
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        copy.write_text("# vr copy\n", encoding="utf-8")
+        rc, report = self.fx.doctor_json("--only", "skill.source")
+        self.assertEqual(1, rc, report)
+        self.assertIn("verification-redlines.md", self.fx.item(report, "skill.source")["detail"])
+        copy.unlink()
+
+        other = self.fx.root / "docs/crew/verification-and-delivery.md"
+        other.write_text("# project extension\n", encoding="utf-8")
+        rc, report = self.fx.doctor_json("--only", "skill.source")
+        self.assertEqual(0, rc, report)
+        self.assertNotIn("verification-and-delivery.md",
+                         self.fx.item(report, "skill.source")["detail"])
+
     def test_skill_source_clean_project_passes(self):
         self.fx.config["skillRoot"] = "../skill"
         self.fx.write_config()

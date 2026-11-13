@@ -51,7 +51,7 @@ TEMPLATES = SKILL_DIR / "templates"
 MARK_START = "<!-- agent-crew:orchestration:start -->"
 MARK_END = "<!-- agent-crew:orchestration:end -->"
 MARK_PREFIX = "<!-- agent-crew:orchestration:"
-SKILL_VERSION_FALLBACK = "2.2.21"
+SKILL_VERSION_FALLBACK = "2.2.22"
 
 CONFIG_REL = Path(".planning/orchestration.json")
 MANIFEST_REL = Path("docs/crew/manifest.json")
@@ -115,7 +115,8 @@ SCRIPT_MANIFEST = [
     "release-check.py",
 ]
 COPY_BASENAMES = ("crew-rules.md", "crew-acceptance.md",
-                  "orchestration-guide.md", "plan-discipline.md")
+                  "orchestration-guide.md", "plan-discipline.md",
+                  "verification-redlines.md")
 
 DEFAULT_ROLES = {"enabled": list(ROLE_ORDER), "instances": {}}
 # 角色→模型映射（I 切片）：配置唯一落 orchestration.json；派单时由 helm/firstmate

@@ -314,6 +314,23 @@ class DispatchTest(unittest.TestCase):
         self.assertIn("## 职责边界", composed)
         self.assertIn("<!-- agent-crew:project-overlay -->", composed)
 
+    def test_compose_affected_roles_carry_verification_pointer(self):
+        # S-R3：五角色双栈组合通过且组合正文含 VR 实际路径（指针随基类交付）
+        for runtime in ("qoder", "opencode"):
+            for role in ("builder", "reviewer", "firstmate", "runner", "helm"):
+                if not self.role_path(runtime, role).is_file():
+                    self.write_role(runtime, role)
+                with self.subTest(runtime=runtime, role=role):
+                    rc, report = self.compose(role, runtime)
+                    self.assertEqual(0, rc, report)
+                    self.assertEqual([], report["unresolvedTokens"])
+                    outcome = dispatch_mod.build_compose(self.root, role, runtime)
+                    self.assertTrue(outcome.ok, outcome.errors)
+                    self.assertIn(
+                        str(self.skill / "references" / "verification-redlines.md"),
+                        outcome.composed_body,
+                    )
+
     # ---------- ③ token 渲染 ----------
 
     def test_tokens_render_to_real_paths_without_residue(self):

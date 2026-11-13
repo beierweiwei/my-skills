@@ -54,7 +54,7 @@ X4_SNAPSHOT = (
     "- **X4 不碰客户业务数据与凭据**：原始数据不全量读取，只取必要列/行；证据脱敏或哈希；"
     "客户敏感数据不得以原始形态入库。凭据/会话文件只允许存 `.scratch/`"
     "（0600，用 `install -m 600` 或 `chmod 600` 落盘）或平台 env；"
-    "禁止复制进沙箱、平台、共享目录或线程工作区；"
+    "禁止复制进沙箱、平台（含平台数据目录）、共享目录、线程工作区、仓库、证据与对话；"
     "「平台」指平台/CI 的密钥管理（环境变量或密钥服务）。"
     "「涉凭据」＝复制/移动/持久化/新增凭据或修改权限，必须上抛 Captain，不得代决；"
     "经 Captain 授权的平台 env 读取用于执行不算涉凭据。X4 优先于 F12。"
@@ -63,10 +63,14 @@ X4_SNAPSHOT = (
 )
 
 CREDENTIAL_BAN_PHRASES = {
-    "templates/agents/qoder/firstmate.md": "不复制进沙箱、平台、共享目录、线程工作区",
-    "templates/agents/opencode/firstmate.md": "不复制进沙箱、平台、共享目录、线程工作区",
-    "templates/agents/qoder/runner.md": "不在沙箱、平台、共享目录、线程工作区留凭据",
-    "templates/agents/opencode/runner.md": "不在沙箱、平台、共享目录、线程工作区留凭据",
+    "templates/agents/qoder/firstmate.md":
+        "不复制进仓库、证据、对话、沙箱、平台、共享目录、线程工作区",
+    "templates/agents/opencode/firstmate.md":
+        "不复制进仓库、证据、对话、沙箱、平台、共享目录、线程工作区",
+    "templates/agents/qoder/runner.md":
+        "不在仓库、证据、对话、沙箱、平台、共享目录、线程工作区留凭据",
+    "templates/agents/opencode/runner.md":
+        "不在仓库、证据、对话、沙箱、平台、共享目录、线程工作区留凭据",
 }
 
 # 字面量凭据文件名扫描（.example/.sample/.template 视为示例文件放行）。
@@ -249,7 +253,7 @@ class CredentialRedlineTest(unittest.TestCase):
             "0600",
             "install -m 600",
             "chmod 600",
-            "禁止复制进沙箱、平台、共享目录或线程工作区",
+            "禁止复制进沙箱、平台（含平台数据目录）、共享目录、线程工作区、仓库、证据与对话",
             "「平台」指平台/CI 的密钥管理",
             "「涉凭据」＝复制/移动/持久化/新增凭据或修改权限",
             "经 Captain 授权的平台 env 读取用于执行不算涉凭据",
@@ -263,7 +267,7 @@ class CredentialRedlineTest(unittest.TestCase):
             text = read(rel)
             for keyword in ("凭据/会话文件", ".scratch/", "0600", "上抛", "不动他人凭据"):
                 self.assertIn(keyword, text, f"{rel} 缺少：{keyword}")
-            for zone in ("沙箱", "平台", "共享目录", "线程工作区"):
+            for zone in ("仓库", "证据", "对话", "沙箱", "平台", "共享目录", "线程工作区"):
                 self.assertIn(zone, text, f"{rel} 缺少落点：{zone}")
             self.assertIn(CREDENTIAL_BAN_PHRASES[rel], text, f"{rel} 禁投落点不全")
 

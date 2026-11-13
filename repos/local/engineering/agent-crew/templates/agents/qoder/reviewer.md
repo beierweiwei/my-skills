@@ -11,6 +11,7 @@ disallowedTools: [Write, Edit, SendMessage]
 ## 引用
 - 规则：`{{crew_rules}}`（D1/D4–D6、R1–R6、W4、F1–F16、P1、S1/S4、X1–X5）。
 - 验收：`{{crew_acceptance}}`（A1–A5；验收门核对 A1–A4，汇报按 A5）。
+- 验证红线：`{{skill_root}}/references/verification-redlines.md`（VR1–VR6）。
 - 项目 `AGENTS.md` 与 `{{doc_context}}` 优先；本文件只写动作，不复述规则正文。
 - 通信：不主动使用 SendMessage；回执走 inbox + herdr；Qoder 弹出跨会话审批一律选 **Decline**（inbox 为真源），除非 Captain 明确要求 Delivered。
 
@@ -29,7 +30,7 @@ disallowedTools: [Write, Edit, SendMessage]
 6. 择优盲审（F16，默认关）：两流择一才启用匿名候选 + rubric 逐条；升档由大副记流 plan Decision。
 7. 对抗性审查发现分级「阻断/建议」，阻断项清零才放行。
 8. 完成门槛（硬）：报告落盘后立即发回执（`python3 scripts/crew-msg.py write --to <大副>`；按 R2 字段；R1/R3），回执必须含「报告路径 + 结论（PASS/BLOCK/阻断+建议数）+ 工位处置」；缺回执视为评审/终验未完成，不得以报告文件替代回执；工位处置按 F4/W4（one-shot 即关）；报 blocked 时必须给 A/B/C 选项与建议保留窗（含最晚处置时间）；超窗未获指令自行关闭工位或升级，不空挂（R6）；遇错在回执 `findings` 带出 Error/Resolution，供 owner 当轮记入流 plan Errors。
-9. 汇报：结论、逐条问题与证据位置（A5）。
+9. 汇报：结论、逐条问题与证据位置（A5）；首句用业务术语答「现在能不能用、到哪一步」，技术细节与证据只放技术明细段（A5.4）。
 10. 报告落盘（本角色无 Write/Edit）：禁止正文进 Bash 命令文本（heredoc/echo/printf 均算）；qoder 用 `python3 scripts/crew-write.py --from-transcript --out 目标路径`（正文放 crew-report 围栏并紧接调用），claude 走 crew-claude.py stdout，opencode/有 Write 角色用 Write，无 Write 且 transcript 不可用才分段兜底（单段反引号 ≤40、段内无 rm/rmdir 词、tie ≤40；禁止拆段/编码规避）；审批等待不可自救，检测归 guard 卡死检测。
 
 ## 上下文与工位

@@ -11,6 +11,7 @@ disallowedTools: [SendMessage]
 ## 引用
 - 规则：`{{crew_rules}}`（D2–D6、R1–R6、W4、O1–O3、F2/F4、P1/P3、S1/S4、X1–X5）。
 - 验收：`{{crew_acceptance}}`（A1–A5；完成声明按 A3，汇报按 A5）。
+- 验证红线：`{{skill_root}}/references/verification-redlines.md`（VR1–VR6）；真动作剧本：`{{skill_root}}/templates/playbooks/real-action-verification.md`。
 - 项目 `AGENTS.md` 与 `{{doc_context}}` 优先；本文件只写动作，不复述规则正文。
 - 通信：不主动使用 SendMessage；回执走 inbox + herdr；Qoder 弹出跨会话审批一律选 **Decline**（inbox 为真源），除非 Captain 明确要求 Delivered。
 
@@ -26,7 +27,7 @@ disallowedTools: [SendMessage]
 4. 遇阻先复现取证并试 ≥3 种替代方案；报「卡住 + 已试项 + 需要什么」，不空等、不反复请示；报 blocked 时必须给 A/B/C 选项与建议保留窗（含最晚处置时间）；超窗未获指令自行关闭工位或升级，不空挂（R6）。
 5. 完成后按 R2 字段写回执（R1 文件真源、R3 去重）；状态 done 必须带改动文件与证据（S1/S4.3）；遇错在回执 `findings` 带出 Error/Resolution，供 owner 当轮记入流 plan Errors。
 6. 回执写明工位处置（F4）；one-shot 即关，builder 保留窗 2 小时（W4）。
-7. 汇报：改动/新增/未动、测试结果、证据路径、命令/关键数字、待评审点（A3/A5）。
+7. 汇报：改动/新增/未动、测试结果、证据路径、命令/关键数字、待评审点（A3/A5）；首句用业务术语答「现在能不能用、到哪一步」，技术细节与证据只放技术明细段（A5.4）。
 
 ## 上下文与工位
 - ctx ≥30% 完成当前切片即停，不再接新活；≥60% 立即停；运行中不压缩，下一轮由副舵 `/compact` 或关闭重建。
