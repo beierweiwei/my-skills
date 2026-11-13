@@ -126,7 +126,11 @@ def make_skill(base: Path) -> Path:
     for src, dst in (
         (QODER_TEMPLATES, skill / "templates/agents/qoder"),
         (OPENCODE_TEMPLATES, skill / "templates/agents/opencode"),
+        (SKILL_DIR / "templates" / "agents" / "claude",
+         skill / "templates/agents/claude"),
     ):
+        if not src.is_dir():
+            continue  # T57 前技能源无 claude 模板目录；缺目录时 fixture 跳过
         shutil.copytree(src, dst)
     for rel in (
         "templates/agents/qoder/builder.md",
@@ -258,6 +262,9 @@ class ProjectFixture:
     def role_path(self, runtime: str, role_id: str, custom: bool = False) -> Path:
         if runtime == "qoder":
             rel = Path(".qoder/agents") / ("custom" if custom else "") / f"{role_id}.md"
+        elif runtime == "claude":
+            name = f"custom-{role_id}" if custom else role_id
+            rel = Path(".claude/agents") / f"{name}.md"
         else:
             name = f"custom-{role_id}" if custom else role_id
             rel = Path(".opencode/agent") / f"{name}.md"
@@ -283,6 +290,8 @@ class ProjectFixture:
             descriptor.update(descriptor_extra)
         if runtime == "qoder":
             frontmatter = f"name: {role_id}\ndescription: project {role_id} overlay"
+        elif runtime == "claude":
+            frontmatter = f"name: {role_id}\ndescription: project {role_id} overlay"
         else:
             frontmatter = f"description: project {role_id} overlay\nmode: primary"
         if frontmatter_extra:
@@ -299,16 +308,22 @@ class ProjectFixture:
     def write_composed_agents(self) -> list[dict]:
         entries: list[dict] = []
         for runtime, role in (("qoder", "builder"), ("qoder", "reviewer"),
-                              ("opencode", "firstmate")):
+                              ("opencode", "firstmate"), ("claude", "builder")):
             outcome = dispatch_mod.build_compose(self.root, role, runtime)
             if not outcome.ok:
-                continue
+                continue  # T57 前无 claude 栈支持；缺失时 fixture 宽容跳过
             desc = dispatch_mod.scalar(
                 outcome.base_frontmatter["fields"].get("description", "")) or role
-            if runtime == "qoder":
-                rel = Path(".qoder/agents/crew") / f"{role}.md"
+            if runtime == "opencode":
+                rel = Path(".opencode/agent") / f"crew-{role}.md"
+                text = f"---\n{outcome.base_frontmatter['raw'].strip()}\n---\n{outcome.composed_body}"
+            else:
+                if runtime == "qoder":
+                    rel = Path(".qoder/agents/crew") / f"{role}.md"
+                else:
+                    rel = Path(".claude/agents") / f"crew-{role}.md"
                 descriptor = {
-                    "id": f"crew-{role}", "runtime": "qoder", "composed": True,
+                    "id": f"crew-{role}", "runtime": runtime, "composed": True,
                     "managed": True, "source": outcome.report.get("baseSource"),
                     "override": outcome.role_path.relative_to(self.root).as_posix(),
                 }
@@ -317,9 +332,6 @@ class ProjectFixture:
                         "<!-- crew-role\n"
                         f"{json.dumps(descriptor, ensure_ascii=False)}\n-->\n"
                         f"{outcome.composed_body}")
-            else:
-                rel = Path(".opencode/agent") / f"crew-{role}.md"
-                text = f"---\n{outcome.base_frontmatter['raw'].strip()}\n---\n{outcome.composed_body}"
             path = self.root / rel
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text, encoding="utf-8")

@@ -1,5 +1,34 @@
 # Changelog
 
+## 2.2.27 — 2026-11-13
+
+T57：dispatch claude runtime 三栈一等公民（切片 A+B 同批，评估报告方案 A）。修复 R1（claude statusline ctx 假 0 → guard 自动交接静默失效）与 R2（guard 交接按 runtime=qoder 单值假设错启动继任舵）两枚阻断级连锁风险；顺带 T64（idle 兜底默认 10→60 分钟）。
+
+### 新增
+
+- **dispatch claude 交互工位**：`--runtime claude` 全链一等公民——compose/start/prompt/close/托管；`deliver_claude`（herdr `--kind claude` 启动 + 首条消息注入 `.claude/agents/crew-<role>.md` 角色装配，沿 helm-9 过渡验证路径）；模型经 `-- --model` 透传（T56 口径）；`--permission-mode` 归一化 claude 形态（`bypass_permissions`→`bypassPermissions`）；组合产物守卫（`.claude/agents/crew-<role>.md` 缺失/过期拒绝）。
+- **runtime 三栈化**：`RUNTIMES=("qoder","opencode","claude")`；`role_file_path`/`locate_role`/`discover_roles`/`registry_runtime_resolution`/`PROJECT_FRONTMATTER_FIELDS` 三元化；R7 backwards——旧过渡记录 `runtime=qoder+actualRuntime=claude` 读作 claude（`effective_runtime` 单点兼容，actualRuntime 不再写入，close 后自然淘汰）；解析到无文件 runtime 时干净拒绝（不 IndexError）。
+- **技能模板 claude 栈**：`templates/agents/claude/` 7 个角色基类（对照 qoder 栈语义：通信/审批/报告落盘/模型通道按 claude 交互工位改写）。
+- **`.claude/agents` 生成链（评估 N2）**：init `role_stub_path`/`composed_agent_path`/`composed_agent_text`/stub 与 roleStubs 枚举三栈化——claude 组合产物含基类 `disallowedTools`；upgrade 经 regenerate 自动带出（N2 手工快照漂移根治）。
+- **doctor 三栈**：`role_entries`/`nested_role_files`/`check_role_composed` 认 `.claude/agents`（crew-* 组合产物跳过、custom-* 识别）；新增 `role.discovery.claude`（落点规范）与 `runtime.legacy-registry`（旧过渡记录一次性 warn 提示清理，不自动改写）。
+
+### 修复
+
+- **R1 statusline ctx 取值（阻断级，my-skills 仓）**：`scripts/statusline.js` contextUsage 对齐 claude code 官方 stdin schema——`total_input_tokens`（ctx 口径 input 含 cache 读写）首选；`current_usage` input-only 三项和（剔除旧链误加的 `output_tokens`）；未上报态（total=0 + cu=null + pct=null）返回 unknown 渲染 `--`（不再产出假 `0/1M` 让 guard ratio 恒 0）；0 假 pct 真时按官方百分比反推。附 `STATUSLINE_PAYLOAD_LOG` 落盘采集开关（每 session 3 条样本）。
+- **R2 guard 交接连锁（阻断级）**：`crew-guard.py` 交接 start_args 继承现役舵 runtime（`handoff_start_args`：claude→`bypassPermissions`+`--runtime claude`；opencode 不传 qoder 形态旗标；未知→现状）；`_helm_runtime` 走 R7 backwards 读法。R1+R2 同批交付（单独上线任一=把「不交接」变「错交接」）。
+- **T64（顺带）**：guard 空闲兜底 `idleWakeRounds` 默认 5→30（120s×30=60 分钟，对齐 Captain「每小时心跳」口径；本仓 `.planning/orchestration.json` 已配置 30 实证）。
+- **R6 过渡口径**：claude 工位审批对话框检测不到（crew_approvals 只解析 qodercli 日志）——过渡规则=注入前人工确认（orchestration-guide §5.11.2 + claude 模板提示词已写入）；transcripts 数据链留 TODO 后置票。
+
+### 文档
+
+- orchestration-guide §5.11 双→三 runtime 判读 + claude 审批过渡口径；herdr-cheatsheet「backend=claude 两条通道」（headless vs 交互工位）；qoder/opencode/claude 模板 `--runtime` 指引更新。
+
+### 测试
+
+- 新增 4 文件 40 用例：`test_t57_dispatch_claude.py`（三栈解析/backwards/并列拒绝/deliver_claude argv/产物守卫/permission 归一化）、`test_t57_guard_handoff_runtime.py`（effective_helm_runtime/handoff_start_args/T64/交接集成 R2 实证）、`test_t57_doctor_claude.py`（discovery/composed/names/legacy-registry warn）、`test_t57_init_claude_products.py`（路径契约/产物 descriptor/regenerate/manifest 登记）。
+- 既有回归更新：`test_2218_fb043_compose_runtime.py` 两套→多套文案、`test_crew_guard.py` idleWakeRounds 默认 30。
+- 版本 2.2.27：`SKILL.md` frontmatter 与标题、`init.py` fallback、本段、`test_crew_lint.py`、`test_220_final.py`、`test_224_retro.py`、`test_225_patch.py`、`test_2214_guard_presence.py` 版本断言同步。
+
 ## 2.2.26 — 2026-11-13
 
 批修四项（T63+T58+T61+T62）。T63 为 P1（Captain 两次质疑「熄火了吗/你也没被叫醒」）：全仓 Backlog 全标 ⏸ 排队时待办=0，三条叫醒通道全哑，安静期零可见性；AMEND 补充根因口径与 ⏸ 两态规则。

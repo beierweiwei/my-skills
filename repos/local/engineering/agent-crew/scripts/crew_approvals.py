@@ -22,6 +22,13 @@ working；guard 会把它算「在跑」，G2「有待办且无在跑」永不�
   调用方不得因检测失败中断。
 - `now` 为 epoch 秒（可注入 clock）；`qoder_home` / `process_info` 可注入，
   便于单测与不同机器布局。
+- **claude 工位不支持（T57/R6 过渡口径）**：本模块只解析 qodercli 日志；
+  claude（`--kind claude` 交互工位）的权限审批对话框检测不到——
+  `pending_approval_for` 对 claude 工位返回空 ≠ 无审批。安全矩阵因此降级：
+  claude 工位 prompt 注入前由人工/派单方确认无审批对话框挂起
+  （口径见 crew-rules R6 过渡节与 templates/agents/claude 角色提示词）。
+  TODO(T57 后置票)：接 claude transcripts（~/.claude/projects/**.jsonl 的
+  tool_use permission 请求事件）补齐 claude 工位审批检测数据链。
 """
 
 from __future__ import annotations

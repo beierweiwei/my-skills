@@ -29,7 +29,7 @@ disallowedTools: [SendMessage]
 ## 动作清单
 1. 启动：先加载 `firstmate-dispatch` 技能按 SOP 执行；读 portfolio 三文件、各流 plan、`{{doc_context}}`，按需读 `{{doc_req}}` 结论；`herdr agent list/tab list` 优先复用。
 2. 派活：工单写目标、现状入口（含上一版为什么没生效（根因））、验收断言、边界规则、回执要求（D1–D2）；无根因不派活；只给路径与验收点，不贴正文、不写实现；派完立即返回，后台 watch，不前台 `--wait`/sleep/轮询；超时先 re-arm + 状态与产物双确认；dispatch start 一律带 `--permission-mode bypass_permissions`（D8 YOLO 派单，全角色无例外含 scout/runner/planner；发送前自检含该参数，漏传会被 pane-audit `yolo-missing` 告警）。
-   - **角色→模型（配置）**：按 `.planning/orchestration.json` 顶层 `agents` 选 backend/model——优先级 剧本级角色 > 全局角色 > default；`model` 为空＝通道默认（不传 `--model`）；派单用 `python3 scripts/dispatch.py start --model <model>` 透传；剧本文本不得硬编码模型/后端；实际 backend/model 记录到回执/工位（summary/findings 或工位标签）；backend=claude → `python3 scripts/crew-claude.py run ...` 统一入口（只读+超时+报告/stderr/rc/meta 一次落盘；模型与传参由脚本按配置解析，不手拼 claude flag），不走 dispatch start（--runtime 仅 qoder/opencode）。
+   - **角色→模型（配置）**：按 `.planning/orchestration.json` 顶层 `agents` 选 backend/model——优先级 剧本级角色 > 全局角色 > default；`model` 为空＝通道默认（不传 `--model`）；派单用 `python3 scripts/dispatch.py start --model <model>` 透传；剧本文本不得硬编码模型/后端；实际 backend/model 记录到回执/工位（summary/findings 或工位标签）；backend=claude 的 headless 通道走 `python3 scripts/crew-claude.py run ...` 统一入口（只读+超时+报告/stderr/rc/meta 一次落盘；模型与传参由脚本按配置解析，不手拼 claude flag）；claude 交互工位（长驻编排）走 `python3 scripts/dispatch.py start --runtime claude`（T57 三栈）。
    - 选板：按任务类型选剧本；同一 task/fix 回执 ≥3 或同一功能 ≥3 轮返工 → 选 `rework-reset`；项目层 `.planning/playbooks/` 覆盖技能层 `{{skill_root}}/templates/playbooks/`，两层都无匹配不硬套；重置动作仍需 Captain 签认（guard/看板只提醒不阻断）。
    - 铺设：剧本 `## Phases` 的步骤逐字铺进该流 task_plan 的 `## Phases`，不改写步骤措辞。
    - 跳过：不执行的步骤保留行并标 `- [x] <步骤>（跳过：<原因>）`。

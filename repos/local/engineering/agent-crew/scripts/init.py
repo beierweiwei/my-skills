@@ -51,7 +51,7 @@ TEMPLATES = SKILL_DIR / "templates"
 MARK_START = "<!-- agent-crew:orchestration:start -->"
 MARK_END = "<!-- agent-crew:orchestration:end -->"
 MARK_PREFIX = "<!-- agent-crew:orchestration:"
-SKILL_VERSION_FALLBACK = "2.2.26"
+SKILL_VERSION_FALLBACK = "2.2.27"
 
 CONFIG_REL = Path(".planning/orchestration.json")
 MANIFEST_REL = Path("docs/crew/manifest.json")
@@ -797,12 +797,16 @@ def role_spec(role: str) -> dict:
 def role_stub_path(runtime: str, role: str) -> Path:
     if runtime == "qoder":
         return Path(".qoder/agents") / f"{role}.md"
+    if runtime == "claude":
+        return Path(".claude/agents") / f"{role}.md"
     return Path(".opencode/agent") / f"{role}.md"
 
 
 def composed_agent_path(runtime: str, role: str) -> Path:
     if runtime == "qoder":
         return Path(".qoder/agents/crew") / f"{role}.md"
+    if runtime == "claude":
+        return Path(".claude/agents") / f"crew-{role}.md"
     return Path(".opencode/agent") / f"crew-{role}.md"
 
 
@@ -818,19 +822,25 @@ def composed_agent_text(root: Path, runtime: str, role: str,
         raise InitError(f"组合基础代理失败（{runtime}/{role}）：{outcome.errors}")
     description = dispatch_lib.scalar(
         outcome.base_frontmatter["fields"].get("description", "")) or role
-    if runtime == "qoder":
+    if runtime in ("qoder", "claude"):
         descriptor = {
             "id": f"crew-{role}",
-            "runtime": "qoder",
+            "runtime": runtime,
             "composed": True,
             "managed": True,
             "source": outcome.report.get("baseSource"),
             "override": outcome.role_path.relative_to(root).as_posix(),
         }
+        fm_lines = [
+            f"name: crew-{role}",
+            f"description: {json.dumps(description, ensure_ascii=False)}",
+        ]
+        if runtime == "claude":
+            tools = dispatch_lib.parse_list(outcome.base_frontmatter, "disallowedTools")
+            if tools:
+                fm_lines.append(f"disallowedTools: [{', '.join(tools)}]")
         return (
-            "---\n"
-            f"name: crew-{role}\n"
-            f"description: {json.dumps(description, ensure_ascii=False)}\n"
+            "---\n" + "\n".join(fm_lines) + "\n"
             "---\n"
             "<!-- crew-role\n"
             f"{json.dumps(descriptor, ensure_ascii=False)}\n"
@@ -847,7 +857,7 @@ def regenerate_composed_agents(root: Path, skill_root: Path | None = None) -> li
     roles = config.get("roles") if isinstance(config.get("roles"), dict) else {}
     enabled = roles.get("enabled") if isinstance(roles.get("enabled"), list) else ROLE_ORDER
     generated: list[dict] = []
-    for runtime in ("qoder", "opencode"):
+    for runtime in ("qoder", "opencode", "claude"):
         for role in enabled:
             try:
                 dispatch_lib.locate_role(root, role, runtime)
@@ -884,6 +894,13 @@ def role_stub_content(runtime: str, role: str) -> str:
         f"{title}（{runtime} 项目角色 {role}：权限与动作基类由技能提供，正文追加项目指令）"
     )
     if runtime == "qoder":
+        frontmatter = (
+            "---\n"
+            f"name: {role}\n"
+            f"description: {description}\n"
+            "---\n"
+        )
+    elif runtime == "claude":
         frontmatter = (
             "---\n"
             f"name: {role}\n"
@@ -1622,7 +1639,7 @@ def _run_apply_locked(root: Path, source_dir: Path, templates: Path, skill_versi
         plan_write(Path("scripts") / name, src.read_text(encoding="utf-8"), f"脚本 {name}")
 
     # 项目角色 stub（仅缺失时）
-    for runtime in ("qoder", "opencode"):
+    for runtime in ("qoder", "opencode", "claude"):
         for role in ROLE_ORDER:
             rel = role_stub_path(runtime, role)
             if only is not None and rel not in only:
@@ -1725,7 +1742,7 @@ def _run_apply_locked(root: Path, source_dir: Path, templates: Path, skill_versi
                     "renderVersion": skill_version,
                 })
             role_stubs: list[dict] = []
-            for runtime in ("qoder", "opencode"):
+            for runtime in ("qoder", "opencode", "claude"):
                 for role in ROLE_ORDER:
                     rel = role_stub_path(runtime, role)
                     target = root / rel

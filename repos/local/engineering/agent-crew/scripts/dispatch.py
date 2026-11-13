@@ -6,7 +6,8 @@
            输出 hash/标题/残留 token/门禁报告；只读，不写项目、不写 agent-log。
   start    启动角色：配置 → 描述符 → 继承/门禁/frontmatter 校验 → compose →
            运行时使用 init/upgrade 安装的组合基础代理
-           （Qoder `crew-<role>` / opencode `crew-<role>`）→ agent-log。
+           （Qoder `.qoder/agents/crew/<role>` / opencode `crew-<role>` /
+           claude `.claude/agents/crew-<role>`）→ agent-log。
   prompt / notify / close / status / list / tab / pane  生命周期与工位操作（写 agent-log）。
   prompt   注入安全矩阵（2.2.21）：目标有未闭合 permission-ask → 拒绝注入（rc=2），
            agent-log 记 delivery=inbox_fallback，并推送 Herdr 通知。
@@ -69,10 +70,30 @@ PERMISSION_FIELDS = {
     "tools", "disallowedTools", "allowedTools", "permission", "permissions",
 }
 QODER_BASE_FIELDS = {"name", "description", "disallowedTools"}
+# T57：runtime 三栈（qoder/opencode/claude）；claude 交互工位沿 helm-9 过渡验证路径
+# （herdr --kind claude + 首条消息注入 .claude/agents/crew-<role>.md）
+RUNTIMES = ("qoder", "opencode", "claude")
 PROJECT_FRONTMATTER_FIELDS = {
     "qoder": {"name", "description"},
     "opencode": {"description", "mode"},
+    "claude": {"name", "description"},
 }
+
+
+def effective_runtime(info: object) -> str | None:
+    """registry 记录的有效 runtime；R7 backwards：旧过渡记录（T57 前
+    `runtime=qoder` + `actualRuntime=claude` 双轨）在新语义下读作 claude。
+
+    actualRuntime 仅在此读取点兼容存量记录（close 后自然淘汰，doctor 提示
+    清理）；新启动一律写如实 runtime，不再写 actualRuntime（双轨废除）。
+    """
+    if not isinstance(info, dict):
+        return None
+    actual = info.get("actualRuntime")
+    if actual in RUNTIMES:
+        return str(actual)
+    runtime = info.get("runtime")
+    return runtime if runtime in RUNTIMES else None
 
 # 核心角色默认能力/门禁/生命周期（arch-proposal-v1 §5.4）
 CORE_ROLES: dict[str, dict] = {
@@ -397,6 +418,9 @@ def token_context(root: Path, config: dict, skill_root: Path | None = None) -> d
 def role_file_path(root: Path, runtime: str, role_id: str, custom: bool) -> Path:
     if runtime == "qoder":
         parts = [".qoder", "agents"] + (["custom"] if custom else []) + [f"{role_id}.md"]
+    elif runtime == "claude":
+        name = f"custom-{role_id}" if custom else role_id
+        parts = [".claude", "agents", f"{name}.md"]
     else:
         name = f"custom-{role_id}" if custom else role_id
         parts = [".opencode", "agent", f"{name}.md"]
@@ -427,8 +451,8 @@ def registry_runtime_resolution(root: Path, role_id: str) -> dict:
     for agent, info in registry.items():
         if not isinstance(info, dict) or info.get("role") != role_id:
             continue
-        candidate_runtime = info.get("runtime")
-        if candidate_runtime not in ("qoder", "opencode"):
+        candidate_runtime = effective_runtime(info)
+        if candidate_runtime not in RUNTIMES:
             continue
         started = info.get("startedAt")
         stamp = started if isinstance(started, str) else ""
@@ -454,13 +478,14 @@ def locate_role(root: Path, role_id: str,
                 runtime: str | None) -> tuple[str, bool, Path, str | None]:
     """定位项目角色文件；返回 (runtime, 是否自定义, 路径, runtimeResolvedFrom)。
 
-    双 runtime 且未显式 --runtime 时按托管注册表最新现役记录解析；无依据或最新
-    记录并列则拒绝并给出 --runtime 指引。显式 --runtime 不读注册表。
+    多 runtime（qoder/opencode/claude）且未显式 --runtime 时按托管注册表最新
+    现役记录解析（旧过渡记录 actualRuntime 优先，见 effective_runtime）；无依据
+    或最新记录并列则拒绝并给出 --runtime 指引。显式 --runtime 不读注册表。
     """
     if not ROLE_ID_RE.match(role_id):
         raise DispatchError(f"非法角色 id：{role_id!r}（要求 {ROLE_ID_RE.pattern}）")
     candidates: list[tuple[str, bool, Path]] = []
-    for candidate_runtime in (runtime,) if runtime else ("qoder", "opencode"):
+    for candidate_runtime in (runtime,) if runtime else RUNTIMES:
         core = core_role_path(root, candidate_runtime, role_id)
         custom = custom_role_path(root, candidate_runtime, role_id)
         if role_id in CORE_ROLES:
@@ -474,22 +499,28 @@ def locate_role(root: Path, role_id: str,
             if core.is_file():
                 raise DispatchError(
                     f"角色落点不合法：{core.relative_to(root)}（自定义角色应落 "
-                    f".qoder/agents/custom/ 或 .opencode/agent/custom-<id>.md）"
+                    f".qoder/agents/custom/、.opencode/agent/custom-<id>.md 或 "
+                    f".claude/agents/custom-<id>.md）"
                 )
             if custom.is_file():
                 candidates.append((candidate_runtime, True, custom))
     if not candidates:
-        where = runtime or "qoder/opencode"
+        where = runtime or "/".join(RUNTIMES)
         raise DispatchError(f"角色文件不存在：{role_id}（runtime={where}）；先由 init 生成 stub")
     if len({item[0] for item in candidates}) > 1:
         resolution = registry_runtime_resolution(root, role_id)
         if "error" in resolution:
             raise DispatchError(
-                f"角色 {role_id} 同时存在于两套 runtime；注册表无法唯一判定现役 runtime："
+                f"角色 {role_id} 同时存在于多套 runtime；注册表无法唯一判定现役 runtime："
                 f"{resolution['error']}。先按现役总舵/该角色实际运行的 runtime 判定，"
-                "再显式指定：--runtime qoder 或 --runtime opencode"
+                "再显式指定：--runtime qoder、--runtime opencode 或 --runtime claude"
             )
         candidates = [item for item in candidates if item[0] == resolution["runtime"]]
+        if not candidates:
+            raise DispatchError(
+                f"注册表解析现役 runtime={resolution['runtime']}，但项目无该 runtime 的"
+                f"角色文件 {role_id}；先 init/迁移该 runtime 角色文件，或显式 --runtime 指定其他栈"
+            )
         resolved_from = resolution["source"]
     else:
         resolved_from = "flag" if runtime else "single-runtime"
@@ -545,6 +576,12 @@ def validate_project_frontmatter(parsed: dict, role_id: str, runtime: str,
             errors.append(f"{parsed['rel_path']}: Qoder frontmatter name={name!r} 必须等于 id {role_id!r}")
         if not scalar(fields.get("description", "")):
             errors.append(f"{parsed['rel_path']}: Qoder frontmatter 缺 description")
+    elif runtime == "claude":
+        name = scalar(fields.get("name", ""))
+        if name != role_id:
+            errors.append(f"{parsed['rel_path']}: Claude frontmatter name={name!r} 必须等于 id {role_id!r}")
+        if not scalar(fields.get("description", "")):
+            errors.append(f"{parsed['rel_path']}: Claude frontmatter 缺 description")
     else:
         if not scalar(fields.get("description", "")):
             errors.append(f"{parsed['rel_path']}: opencode frontmatter 缺 description")
@@ -1472,8 +1509,83 @@ def deliver_opencode(outcome: ComposeOutcome, name: str, pane: str, run_dir: Pat
     }
 
 
+# claude CLI permission-mode 枚举（snake → camel）；未知值原样透传
+CLAUDE_PERMISSION_MODE_ALIASES = {
+    "bypass_permissions": "bypassPermissions",
+    "accept_edits": "acceptEdits",
+    "default": "default",
+    "plan": "plan",
+}
+
+# 首注入消息（沿 helm-9 过渡验证路径；与 handover-helm9.md 实录同口径）
+CLAUDE_FIRST_INJECT_TEMPLATE = (
+    "你是新任 {name}（{role} 角色，claude 交互工位）。第一动作（本轮完成）：\n"
+    "完整读取 `{agent_rel}`，将其作为你的角色规范（职责边界/动作清单/回复格式）严格执行。\n"
+    "读完完成首报（角色/职责/当前待办），首报前不接新活。"
+)
+
+
+def deliver_claude(outcome: ComposeOutcome, name: str, pane: str,
+                   run_dir: Path, permission_mode: str | None,
+                   model: str | None = None) -> dict:
+    """claude 交互工位交付：herdr `--kind claude` 短参数启动 + 首条消息注入
+    `.claude/agents/crew-<role>.md` 角色装配（R5：沿 helm-9 过渡验证路径）。
+
+    首注入不查聚焦/审批守卫：工位为 dispatch 刚创建的新 pane（不聚焦），
+    新工位不存在审批对话框；注入失败不回滚启动（agent 已在运行），显式报错
+    给出人工补注入命令（不静默）。"""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    composed_path = run_dir / f"{outcome.role_id}.md"
+    composed_path.write_text(outcome.composed_body, encoding="utf-8")
+    agent_rel = Path(".claude/agents") / f"crew-{outcome.role_id}.md"
+    agent_path = outcome.root / agent_rel
+    if not agent_path.is_file() or outcome.composed_body not in agent_path.read_text(encoding="utf-8"):
+        raise DispatchError(
+            f"组合基础代理缺失或过期：{agent_rel.as_posix()}；先运行 init --yes 或 upgrade --apply")
+    argv = [
+        "herdr", "agent", "start", name,
+        "--kind", "claude",
+        "--pane", pane,
+    ]
+    tail: list[str] = []
+    mode = (permission_mode or "").strip()
+    if mode:
+        tail.extend(["--permission-mode",
+                     CLAUDE_PERMISSION_MODE_ALIASES.get(mode, mode)])
+    if model:
+        tail.extend(["--model", model])
+    if tail:
+        argv.extend(["--"] + tail)
+    run_herdr(argv)
+    first_message = CLAUDE_FIRST_INJECT_TEMPLATE.format(
+        name=name, role=outcome.role_id, agent_rel=agent_rel.as_posix())
+    try:
+        run_herdr(["herdr", "agent", "prompt", name, first_message])
+    except DispatchError:
+        raise DispatchError(
+            f"{name} 已启动但角色装配未注入（herdr prompt 失败）；人工补注入："
+            f"herdr agent prompt {name} '读 {agent_rel.as_posix()} 并按其履职'")
+    return {
+        "delivery": "composed-agent",
+        "composePath": str(run_dir),
+        "promptPath": str(composed_path),
+        "composedPath": str(agent_path),
+        "agentFile": str(agent_path),
+        "firstInject": agent_rel.as_posix(),
+    }
+
+
 def resolve_permission_mode(config: dict, explicit: str | None) -> tuple[str, str]:
-    """qoder 权限模式解析：显式 > 配置 agents.permissionMode > 空（通道默认）。"""
+    """qoder/claude 权限模式解析：显式 > 配置 agents.permissionMode > 空（通道默认）。"""
+    explicit = (explicit or "").strip()
+    if explicit:
+        return explicit, "explicit"
+    agents = config.get("agents")
+    if isinstance(agents, dict):
+        configured = agents.get("permissionMode")
+        if isinstance(configured, str) and configured.strip():
+            return configured.strip(), "config-default"
+    return "", ""
     explicit = (explicit or "").strip()
     if explicit:
         return explicit, "explicit"
@@ -1529,7 +1641,10 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
         permission_mode, permission_source = resolve_permission_mode(
             config, explicit_mode)
     if not args.pane:
-        hint = "目标 pane" if runtime == "qoder" else "split 源 pane（dispatch 负责创建带 OPENCODE_CONFIG_DIR 的 pane）"
+        if runtime == "opencode":
+            hint = "split 源 pane（dispatch 负责创建带 OPENCODE_CONFIG_DIR 的 pane）"
+        else:
+            hint = "目标 pane"
         raise DispatchError(f"{runtime} start 需要 --pane（{hint}）")
 
     name = args.name
@@ -1549,6 +1664,9 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
     if runtime == "qoder":
         delivery = deliver_qoder(outcome, name, args.pane, run_dir,
                                  permission_mode, model)
+    elif runtime == "claude":
+        delivery = deliver_claude(outcome, name, args.pane, run_dir,
+                                  permission_mode, model)
     else:
         delivery = deliver_opencode(outcome, name, args.pane, run_dir, model)
 
@@ -1887,10 +2005,13 @@ def discover_roles(root: Path) -> list[dict]:
         ("qoder", True, ".qoder/agents/custom/*.md"),
         ("opencode", False, ".opencode/agent/*.md"),
         ("opencode", True, ".opencode/agent/custom-*.md"),
+        ("claude", False, ".claude/agents/*.md"),
+        ("claude", True, ".claude/agents/custom-*.md"),
     ]
     for runtime, custom, pattern in patterns:
         for path in sorted(root.glob(pattern)):
-            if runtime == "opencode" and custom is False and path.name.startswith("custom-"):
+            if runtime in ("opencode", "claude") and custom is False \
+                    and path.name.startswith("custom-"):
                 continue
             text = path.read_text(encoding="utf-8")
             _, body = split_frontmatter(text)
@@ -2016,20 +2137,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     compose_p = sub.add_parser("compose", help="组合 dry-run（不启动、不写项目）")
     compose_p.add_argument("--role", required=True)
-    compose_p.add_argument("--runtime", choices=["qoder", "opencode"])
+    compose_p.add_argument("--runtime", choices=list(RUNTIMES))
     compose_p.add_argument("--json", action="store_true")
     compose_p.set_defaults(func=cmd_compose)
 
     start_p = sub.add_parser("start", help="启动角色（组合 + 运行时交付）")
     start_p.add_argument("--role", required=True)
-    start_p.add_argument("--runtime", choices=["qoder", "opencode"])
-    start_p.add_argument("--pane", help="Qoder 目标 pane；opencode 为 split 源 pane")
+    start_p.add_argument("--runtime", choices=list(RUNTIMES))
+    start_p.add_argument("--pane", help="Qoder/claude 目标 pane；opencode 为 split 源 pane")
     start_p.add_argument("--name", help="显式 Herdr/dispatch 实例名（默认 helm 用配置 helm.agentName，其余派生）")
     start_p.add_argument("--instance", type=int, help="同角色多实例编号（Herdr 名后缀）")
     start_p.add_argument("--permission-mode",
-                         help="透传 qodercli --permission-mode；缺省取配置 "
-                              "agents.permissionMode；opencode 由角色模板承担（传即拒绝 rc=2）")
-    start_p.add_argument("--model", help="透传运行时模型（qoder/opencode：-m <model>；空不传）")
+                         help="透传 qoder/claude --permission-mode（claude 侧归一化 "
+                              "bypassPermissions 等形态）；缺省取配置 agents.permissionMode；"
+                              "opencode 由角色模板承担（传即拒绝 rc=2）")
+    start_p.add_argument("--model", help="透传运行时模型（qoder/opencode：-m <model>；claude：--model <model>；空不传）")
     start_p.add_argument("--json", action="store_true")
     start_p.set_defaults(func=cmd_start)
 

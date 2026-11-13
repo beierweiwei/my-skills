@@ -49,7 +49,7 @@ class ModelFlagStaticTest(unittest.TestCase):
 
     def test_cheatsheet_backend_claude_line_updated(self):
         text = (SKILL / "references/herdr-cheatsheet.md").read_text(encoding="utf-8")
-        line = next(l for l in text.splitlines() if "**backend=claude**" in l)
+        line = next(l for l in text.splitlines() if "**backend=claude" in l)
         self.assertIn("--model", line)
         self.assertNotIn("ANTHROPIC_MODEL", line)
 

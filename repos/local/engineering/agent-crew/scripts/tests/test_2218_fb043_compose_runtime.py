@@ -255,7 +255,7 @@ class ComposeRuntimeTest(unittest.TestCase):
         self.assertEqual(1, rc)
         self.assertIsNone(report["runtimeResolvedFrom"])
         message = "\n".join(report["errors"])
-        self.assertIn("同时存在于两套 runtime", message)
+        self.assertIn("同时存在于多套 runtime", message)
         self.assertIn("无 role=builder", message)
         self.assertIn("--runtime qoder", message)
         self.assertIn("--runtime opencode", message)
