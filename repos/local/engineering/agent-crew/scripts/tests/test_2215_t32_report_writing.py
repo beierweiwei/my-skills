@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""2.2.15 T32 报告落盘方式防回退断言（FB-029）。
+"""2.2.15 T32 报告落盘方式防回退断言（FB-029；2.2.21 随 FB-046 改版）。
 
-统一口径：报告/运行记录落盘禁止无引号 heredoc 与命令替换；用单引号
-heredoc 写 `/tmp` 再 `cp`，或直接使用 Write 工具。新会话按此口径落盘
-不触发 Qoder 权限弹窗、不卡住 verifier/会话。
+统一口径：报告/运行记录落盘禁止正文进 Bash 命令文本（heredoc/echo/printf
+均算）；qoder 走 `crew-write.py --from-transcript`，claude 走 crew-claude.py
+stdout，opencode/有 Write 角色用 Write，无 Write 且 transcript 不可用才按
+分段预算兜底。新会话按此口径落盘不触发 Qoder 权限弹窗、不卡住 verifier/会话。
 
 覆盖落点：
 - `templates/playbooks/release.md`：退出条件 + Phase 8 收口步骤；
@@ -25,7 +26,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 CLAUSE = (
-    "禁止无引号 heredoc/命令替换；单引号 heredoc 写 `/tmp` 再 `cp`，或 Write 工具"
+    "禁止正文进 Bash 命令文本（heredoc/echo/printf 均算）；"
+    "qoder 用 `python3 scripts/crew-write.py --from-transcript --out 目标路径`"
+    "（正文放 crew-report 围栏并紧接调用），claude 走 crew-claude.py stdout，"
+    "opencode/有 Write 角色用 Write，无 Write 且 transcript 不可用才分段兜底"
+    "（单段反引号 ≤40、段内无 rm/rmdir 词、tie ≤40；禁止拆段/编码规避）；"
+    "审批等待不可自救，检测归 guard 卡死检测"
 )
 
 TARGETS = (

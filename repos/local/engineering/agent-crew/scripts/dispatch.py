@@ -8,6 +8,8 @@
            运行时使用 init/upgrade 安装的组合基础代理
            （Qoder `crew-<role>` / opencode `crew-<role>`）→ agent-log。
   prompt / notify / close / status / list / tab / pane  生命周期与工位操作（写 agent-log）。
+  prompt   注入安全矩阵（2.2.21）：目标有未闭合 permission-ask → 拒绝注入（rc=2），
+           agent-log 记 delivery=inbox_fallback，并推送 Herdr 通知。
   notify   跨项目通知：解析收件方 cwd/git common dir，先原子落盘收件方
            `<git-common-dir>/crew/inbox/`，再 `herdr agent prompt`；不查/不写 dispatch
            注册表，不动生命周期；`--workspace + --role` 按 workspace 与角色约定解析当前
@@ -44,6 +46,10 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True  # 不在项目 scripts/ 留 __pycache__
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:  # 2.2.21：prompt 注入前审批等待检测；模块缺失时保持旧行为（fail-soft）。
+    from crew_approvals import pending_approvals
+except Exception:  # noqa: BLE001
+    pending_approvals = None
 from crew_paths import CrewPathsError, crew_dir  # noqa: E402
 
 ROLE_ID_RE = re.compile(r"^[a-z][a-z0-9-]*$")
@@ -999,6 +1005,26 @@ def generation_of(name: str) -> int:
     return int(match.group(1)) if match else 1
 
 
+def pending_approval_for(name: str) -> list[dict]:
+    """目标 agent 的未闭合 permission-ask（2.2.21 注入安全矩阵）。
+
+    检测器缺失/调用失败返回空列表（fail-soft，不改变旧投递行为）。
+    """
+    if pending_approvals is None:
+        return []
+    try:
+        agents = herdr_agents()
+    except DispatchError:
+        return []
+    entry = resolve_agent_entry(agents, name)
+    if entry is None:
+        return []
+    try:
+        return pending_approvals([entry], time.time())
+    except Exception:  # noqa: BLE001 - 检测失败不阻断旧行为
+        return []
+
+
 def resolve_notify_target(agents: list[dict], workspace: str | None, role: str) -> str:
     """按 workspace + role 选当前活跃 helm/角色，返回 agent 名。
 
@@ -1577,6 +1603,32 @@ def cmd_prompt(args: argparse.Namespace, root: Path) -> int:
         raise DispatchError(
             f"无法判定目标 {args.agent} 的 pane 聚焦状态（{focus_reason}）："
             "按 fail-safe 拒绝注入。先检查 `herdr pane list`，恢复后重试。", 2)
+    approvals = pending_approval_for(args.agent)
+    if approvals:
+        first = approvals[0]
+        age_minutes = int(first.get("age_seconds") or 0) // 60
+        reason = (
+            f"目标有未闭合审批（{args.agent}，callId {first.get('call_id') or '?'}，"
+            f"tool={first.get('tool') or '?'}，等待 {age_minutes} 分钟）："
+            "已拒绝注入，避免注入被审批对话框消费为批准。"
+            "请先人工处置对话框，或改用 crew-msg.py write 落 inbox + 通知。")
+        append_log(root, {
+            "ts": utc_now(),
+            "action": "prompt",
+            "agent": args.agent,
+            "role": info.get("role"),
+            "runtime": info.get("runtime"),
+            "delivery": "inbox_fallback",
+            "focus": "unfocused",
+            "result": "refused",
+            "approvalPending": {
+                "callId": first.get("call_id"),
+                "tool": first.get("tool"),
+                "ageSeconds": first.get("age_seconds"),
+            },
+        })
+        herdr_notify("dispatch prompt 未注入", reason)
+        raise DispatchError(reason, 2)
     run_herdr(["herdr", "agent", "prompt", args.agent, args.message])
     append_log(root, {
         "ts": utc_now(),

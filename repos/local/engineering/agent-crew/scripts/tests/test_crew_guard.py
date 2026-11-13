@@ -229,6 +229,8 @@ class GuardTestBase(unittest.TestCase):
             pane_read=self.fake_pane_read,
             dispatch=self.fake_dispatch,
             log_fn=self.logs.append,
+            # 2.2.21：审批等待检测默认关闭真实日志扫描，单测各自注入。
+            stuck_detect=lambda agents, now: [],
         )
         kwargs.update(overrides)
         return cg.Guard(**kwargs)
@@ -381,6 +383,10 @@ class WakeConditionTest(GuardTestBase):
 
     def test_cooldown_suppresses_repeat_wake_for_600s(self):
         self.write_fixture()
+        # 2.2.21：pending 重复叫醒另受 pendingHeartbeatMinutes 约束；本用例只测
+        # 10 分钟冷却边界，显式把心跳对齐到 10 分钟。
+        write_file(self.root / ".planning" / "orchestration.json",
+                   json.dumps({"guard": {"pendingHeartbeatMinutes": 10}}))
         self.agents = [{"name": "worker-1", "agent_status": "idle"}]
         guard = self.make_guard()
 
@@ -721,7 +727,10 @@ class BlockedSlaTest(GuardTestBase):
 
     def test_load_config_guard_defaults_and_clamps(self):
         self.assertEqual(
-            {"blockedRepeatMinutes": 15, "blockedGraceMinutes": 30},
+            {"blockedRepeatMinutes": 15, "blockedGraceMinutes": 30,
+             "approvalWaitMinutes": 15, "approvalRepeatMinutes": 30,
+             "approvalGraceMinutes": 60, "approvalMaxAgeMinutes": 240,
+             "wakeCooldownMinutes": 10, "pendingHeartbeatMinutes": 15},
             cg.load_config(self.root)["guard"],
         )
         cases = (
@@ -1054,6 +1063,14 @@ class LockAndOutputTest(GuardTestBase):
             "newTab",
             "blockedRepeatMinutes",
             "blockedGraceMinutes",
+            "approvalWaitMinutes",
+            "approvalRepeatMinutes",
+            "approvalGraceMinutes",
+            "approvalMaxAgeMinutes",
+            "wakeCooldownMinutes",
+            "pendingHeartbeatMinutes",
+            "awaiting_approval",
+            "stuck",
             "R6",
             "不自动关闭",
             "rework",
@@ -2515,7 +2532,7 @@ class RetroDueTest(GuardTestBase):
         guard = self.make_guard()
         calls = {"count": 0}
 
-        def flaky(message: str, agents: list[dict]) -> str:
+        def flaky(message: str, agents: list[dict], now: float | None = None) -> str:
             calls["count"] += 1
             if calls["count"] == 1:
                 raise RuntimeError("wake boom")

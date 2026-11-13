@@ -37,7 +37,7 @@
 
 - 记录落 `.scratch/maintain-verification-<日期>/`（或项目约定的 scratch 位置），**不提交**；至少含 covered（feature 清单）、unreachable（feature + 前置 + 尝试路径）、drift（确认漂移与证据）、outcome。
 - 驱动证据优先用 `python3 scripts/crew-evidence.py --out <file> -- <命令>` 采集（命令/rc/stdout/stderr/时间/git status 一次落盘）；缺该工具时按验证技能 Evidence 段手写落盘；每次清理/teardown 后按命名位置复查仍在（`test -f` 或复读），不默认假设。
-- 运行记录/outcome 报告落盘：禁止无引号 heredoc/命令替换；单引号 heredoc 写 `/tmp` 再 `cp`，或 Write 工具（无引号 heredoc 内的命令替换会触发 Qoder 权限弹窗并卡住会话）。
+- 运行记录/outcome 报告落盘：禁止正文进 Bash 命令文本（heredoc/echo/printf 均算）；qoder 用 `python3 scripts/crew-write.py --from-transcript --out 目标路径`（正文放 crew-report 围栏并紧接调用），claude 走 crew-claude.py stdout，opencode/有 Write 角色用 Write，无 Write 且 transcript 不可用才分段兜底（单段反引号 ≤40、段内无 rm/rmdir 词、tie ≤40；禁止拆段/编码规避）；审批等待不可自救，检测归 guard 卡死检测。
 
 ## Phases
 

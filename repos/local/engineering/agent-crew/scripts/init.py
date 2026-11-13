@@ -51,7 +51,7 @@ TEMPLATES = SKILL_DIR / "templates"
 MARK_START = "<!-- agent-crew:orchestration:start -->"
 MARK_END = "<!-- agent-crew:orchestration:end -->"
 MARK_PREFIX = "<!-- agent-crew:orchestration:"
-SKILL_VERSION_FALLBACK = "2.2.20"
+SKILL_VERSION_FALLBACK = "2.2.21"
 
 CONFIG_REL = Path(".planning/orchestration.json")
 MANIFEST_REL = Path("docs/crew/manifest.json")
@@ -94,6 +94,7 @@ SCRIPT_MANIFEST = [
     "doctor.py",
     "upgrade.py",
     "crew_paths.py",
+    "crew_approvals.py",
     "start-agent.sh",
     "start-helm.sh",
     "helm_agent_name.py",
@@ -105,6 +106,7 @@ SCRIPT_MANIFEST = [
     "crew-guard.py",
     "crew-ticket.py",
     "crew-msg.py",
+    "crew-write.py",
     "crew-claude.py",
     "pane-audit.py",
     "crew-reaper.py",

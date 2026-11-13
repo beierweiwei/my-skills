@@ -193,6 +193,13 @@
 - **done 后残留回收**：`phase=done` 后对残留旧 helm 做一次有界回收（仅 idle/done、非现役 pane/tab、非聚焦、非白名单；working/blocked/unknown 不关、只记日志）；结果写 handoff `reclaim` 标记，guard 重启不重复。
 - **周期对账**：guard 周期调用 `crew-reaper.py --apply --json`（失败只记 guard.log、不阻断值守）；一键入口、对账三源与安全边界见 §5.12。
 
+### 5.11.2 guard 卡死检测与周期心跳（2.2.21）
+
+- **数据源（只读）**：`scripts/crew_approvals.py` 按 `agent_session.value` 定位 `~/.qoder-cn/logs/sessions/*/<session>/segments/*.jsonl` 最新 → run_id → `~/.qoder-cn/logs/runs/<run_id>/qodercli.log` 尾部（≤1MB），解析 `[permission-ask] prompt/settle` 并按 callId 配对；缺 session/run 日志时用 `herdr pane process-info --pane <pane>` 取 pid，扫近 7 天 run 的 `manifest.json` 回退。日志不可读/缺会话 fail-soft（返回空并记原因），不中断 guard。
+- **判定**：未闭合 ask 年龄 ≥ `guard.approvalWaitMinutes`（默认 15，夹取 1–240）视为「等待审批卡住」，即使 `agent_status=working` 也叫醒；重复叫醒按 agent+callId 去重、间隔 `guard.approvalRepeatMinutes`（默认 30，夹取 1–240），≥ `guard.approvalGraceMinutes`（默认 60，夹取 1–240）附 A/B/C 建议，≥ `guard.approvalMaxAgeMinutes`（默认 240，夹取 1–1440）停止重复并记日志；ask 消失即清除年龄。`--once --json` 输出 `stuck` 列表与 `ageMinutes`。
+- **周期心跳**：`guard.wakeCooldownMinutes`（默认 10，夹取 1–240）替换原硬编码 600s 冷却；`guard.pendingHeartbeatMinutes`（默认 15，夹取 1–240）控制 pending 且真 idle（无 working/blocked/awaiting_approval）时的重复叫醒；working 永不催，同轮 blocked/awaiting_approval/pending 只发一条叫醒（reason 合并）。
+- **安全矩阵（硬）**：guard `_wake`、`crew-msg.py write --to` 的 herdr 直推、`dispatch.py prompt` 注入前都检查目标未闭合 ask；有则只落 inbox/wake 文件 + Herdr 通知，不注入（注入会被审批对话框消费为「批准」，FB-046 事故 07:41:31 已实证）。绝不向等待审批的 worker pane 注入文本/按键；不自动 close，打断走 Captain/总舵 `close + 新 start`。
+
 ### 5.12 窗口对账回收（crew-reaper）
 
 - **问题**：换舵/交接后可能残留多个「总舵」tab（旧舵 idle、现役 working）。pane-audit 只做单 tab 巡检，不知道「现役总舵是谁」，无法判定多个总舵 tab 该保留哪个。
