@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.2.23 — 2026-11-13
+
+T56 小修：claude 通道模型传参 env → `--model`（实测 `~/.claude/settings.json` env 块覆盖子进程 `ANTHROPIC_MODEL`，按角色指定模型静默失效；网关模型发现开启后 `--model` 纯文本/带工具均正常——T39/FB-036 的 env 方案与旧证据过期，证据 crew-orchestrator `.scratch/model-routing-20261113/{ov,mf,mt}.json`）；`init --refresh-block` 块最新时仍重算 manifest configHash（FB-048，doctor manifest.config warn 的 next 修复路径失效）。Captain 直令（agents 全量 backend=claude，builder=glm-5.3-flash、planner/reviewer=glm-5.3）后实测发现，helm 直跑发布。
+
+### 修复
+
+- `scripts/crew-claude.py`：model 非空追加 `--model <model>`，删除 env 注入与 `env=env` 透传；docstring 传参口径同步。
+- `scripts/init.py`：`refresh_block` 块未变分支在 configHash 过期时重算并落 manifest + install-log（`files: []`），一致时保持零写入；不写 skillVersion（T33 口径不破）。
+- `references/herdr-cheatsheet.md` backend=claude 行：传参口径 env → `--model`。
+
+### 测试
+
+- `test_2215_t39_claude_wrapper.py` 三处断言翻转（`--model` 在 argv、不注入 env、空模型无 `--model`）；新增 `test_2223_t56_model_flag.py`（静态防回退 + refresh-block configHash 重算/零写入两分支）。
+- 版本 2.2.23：`SKILL.md` frontmatter 与标题、`init.py` fallback、本段、`test_crew_lint.py`、`test_220_final.py`、`test_224_retro.py`、`test_225_patch.py`、`test_2214_guard_presence.py` 版本断言同步。
+
 ## 2.2.22 — 2026-11-13
 
 CASE 验证红线通用部分吸收：VR 文档（VR1–VR6）/真动作验证剧本/验收口径接线（A3.4、A4.4、A5.4、A5.8）/角色模板指针/防副本/T50 汇报首句业务术语；两轮对抗审查 BLOCK → 清零复评 PASS，互检/两轴评审/独立终验全 PASS，本地发布（push 未执行）。

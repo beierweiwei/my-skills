@@ -52,7 +52,7 @@ python3 scripts/dispatch.py --root . status --json
 ```
 
 - **角色与权限**：项目角色文件（`.qoder/agents/<role>.md` / `.opencode/agent/<role>.md`）只放发现字段与 `extends: skill:<role>`；运行时 frontmatter/权限只取技能基类。Qoder 基类 `disallowedTools` 翻译为 `--disallowed-tools`；opencode 基类 `permission`/`mode` 原样进入组合产物。
-- **backend=claude**：只读外部调用统一走 `python3 scripts/crew-claude.py run ...`（模型按 `.planning/orchestration.json` 解析、经 `ANTHROPIC_MODEL` 传参，只读+超时，报告/stderr/rc/meta 一次落盘；不手拼 claude flag）。
+- **backend=claude**：只读外部调用统一走 `python3 scripts/crew-claude.py run ...`（模型按 `.planning/orchestration.json` 解析、经 `--model` 传参——不走 env，`settings.json` env 会覆盖子进程同名变量；只读+超时，报告/stderr/rc/meta 一次落盘；不手拼 claude flag）。
 - **YOLO 模式**：副舵派 worker 时由 dispatch 透传 `--permission-mode bypass_permissions`（Qoder）或 `--auto`（opencode）；只在隔离 worktree 与明确工单边界内，合并/推送/清理与数据安全门禁不放宽。
 - **总舵**：`bash scripts/start-helm.sh`（内部走 dispatch）；agent 名取 `orchestration.json` 的 `helm.agentName`，默认派生 `helm-<项目名>`，同机全局唯一。
 - **opencode**：技能源已带 7 个 `mode: primary` 基类；项目 stub 由 init 生成。dispatch 以 `OPENCODE_CONFIG_DIR` 指向组合目录启动；用 `opencode agent list` 确认发现，改 agent/skill/config 后必须重启会话（不热重载）。
