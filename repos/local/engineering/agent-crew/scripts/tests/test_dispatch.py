@@ -529,26 +529,97 @@ class DispatchTest(unittest.TestCase):
         self.assertNotIn("proj-builder", registry)
         self.assertEqual("custom-builder", self.agent_log()[-1]["agent"])
 
-    def test_start_records_permission_mode_in_log_and_registry(self):
+    def _start_argv(self) -> list[str]:
+        starts = [c for c in self.herdr_calls() if c[:2] == ["agent", "start"]]
+        self.assertEqual(1, len(starts), self.herdr_calls())
+        return starts[0]
+
+    def _registry(self) -> dict:
+        return json.loads(
+            (self.root / ".git/crew/dispatch-agents.json").read_text(encoding="utf-8")
+        )
+
+    def test_start_records_explicit_permission_mode_and_passes_to_herdr(self):
         self._write_composed("qoder", "builder")
         proc = self.run_dispatch(
             "start", "--role", "builder", "--runtime", "qoder",
             "--pane", "wX:p1", "--name", "yolo-builder",
             "--permission-mode", "bypass_permissions", "--json")
         self.assertEqual(0, proc.returncode, proc.stderr)
+        argv = self._start_argv()
+        self.assertIn("--permission-mode", argv)
+        self.assertEqual("bypass_permissions",
+                         argv[argv.index("--permission-mode") + 1])
         row = self.agent_log()[-1]
         self.assertEqual("start", row["action"])
         self.assertEqual("bypass_permissions", row["permissionMode"])
-        registry = json.loads(
-            (self.root / ".git/crew/dispatch-agents.json").read_text(encoding="utf-8")
-        )
+        self.assertEqual("explicit", row["permissionModeSource"])
+        registry = self._registry()
         self.assertEqual(
             "bypass_permissions", registry["yolo-builder"]["permissionMode"])
+        self.assertEqual(
+            "explicit", registry["yolo-builder"]["permissionModeSource"])
+
+    def test_start_uses_config_default_permission_mode(self):
+        self.config["agents"] = {"permissionMode": "bypass_permissions"}
+        self.write_config()
+        proc = self.start("builder", "qoder")
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        argv = self._start_argv()
+        self.assertIn("--permission-mode", argv)
+        self.assertEqual("bypass_permissions",
+                         argv[argv.index("--permission-mode") + 1])
+        row = self.agent_log()[-1]
+        self.assertEqual("bypass_permissions", row["permissionMode"])
+        self.assertEqual("config-default", row["permissionModeSource"])
+        self.assertEqual(
+            "config-default",
+            self._registry()["proj-builder"]["permissionModeSource"])
+
+    def test_start_explicit_permission_mode_overrides_config_default(self):
+        self.config["agents"] = {"permissionMode": "bypass_permissions"}
+        self.write_config()
+        self._write_composed("qoder", "builder")
+        proc = self.run_dispatch(
+            "start", "--role", "builder", "--runtime", "qoder",
+            "--pane", "wX:p1", "--permission-mode", "default", "--json")
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        argv = self._start_argv()
+        self.assertEqual("default", argv[argv.index("--permission-mode") + 1])
+        row = self.agent_log()[-1]
+        self.assertEqual("default", row["permissionMode"])
+        self.assertEqual("explicit", row["permissionModeSource"])
 
     def test_start_without_permission_mode_records_empty(self):
         proc = self.start("builder", "qoder")
         self.assertEqual(0, proc.returncode, proc.stderr)
-        self.assertEqual("", self.agent_log()[-1]["permissionMode"])
+        self.assertNotIn("--permission-mode", self._start_argv())
+        row = self.agent_log()[-1]
+        self.assertEqual("", row["permissionMode"])
+        self.assertEqual("", row["permissionModeSource"])
+        self.assertEqual("", self._registry()["proj-builder"]["permissionMode"])
+
+    def test_start_opencode_rejects_permission_mode_before_herdr(self):
+        self._write_composed("opencode", "firstmate")
+        proc = self.run_dispatch(
+            "start", "--role", "firstmate", "--runtime", "opencode",
+            "--pane", "wX:pSRC", "--permission-mode", "bypass_permissions",
+            "--json")
+        self.assertEqual(2, proc.returncode, proc.stderr)
+        self.assertIn("角色模板", proc.stderr)
+        self.assertFalse(
+            [c for c in self.herdr_calls() if c[:2] == ["agent", "start"]])
+        self.assertFalse((self.root / ".git/crew/agent-log.jsonl").exists())
+
+    def test_start_opencode_records_template_mechanism(self):
+        proc = self.start("firstmate", "opencode")
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        self.assertNotIn("--permission-mode", self._start_argv())
+        row = self.agent_log()[-1]
+        self.assertEqual("template", row["permissionMode"])
+        self.assertEqual("template", row["permissionModeSource"])
+        self.assertEqual(
+            "template", self._registry()["proj-firstmate"]["permissionMode"])
 
     def test_start_rejects_invalid_explicit_name_before_herdr(self):
         proc = self.start("builder", "qoder", name="Bad Name")

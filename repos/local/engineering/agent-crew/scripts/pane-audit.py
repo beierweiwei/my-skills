@@ -109,6 +109,7 @@ KIND_TEXT = {
     "empty-tab": "空 tab",
     "blocked-overdue": "blocked 工位超时未处置",
     "yolo-missing": "qoder 工位缺 YOLO 权限参数",
+    "opencode-permission-missing": "opencode 工位组合产物缺 permission 块",
 }
 
 
@@ -999,6 +1000,68 @@ def yolo_missing_entries(
     ]
 
 
+def split_frontmatter(text: str) -> str | None:
+    """返回 `---` 包裹的 frontmatter 文本块；缺失/未闭合返回 None。"""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    for index in range(1, len(lines)):
+        if lines[index].strip() == "---":
+            return "\n".join(lines[1:index])
+    return None
+
+
+def opencode_permission_missing_entries(
+        registry: dict | None, root: str | Path = ".") -> list[tuple[str, str]]:
+    """opencode 工位静态校验：组合产物 frontmatter 须含 permission 块。
+
+    opencode 的 YOLO 真身是角色模板 frontmatter `permission:`（不经 CLI 旗标），
+    因此按 registry 的 composedPath 读组合产物校验，不做进程级判定。
+    """
+    if not isinstance(registry, dict):
+        return []
+    try:
+        base = Path(root).expanduser()
+    except (RuntimeError, OSError):
+        return []
+    missing: list[tuple[str, str]] = []
+    for name, entry in sorted(registry.items()):
+        if not isinstance(entry, dict) or entry.get("runtime") != "opencode":
+            continue
+        composed = str(entry.get("composedPath") or "").strip()
+        try:
+            path = Path(composed).expanduser() if composed else None
+        except (RuntimeError, OSError):
+            path = None
+        if path is not None and not path.is_absolute():
+            path = base / path
+        if path is None:
+            missing.append((str(name), ""))
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            missing.append((str(name), str(path)))
+            continue
+        frontmatter = split_frontmatter(text)
+        if frontmatter is None or not re.search(
+                r"^permission:", frontmatter, re.MULTILINE):
+            missing.append((str(name), str(path)))
+    return missing
+
+
+def load_dispatch_registry(crew_dir: Path | None) -> dict:
+    """读取 `<crew-dir>/dispatch-agents.json`；缺失/损坏 fail-soft 返回 {}。"""
+    if crew_dir is None:
+        return {}
+    try:
+        data = json.loads(
+            (Path(crew_dir) / "dispatch-agents.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def audit(
     snapshot: dict,
     whitelist_prefixes: tuple[str, ...] = DEFAULT_WHITELIST_PREFIXES,
@@ -1012,6 +1075,7 @@ def audit(
     blocked_grace_minutes: int = DEFAULT_BLOCKED_GRACE_MINUTES,
     helm_context: HelmContext | None = None,
     yolo_entries: list[tuple[str, str]] | None = None,
+    opencode_entries: list[tuple[str, str]] | None = None,
 ) -> list[Finding]:
     tabs = snapshot.get("tabs") or []
     panes = snapshot.get("panes") or []
@@ -1206,6 +1270,16 @@ def audit(
             "--permission-mode bypass_permissions",
         ))
 
+    for name, path in opencode_entries or []:
+        findings.append(Finding(
+            "opencode-permission-missing", name, "（组合产物）",
+            f"{name} 的组合产物缺 frontmatter permission 块"
+            "（opencode YOLO 由角色模板承担）",
+            None,
+            "重跑 init --yes 或 dispatch start 重建组合产物，"
+            f"确认模板 permission 块进入 frontmatter（{path or '路径未知'}）",
+        ))
+
     findings.sort(key=lambda finding: (finding.target, finding.kind))
     return findings
 
@@ -1350,7 +1424,9 @@ def build_parser() -> argparse.ArgumentParser:
             "仍 blocked 且年龄 > --blocked-grace（默认 30 分钟）时告警 blocked-overdue，"
             "按 R6 处置（re-task / close / escalate）；仅报告，--apply 不关闭。\n"
             "YOLO 巡检：pgrep qoderclicn 读 /proc cmdline，工位缺 "
-            "--permission-mode bypass_permissions 时告警 yolo-missing（D8）；仅报告。\n"
+            "--permission-mode bypass_permissions 时告警 yolo-missing（D8）；仅报告。"
+            "opencode 工位：按 registry 组合产物 frontmatter 校验 permission 块"
+            "（静态，不查进程），缺失告警 opencode-permission-missing。\n"
             "后台 job 语义：pane 内后台 job（& / nohup 等）在 --apply 关闭 pane 时仍可能"
             "收到 SIGHUP；本工具只按前台进程组/进程信息判定，不保证后台 job 安全。\n"
             "示例：python3 scripts/pane-audit.py --snapshot snapshot.json\n"
@@ -1443,6 +1519,7 @@ def main(argv: list[str] | None = None) -> int:
     crew_dir = resolve_crew_dir_arg(args.root, args.crew_dir)
     blocked_receipts = load_receipts(crew_dir)
     helm_context = resolve_helm_context(args.root, crew_dir)
+    opencode_registry = load_dispatch_registry(crew_dir)
     findings = audit(
         snapshot, prefixes, frozenset(args.helm_pane), helm_labels,
         flows=flows,
@@ -1451,6 +1528,8 @@ def main(argv: list[str] | None = None) -> int:
         blocked_grace_minutes=args.blocked_grace,
         helm_context=helm_context,
         yolo_entries=collect_qoder_cmdlines(),
+        opencode_entries=opencode_permission_missing_entries(
+            opencode_registry, args.root),
     )
     if not findings:
         print(

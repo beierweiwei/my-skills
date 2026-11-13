@@ -334,6 +334,13 @@ def config_preflight_errors(root: Path, config: dict) -> list[str]:
             errors.append(f"config.paths: board.path 越界：{board_path}")
         elif not target.parent.is_dir():
             errors.append(f"config.paths: board.path 父目录不存在：{target.parent}")
+    agents = config.get("agents")
+    if agents is not None and not isinstance(agents, dict):
+        errors.append("agents.schema: agents 必须是对象")
+    elif isinstance(agents, dict):
+        mode = agents.get("permissionMode")
+        if mode is not None and not isinstance(mode, str):
+            errors.append("agents.permissionMode: 必须是字符串")
     return errors
 
 
@@ -1465,6 +1472,19 @@ def deliver_opencode(outcome: ComposeOutcome, name: str, pane: str, run_dir: Pat
     }
 
 
+def resolve_permission_mode(config: dict, explicit: str | None) -> tuple[str, str]:
+    """qoder 权限模式解析：显式 > 配置 agents.permissionMode > 空（通道默认）。"""
+    explicit = (explicit or "").strip()
+    if explicit:
+        return explicit, "explicit"
+    agents = config.get("agents")
+    if isinstance(agents, dict):
+        configured = agents.get("permissionMode")
+        if isinstance(configured, str) and configured.strip():
+            return configured.strip(), "config-default"
+    return "", ""
+
+
 def cmd_start(args: argparse.Namespace, root: Path) -> int:
     config = load_config(root)
     preflight = config_preflight_errors(root, config)
@@ -1494,6 +1514,20 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
         for error in errors:
             print(f"[拒绝] {error}", file=sys.stderr)
         return 1
+    explicit_mode = (args.permission_mode or "").strip()
+    if runtime == "opencode":
+        if explicit_mode:
+            message = (
+                "opencode 权限由角色模板 frontmatter permission 块承担，"
+                "不接受 --permission-mode（CLI 旗标不会生效；去掉该参数重试）")
+            if args.json:
+                print_json({"errors": [message]})
+            print(f"[拒绝] {message}", file=sys.stderr)
+            return 2
+        permission_mode, permission_source = "template", "template"
+    else:
+        permission_mode, permission_source = resolve_permission_mode(
+            config, explicit_mode)
     if not args.pane:
         hint = "目标 pane" if runtime == "qoder" else "split 源 pane（dispatch 负责创建带 OPENCODE_CONFIG_DIR 的 pane）"
         raise DispatchError(f"{runtime} start 需要 --pane（{hint}）")
@@ -1514,7 +1548,7 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
     model = (args.model or "").strip()
     if runtime == "qoder":
         delivery = deliver_qoder(outcome, name, args.pane, run_dir,
-                                 args.permission_mode, model)
+                                 permission_mode, model)
     else:
         delivery = deliver_opencode(outcome, name, args.pane, run_dir, model)
 
@@ -1530,7 +1564,8 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
         "composePath": delivery["composePath"],
         "composedSha256": outcome.report["composedSha256"],
         "model": model,
-        "permissionMode": (args.permission_mode or "").strip(),
+        "permissionMode": permission_mode,
+        "permissionModeSource": permission_source,
         "startedAt": utc_now(),
     }
     save_registry(root, registry)
@@ -1541,7 +1576,8 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
         "runtime": runtime,
         "agent": name,
         "model": model,
-        "permissionMode": (args.permission_mode or "").strip(),
+        "permissionMode": permission_mode,
+        "permissionModeSource": permission_source,
         "delivery": delivery["delivery"],
         "policySource": "base",
         "baseRef": f"{skill_version or 'unknown'}:{base_rel}",
@@ -1990,7 +2026,9 @@ def build_parser() -> argparse.ArgumentParser:
     start_p.add_argument("--pane", help="Qoder 目标 pane；opencode 为 split 源 pane")
     start_p.add_argument("--name", help="显式 Herdr/dispatch 实例名（默认 helm 用配置 helm.agentName，其余派生）")
     start_p.add_argument("--instance", type=int, help="同角色多实例编号（Herdr 名后缀）")
-    start_p.add_argument("--permission-mode", help="透传 qodercli --permission-mode（默认不传）")
+    start_p.add_argument("--permission-mode",
+                         help="透传 qodercli --permission-mode；缺省取配置 "
+                              "agents.permissionMode；opencode 由角色模板承担（传即拒绝 rc=2）")
     start_p.add_argument("--model", help="透传运行时模型（qoder/opencode：-m <model>；空不传）")
     start_p.add_argument("--json", action="store_true")
     start_p.set_defaults(func=cmd_start)

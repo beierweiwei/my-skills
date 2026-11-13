@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""2.2.24 T59：YOLO 派单口径补齐（CASE req2-docalign-scout-1 缺参事故）。
+"""2.2.24 T59：YOLO 派单口径补齐；2.2.25 T60 纠正 opencode 半边。
 
 静态断言（红→绿）：
 - crew-rules D 节新增 D8 YOLO 派单（规则正文，不再只在 cheatsheet）。
-- firstmate 双栈模板派单段含 YOLO 硬口径（qoder: bypass_permissions / opencode: --auto）。
-- dispatch.py start 的 registry/log 记 permissionMode 字段。
+- firstmate 双栈模板派单段含 YOLO 硬口径（qoder: bypass_permissions；
+  opencode: 角色模板 permission 块承担，不经 CLI 旗标）。
+- dispatch.py start 的 registry/log 记 permissionMode 字段（行为断言见
+  test_dispatch.py，本文件不再抄实现字面量）。
 - pane-audit 有 yolo-missing 检查：KIND_TEXT、纯函数判定、audit() 注入告警。
 """
 
@@ -46,13 +48,9 @@ class YoloDocsStaticTest(unittest.TestCase):
     def test_firstmate_opencode_template_has_yolo(self):
         text = read("templates/agents/opencode/firstmate.md")
         self.assertIn("D8 YOLO 派单", text)
-        self.assertIn("`--auto`", text)
+        self.assertIn("角色模板", text)
+        self.assertIn("permission", text)
         self.assertIn("scout/runner/planner", text)
-
-    def test_dispatch_records_permission_mode(self):
-        text = read("scripts/dispatch.py")
-        self.assertIn('"permissionMode": (args.permission_mode or "").strip()',
-                      text)
 
 
 class YoloAuditTest(unittest.TestCase):

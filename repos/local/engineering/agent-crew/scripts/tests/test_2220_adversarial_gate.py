@@ -212,7 +212,7 @@ class RulesGateTest(unittest.TestCase):
 
     def test_d7_defined_and_indexed(self):
         rules = read(RULES)
-        self.assertIn("D1–D7", rules)
+        self.assertIn("D1–D8", rules)
         line = next(
             (line for line in rules.splitlines() if line.startswith("- **D7 ")),
             None,

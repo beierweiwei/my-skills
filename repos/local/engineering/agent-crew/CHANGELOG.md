@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.2.25 — 2026-11-13
+
+T60 小修：修复 2.2.24 独立审查（`.planning/patch-2224/evidence/review/review-2223-2224.md`）判定的 B1/B2 阻断，补齐 dispatch 默认权限模式与 opencode 静态度量。
+
+### 修复
+
+- **B1 `--auto` 不存在**：`--auto` 在 dispatch/herdr/opencode CLI 全链路均不存在（argparse rc=2）。D8、herdr 速查表、opencode firstmate 模板、`CONTEXT` 骨架、firstmate-dispatch 技能统一改为「qoder 经 `--permission-mode bypass_permissions`；opencode 的 YOLO 由角色模板 frontmatter `permission:` 块承担，不经 CLI 旗标」。
+- **B2 opencode 记录失真**：`dispatch.py start` 对 opencode 分支显式传 `--permission-mode` 直接拒绝（rc=2，提示权限由角色模板承担），不再把从未生效的 CLI 值记进 registry/agent-log；opencode 记录口径改为 `permissionMode=template`（实际生效机制）。
+- `crew-claude.py` argparse description 去掉旧口径「env 传参」，与 `--model` 实现一致。
+
+### 新增
+
+- **dispatch 默认权限模式**：配置 `agents.permissionMode`（默认建议 `bypass_permissions`；`init.py` 默认配置已含）。qoder 未显式传 `--permission-mode` 时自动补传，registry/agent-log 记录 `permissionModeSource`（explicit/config-default）；显式传参以显式值为准。`config_preflight_errors` 校验该键类型。
+- **pane-audit opencode 静态校验**：按 dispatch registry 的组合产物 frontmatter 校验 `permission:` 块（不做进程级），缺失告警 `opencode-permission-missing`；qoder `yolo-missing` 行为不变。
+
+### 测试
+
+- `test_dispatch.py`：fake herdr argv 断言覆盖显式/配置默认两态；opencode 显式传参 rc=2、记录 `template`；原「无参记空」保持。
+- 新增 `test_2225_permission_mode.py`：生产目录 `--auto` 清零、D8/cheatsheet/模板口径、crew-claude help、pane-audit opencode 静态判定。
+- `test_2224_yolo_dispatch.py` 纠正 opencode 断言，删除抄实现字面量的静态断言（行为断言移至 `test_dispatch.py`）。
+- 版本 2.2.25：`SKILL.md` frontmatter 与标题、`init.py` fallback、本段、`test_crew_lint.py`、`test_220_final.py`、`test_224_retro.py`、`test_225_patch.py`、`test_2214_guard_presence.py` 版本断言同步。
+
 ## 2.2.24 — 2026-11-13
 
 T59 小修：YOLO 派单口径补齐（CASE `req2-docalign-scout-1` 启动缺 `--permission-mode bypass_permissions`，Captain 报障实测——副舵派单经正规 dispatch 通道但漏传权限参数，YOLO 要求此前只写在速查表一行，角色模板与规则正文均无；dispatch 日志也不记该字段，事后无法巡检）。

@@ -387,7 +387,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="crew-claude.py",
-        description="backend=claude 统一执行器：按配置解析模型（env 传参）、只读+超时、证据一次落盘。",
+        description="backend=claude 统一执行器：按 --model（缺省取配置 agents）选择模型、只读+超时、证据一次落盘。",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="示例：python3 scripts/crew-claude.py run --role adversary "
                "--prompt .scratch/prompt.md --out-dir .planning/x/evidence")

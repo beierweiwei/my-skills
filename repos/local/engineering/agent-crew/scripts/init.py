@@ -51,7 +51,7 @@ TEMPLATES = SKILL_DIR / "templates"
 MARK_START = "<!-- agent-crew:orchestration:start -->"
 MARK_END = "<!-- agent-crew:orchestration:end -->"
 MARK_PREFIX = "<!-- agent-crew:orchestration:"
-SKILL_VERSION_FALLBACK = "2.2.24"
+SKILL_VERSION_FALLBACK = "2.2.25"
 
 CONFIG_REL = Path(".planning/orchestration.json")
 MANIFEST_REL = Path("docs/crew/manifest.json")
@@ -123,6 +123,7 @@ DEFAULT_ROLES = {"enabled": list(ROLE_ORDER), "instances": {}}
 # 读取并透传给 dispatch start --model。adversary 为互检/对抗审查角色预留。
 DEFAULT_AGENTS = {
     "default": {"backend": "qoder", "model": ""},
+    "permissionMode": "bypass_permissions",
     "roles": {
         "builder": {"backend": "qoder", "model": ""},
         "planner": {"backend": "qoder", "model": ""},
