@@ -44,6 +44,14 @@ agent+callId 去重，间隔 `guard.approvalRepeatMinutes`（默认 30，夹取 
 周期心跳：pending 且真 idle（无 working/blocked/awaiting_approval）持续时，按
 `guard.pendingHeartbeatMinutes`（默认 15，夹取 1–240）重复叫醒，仍受全局冷却约束；
 与 blocked/awaiting_approval 同轮只发一条叫醒（reason 合并）。
+空闲兜底（2.2.26 T63）：无待办、无在跑、无卡住且总舵 idle/done 连续
+`guard.idleWakeRounds` 轮（默认 5≈10 分钟，夹取 0–240，0=关闭）→ 报平安叫醒，
+附 Backlog 清单（不含已完成；可派/⏸ 排队/⏸ 待外部/⛔ 阻塞全列）；受全局冷却
+去重，触发后计数清零；总舵
+working/blocked/缺失不累计。Backlog ⏸ 两态（AMEND）：含外部条件语义
+（待 Captain/待 C/留 Captain/待拍板/待评审/待授权/待窗口）→ 暂停桶「⏸ 待外部」
+不计待办；其余 ⏸（下批/batch/评估中等排队语义）→ 暂停桶「⏸ 排队」，计入待办数据
+（idle 兜底清单可见）但不触发即时叫醒，由空闲兜底承载。
 自动交接：每轮读总舵 pane 的 `ctx Nk/1M`（`herdr pane read <pane> --lines 80`），
 兼容小数与百分比（`ctx 75.4k/1M`、`ctx 62.3%`）；pane 先按 agent 名解析，
 名字缺失/漂移时回退 <crew-dir>/dispatch-agents.json（按名或最近 role=helm 条目反查，
@@ -151,6 +159,15 @@ APPROVAL_MAX_AGE_MAX = 1440
 # pending 真 idle 周期心跳与全局叫醒冷却（原硬编码 600s 配置化）。
 DEFAULT_WAKE_COOLDOWN_MINUTES = 10
 DEFAULT_PENDING_HEARTBEAT_MINUTES = 15
+# 2.2.26 T63 空闲兜底叫醒：连续 N 轮全仓安静（无 pending/无在跑/无卡住）且 helm
+# idle/done → 报平安 + Backlog 全量清单（含 ⏸ 条目）。0=关闭。
+DEFAULT_IDLE_WAKE_ROUNDS = 5
+IDLE_WAKE_ROUNDS_MAX = 240
+# 2.2.26 T63 AMEND ⏸ 两态：Backlog ⏸ 行仅当含外部条件语义才排除（待外部），
+# 其余 ⏸ 为纯排队（不即时叫醒、由空闲兜底承载）。
+BACKLOG_EXTERNAL_PAUSE_MARKS = (
+    "待 Captain", "待 C", "留 Captain", "待拍板", "待评审", "待授权", "待窗口",
+)
 WAKE_FILE_NAME = "guard.wake"
 DEFAULT_WAKE_TTL_SECONDS = 7200
 WAKE_GENERATED_RE = re.compile(r"^generated_at:\s*(\S+)\s*$")
@@ -335,6 +352,7 @@ def load_config(root: Path) -> dict:
             "approvalMaxAgeMinutes": DEFAULT_APPROVAL_MAX_AGE_MINUTES,
             "wakeCooldownMinutes": DEFAULT_WAKE_COOLDOWN_MINUTES,
             "pendingHeartbeatMinutes": DEFAULT_PENDING_HEARTBEAT_MINUTES,
+            "idleWakeRounds": DEFAULT_IDLE_WAKE_ROUNDS,
         },
     }
     path = root / ".planning" / "orchestration.json"
@@ -381,6 +399,7 @@ def load_config(root: Path) -> dict:
             ("approvalMaxAgeMinutes", BLOCKED_MINUTES_MIN, APPROVAL_MAX_AGE_MAX),
             ("wakeCooldownMinutes", BLOCKED_MINUTES_MIN, BLOCKED_MINUTES_MAX),
             ("pendingHeartbeatMinutes", BLOCKED_MINUTES_MIN, BLOCKED_MINUTES_MAX),
+            ("idleWakeRounds", 0, IDLE_WAKE_ROUNDS_MAX),
         ):
             value = guard.get(key)
             if isinstance(value, int) and not isinstance(value, bool):
@@ -515,7 +534,17 @@ def _parse_plan_todos(path: Path, rel: str, pending: list[Todo], residual: list[
             bucket.append(Todo(rel, phase["name"], text))
 
 
-def _parse_backlog(root: Path, path: Path, rel: str, pending: list[Todo]) -> None:
+def _parse_backlog(root: Path, path: Path, rel: str, pending: list[Todo],
+                   paused: list[Todo]) -> None:
+    """Backlog 行解析（2.2.26 T63 AMEND ⏸ 两态口径）：
+
+    - ⏸ 且含外部条件语义（待 Captain/待 C/留 Captain/待拍板/待评审/待授权/待窗口）
+      → 暂停桶「⏸ 待外部：」，不计待办、不叫醒。
+    - 其余 ⏸（下批/batch/评估中等纯排队语义）→ 暂停桶「⏸ 排队：」，计入待办数据
+      （idle 兜底 wake 清单可见）但不触发即时叫醒，由空闲兜底/攒批触发承载。
+    - 无 ⏸ 的行：blocked/已完成后过滤——可派进 pending（触发既有叫醒通道）；
+      blocked 行进暂停桶「⛔ 阻塞：」（仅兜底清单可见，不触发）。
+    """
     config = load_config(root)
     prefix = config["backlog"]["agentPrefix"]
     for cells in _table_rows(_section_lines(path, "Backlog")):
@@ -524,24 +553,29 @@ def _parse_backlog(root: Path, path: Path, rel: str, pending: list[Todo]) -> Non
         ident = cells[0]
         if not ident.startswith(prefix):
             continue
-        if any("⏸" in cell for cell in cells):
-            continue
+        text = " ".join(cells[:2]).strip()
         blocker = cells[-1]
-        if any(mark in blocker for mark in ("待 C", "待 Captain", "留 Captain")):
+        if any(mark in blocker for mark in BACKLOG_EXTERNAL_PAUSE_MARKS):
+            paused.append(Todo(rel, "Backlog", f"⏸ 待外部：{text}"))
+            continue
+        if any("⏸" in cell for cell in cells):
+            paused.append(Todo(rel, "Backlog", f"⏸ 排队：{text}"))
             continue
         if "blocked" in blocker.lower():
+            paused.append(Todo(rel, "Backlog", f"⛔ 阻塞：{text}"))
             continue
         if "已完成" in blocker or DONE_RE.search(blocker.lower()):
             continue
-        pending.append(Todo(rel, "Backlog", " ".join(cells[:2]).strip()))
+        pending.append(Todo(rel, "Backlog", text))
 
 
-def scan_todos(root: Path) -> tuple[list[Todo], list[Todo]]:
+def scan_todos(root: Path) -> tuple[list[Todo], list[Todo], list[Todo]]:
     planning = root / ".planning"
     pending: list[Todo] = []
     residual: list[Todo] = []
+    paused: list[Todo] = []
     if not planning.is_dir():
-        return pending, residual
+        return pending, residual, paused
     config = load_config(root)
     portfolio = (root / config["portfolioDir"] / "task_plan.md").resolve()
     for path in sorted(planning.glob("*/task_plan.md")):
@@ -549,11 +583,11 @@ def scan_todos(root: Path) -> tuple[list[Todo], list[Todo]]:
         try:
             _parse_plan_todos(path, rel, pending, residual)
             if path.resolve() == portfolio:
-                _parse_backlog(root, path, rel, pending)
+                _parse_backlog(root, path, rel, pending, paused)
         except (OSError, UnicodeDecodeError, ValueError):
             # S1：坏 plan（非 UTF-8/不可读）跳过，不拖垮整轮值守
             continue
-    return pending, residual
+    return pending, residual, paused
 
 
 def parse_feedback_open(path: Path, log: Callable[[str], None] | None = None) -> int | None:
@@ -960,6 +994,8 @@ class Guard:
     stuck_detect: Callable[[list[dict], float], list[dict]] | None = None
     consecutive: int = field(default=0, init=False)
     prev_working: int = field(default=0, init=False)
+    # 2.2.26 T63：空闲兜底计数——无 pending/无在跑/无卡住且 helm idle/done 的连续轮数
+    idle_quiet_rounds: int = field(default=0, init=False)
     last_wake_at: float | None = field(default=None, init=False)
     last_pending_wake_at: float | None = field(default=None, init=False)
     last_write_at: float | None = field(default=None, init=False)
@@ -2331,7 +2367,7 @@ class Guard:
         self._track_approvals(stuck)
         guard_cfg = load_config(self.root)["guard"]
         approval_due, approval_repeat_due = self._approval_due(now, stuck, guard_cfg)
-        pending, residual = scan_todos(self.root)
+        pending, residual, paused = scan_todos(self.root)
 
         for todo in residual:
             self.log(f"已完成 Phase 残留 [ ]（仅记日志）：{todo.label}")
@@ -2349,6 +2385,22 @@ class Guard:
             self.consecutive = 0
         # 真 idle = 无 working（含 claude run）/无 blocked/无 awaiting_approval。
         pending_idle = condition and not blocked and not stuck
+
+        # 2.2.26 T63 空闲兜底计数：全仓安静（无 pending/无在跑/无卡住）且 helm
+        # idle/done 才累计；helm working/blocked/缺失或出现待办/在跑即清零。
+        # 排队 ⏸（paused）不进 pending、不打断安静期（由兜底报平安承载，AMEND）。
+        idle_wake_cfg = guard_cfg["idleWakeRounds"]
+        helm_agent = self._find_agent(agents, self.helm)
+        helm_status = str(helm_agent.get("agent_status") or "") if helm_agent else ""
+        idle_quiet = (
+            not pending and not running and not claude_runs
+            and not blocked and not stuck
+            and helm_status in ("idle", "done")
+        )
+        if idle_quiet:
+            self.idle_quiet_rounds += 1
+        else:
+            self.idle_quiet_rounds = 0
 
         reason_parts: list[str] = []
         if blocked:
@@ -2387,6 +2439,9 @@ class Guard:
             "blockedAges": self._blocked_ages(now, blocked, blocked_since),
             "stuck": self._stuck_payload(stuck),
             "consecutive": self.consecutive,
+            "backlogPaused": len(paused),
+            "idleQuietRounds": self.idle_quiet_rounds,
+            "idleWake": False,
             "woke": False,
             "reason": reason,
             "planPath": plan_path,
@@ -2423,6 +2478,43 @@ class Guard:
                     self.last_wake_at = now
                     result["woke"] = True
                 return result
+        # 2.2.26 T63 空闲兜底：安静期连续 idleWakeRounds 轮（默认 5≈10 分钟）→
+        # 报平安 + Backlog 全量清单（含 ⏸ 排队/⏸ 待外部条目，AMEND）；受全局冷却
+        # 去重；触发后计数清零；总舵 working/blocked/缺失不累计（见上方计数逻辑）。
+        if idle_wake_cfg > 0 and self.idle_quiet_rounds >= idle_wake_cfg:
+            cooldown = guard_cfg["wakeCooldownMinutes"] * 60
+            if (self.last_wake_at is not None
+                    and now - self.last_wake_at < cooldown):
+                self.log(f"空闲兜底叫醒冷却中，跳过（连续安静 "
+                         f"{self.idle_quiet_rounds} 轮）")
+                return result
+            backlog_rows = list(pending) + list(paused)
+            lines = [
+                f"guard 空闲兜底：无待办且无在跑 worker，安静期已连续 "
+                f"{self.idle_quiet_rounds} 轮（约 "
+                f"{self.idle_quiet_rounds * self.interval // 60} 分钟），报平安。",
+            ]
+            if backlog_rows:
+                lines.append("Backlog 清单（不含已完成，前 20 条）：")
+                lines.extend(f"- {todo.text}" for todo in backlog_rows[:20])
+                if len(backlog_rows) > 20:
+                    lines.append(f"- …等 {len(backlog_rows)} 条")
+            else:
+                lines.append("Backlog 清单：无条目。")
+            lines.append("如 Backlog 有可派/排队条目，请评估续派；否则无需动作。")
+            lines.append(self._freshness_note())
+            lines.append("请接手编排。")
+            message = "\n".join(lines)
+            try:
+                self._wake(message, agents, now)
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"空闲兜底叫醒失败：{type(exc).__name__}: {exc}")
+            self.last_wake_at = now
+            self.idle_quiet_rounds = 0
+            result["woke"] = True
+            result["idleWake"] = True
+            result["idleQuietRounds"] = 0
+            return result
         if not reason:
             return result
         cooldown = guard_cfg["wakeCooldownMinutes"] * 60
@@ -2501,6 +2593,11 @@ def build_parser() -> argparse.ArgumentParser:
 叫醒口径：有待办 + 无在跑 worker 连续 2 轮；若上一轮有 working、本轮全部转 idle
 则立即叫醒（受 guard.wakeCooldownMinutes 全局冷却，默认 10 分钟）；blocked 与
 awaiting_approval 单独叫醒；pending 真 idle 按 guard.pendingHeartbeatMinutes 心跳；
+空闲兜底（2.2.26）：无待办/无在跑/无卡住且 helm idle/done 连续 guard.idleWakeRounds
+轮（默认 5≈10 分钟，0=关闭）报平安 + Backlog 清单（不含已完成；可派/⏸/⛔ 全列）；
+Backlog ⏸ 两态：含外部条件语义（待 Captain/待 C/留 Captain/待拍板/待评审/待授权/
+待窗口）→「⏸ 待外部」不计待办；其余 ⏸（排队语义）→「⏸ 排队」计入待办数据但不
+触发即时叫醒，由空闲兜底承载；
 在跑 worker = Herdr agent_status == working + `<crew-dir>/runs/` 存活注册
 （`crew-claude.py run` 写入；死 pid/坏 JSON/缺 pid 忽略并记日志；存活注册需进程
 身份/年龄核验，pid 复用按死处理并删除注册）；

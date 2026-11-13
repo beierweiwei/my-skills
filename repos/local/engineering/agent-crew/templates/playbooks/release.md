@@ -5,7 +5,7 @@
 ## 适用与退出条件
 
 - 适用：技能版本发布/升级——版本号与 CHANGELOG、全量测试与静态检查、同步与 push、用户目录刷新、项目 upgrade/init/doctor、升级后重启与可交接检查、安装后验证技能交付门与发布后维护循环。
-- 退出：五处版本一致且检查全绿；同步与 push 完成；用户目录与项目安装均为新版本；升级后 guard 重启验证通过、guard 存在核验（`python3 scripts/doctor.py --only runtime.guard` pass 且 detail 带 pid）通过、长驻角色处置与可交接性实测留证；收口回执发出；发布后维护循环结论（clean/changed/blocked）已落盘并写入发布回执；报告落盘合规：禁止正文进 Bash 命令文本（heredoc/echo/printf 均算）；qoder 用 `python3 scripts/crew-write.py --from-transcript --out 目标路径`（正文放 crew-report 围栏并紧接调用），claude 走 crew-claude.py stdout，opencode/有 Write 角色用 Write，无 Write 且 transcript 不可用才分段兜底（单段反引号 ≤40、段内无 rm/rmdir 词、tie ≤40；禁止拆段/编码规避）；审批等待不可自救，检测归 guard 卡死检测。
+- 退出：五处版本一致且检查全绿；同步与 push 完成（默认口径：commit 后默认 push 技能源发布分支与 my-skills master，远端 HEAD 核对一致；local-only 仓例外只本地 commit）；用户目录与项目安装均为新版本；升级后 guard 重启验证通过、guard 存在核验（`python3 scripts/doctor.py --only runtime.guard` pass 且 detail 带 pid）通过、长驻角色处置与可交接性实测留证；收口回执发出；发布后维护循环结论（clean/changed/blocked）已落盘并写入发布回执；报告落盘合规：禁止正文进 Bash 命令文本（heredoc/echo/printf 均算）；qoder 用 `python3 scripts/crew-write.py --from-transcript --out 目标路径`（正文放 crew-report 围栏并紧接调用），claude 走 crew-claude.py stdout，opencode/有 Write 角色用 Write，无 Write 且 transcript 不可用才分段兜底（单段反引号 ≤40、段内无 rm/rmdir 词、tie ≤40；禁止拆段/编码规避）；审批等待不可自救，检测归 guard 卡死检测。
 
 ## Phases
 
@@ -25,9 +25,10 @@
 ### Phase 3: 同步与 push
 - owner: firstmate
 - [ ] 技能源本地 commit，回执记录 commit hash；不夹带无关改动（F2）
-- [ ] 同步到 my-skills 仓库并 commit；push 前先 `git push --dry-run` 确认提交范围
-- [ ] dry-run 无异常后 push master（仅 Captain 已授权的仓）；记录 push 前后 `origin/master` hash
-- [ ] dry-run 与 push 输出落 `.planning/<task>/evidence/release/myskills-push.txt`
+- [ ] 同步到 my-skills 仓库并 commit；push 前先 `git push --dry-run` 确认提交范围（范围自检，非授权闸门）
+- [ ] dry-run 无异常后按默认口径 push（Captain 2026-11-13 口径：push 不设授权闸门，commit 后默认执行）：技能源 push 当前发布分支（如 crew-v2）、my-skills push `origin/master`；快进推送，非快进先排查并发提交（S1 归因）不强推
+- [ ] 远端 HEAD 核对：两仓各跑 `git ls-remote origin <分支>` 确认远端 HEAD == 本地 HEAD，记录 push 前后 hash 与核对结果；本仓（local-only 仓，如 crew-orchestrator）例外：只本地 commit 不 push，证据注明「local-only 不推」
+- [ ] dry-run 与 push 输出落 `.planning/<task>/evidence/release/myskills-push.txt`（含两仓远端 HEAD 核对结果）
 - **Status:** pending
 
 ### Phase 4: 用户目录刷新

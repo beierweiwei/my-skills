@@ -245,7 +245,7 @@ class GuardTestBase(unittest.TestCase):
 class TodoScanTest(GuardTestBase):
     def test_phase_and_backlog_rules(self):
         self.write_fixture()
-        pending, residual = cg.scan_todos(self.root)
+        pending, residual, _ = cg.scan_todos(self.root)
         texts = [todo.text for todo in pending]
 
         self.assertIn("待办A", texts)
@@ -263,13 +263,13 @@ class TodoScanTest(GuardTestBase):
 
     def test_backlog_completed_rows_are_skipped(self):
         self.write_fixture(stream=EMPTY_STREAM, portfolio=BACKLOG_DONE_PORTFOLIO)
-        pending, residual = cg.scan_todos(self.root)
+        pending, residual, _ = cg.scan_todos(self.root)
         self.assertEqual(pending, [])
         self.assertEqual(residual, [])
 
     def test_backlog_waiting_captain_rows_are_skipped(self):
         self.write_fixture(stream=EMPTY_STREAM, portfolio=BACKLOG_WAITING_PORTFOLIO)
-        pending, residual = cg.scan_todos(self.root)
+        pending, residual, _ = cg.scan_todos(self.root)
         self.assertEqual(pending, [])
         self.assertEqual(residual, [])
 
@@ -282,7 +282,7 @@ class TodoScanTest(GuardTestBase):
                 + "-->\n"
             )
         )
-        pending, _ = cg.scan_todos(self.root)
+        pending, _, _ = cg.scan_todos(self.root)
         self.assertNotIn("注释里的待办", [todo.text for todo in pending])
 
 
@@ -730,7 +730,8 @@ class BlockedSlaTest(GuardTestBase):
             {"blockedRepeatMinutes": 15, "blockedGraceMinutes": 30,
              "approvalWaitMinutes": 15, "approvalRepeatMinutes": 30,
              "approvalGraceMinutes": 60, "approvalMaxAgeMinutes": 240,
-             "wakeCooldownMinutes": 10, "pendingHeartbeatMinutes": 15},
+             "wakeCooldownMinutes": 10, "pendingHeartbeatMinutes": 15,
+             "idleWakeRounds": 5},
             cg.load_config(self.root)["guard"],
         )
         cases = (
@@ -1118,7 +1119,7 @@ class PhaseStatusParseTest(GuardTestBase):
                     stream=self.IN_PROGRESS_PLAN.format(status=status),
                     portfolio=EMPTY_PORTFOLIO,
                 )
-                pending, residual = cg.scan_todos(self.root)
+                pending, residual, _ = cg.scan_todos(self.root)
                 self.assertEqual([todo.text for todo in pending], ["待办A"])
                 self.assertEqual(residual, [])
 
@@ -1131,7 +1132,7 @@ class PhaseStatusParseTest(GuardTestBase):
             ),
             portfolio=EMPTY_PORTFOLIO,
         )
-        pending, residual = cg.scan_todos(self.root)
+        pending, residual, _ = cg.scan_todos(self.root)
         self.assertEqual([todo.text for todo in pending], ["待办P"])
         self.assertEqual([todo.text for todo in residual], ["残留C"])
 
@@ -2859,6 +2860,227 @@ class ReworkReminderTest(GuardTestBase):
         self.assertEqual([{"task": "T22", "receipts": 3}], payload["rework"])
         self.assertEqual(before,
                          sorted(p.name for p in (self.crew / "inbox").iterdir()))
+
+
+# —— 2.2.26 T63：Backlog ⏸ 两态与 idle 兜底叫醒 ——
+# AMEND：⏸ 排除规则细化——纯排队 ⏸（下批/batch/评估中）入排队桶（不计 pending、
+# 不触发即时叫醒、由 idle 兜底承载）；⏸+外部条件语义（待 Captain 等）不计待办。
+BACKLOG_PAUSED_QUEUE_PORTFOLIO = """# Task Plan: 总览
+
+## Backlog
+
+| # | 目标 | P | 依赖 | 阻塞 |
+|---|---|---|---|---|
+| T1 | 下批技能小修 | P1 | - | ⏸ 下批 |
+| T2 | 等评估收尾 | P2 | - | ⏸ 评估中 |
+"""
+
+BACKLOG_PAUSED_CAPTAIN_PORTFOLIO = """# Task Plan: 总览
+
+## Backlog
+
+| # | 目标 | P | 依赖 | 阻塞 |
+|---|---|---|---|---|
+| T3 | 待拍板事项 | P1 | - | ⏸ 待 Captain |
+"""
+
+BACKLOG_PAUSED_MIXED_PORTFOLIO = """# Task Plan: 总览
+
+## Backlog
+
+| # | 目标 | P | 依赖 | 阻塞 |
+|---|---|---|---|---|
+| T1 | 下批技能小修 | P1 | - | ⏸ 下批 |
+| T3 | 待拍板事项 | P1 | - | ⏸ 待 Captain |
+"""
+
+HELM_IDLE = {"name": "helm-1", "agent_status": "idle"}
+
+
+class BacklogPausedScanTest(GuardTestBase):
+    """AMEND·T63：scan_todos 三桶——⏸ 排队与 ⏸ 外部条件分桶，均不计 pending。"""
+
+    def test_paused_queue_rows_go_to_paused_bucket(self):
+        self.write_fixture(stream=EMPTY_STREAM,
+                           portfolio=BACKLOG_PAUSED_QUEUE_PORTFOLIO)
+        pending, residual, paused = cg.scan_todos(self.root)
+        self.assertEqual(pending, [])
+        self.assertEqual(residual, [])
+        texts = [todo.text for todo in paused]
+        self.assertEqual(len(texts), 2)
+        self.assertTrue(all(text.startswith("⏸") for text in texts))
+        self.assertTrue(all("排队" in text for text in texts))
+        self.assertTrue(any("T1 下批技能小修" in text for text in texts))
+        self.assertTrue(any("T2 等评估收尾" in text for text in texts))
+
+    def test_paused_captain_rows_marked_external(self):
+        self.write_fixture(stream=EMPTY_STREAM,
+                           portfolio=BACKLOG_PAUSED_CAPTAIN_PORTFOLIO)
+        pending, residual, paused = cg.scan_todos(self.root)
+        self.assertEqual(pending, [])
+        self.assertEqual(len(paused), 1)
+        self.assertIn("待外部", paused[0].text)
+        self.assertIn("T3 待拍板事项", paused[0].text)
+
+    def test_mixed_paused_rows_split_correctly(self):
+        self.write_fixture(stream=EMPTY_STREAM,
+                           portfolio=BACKLOG_PAUSED_MIXED_PORTFOLIO)
+        pending, _, paused = cg.scan_todos(self.root)
+        self.assertEqual(pending, [])
+        self.assertEqual(len(paused), 2)
+        self.assertTrue(any("待外部" in todo.text for todo in paused))
+        self.assertTrue(any("排队" in todo.text for todo in paused))
+
+    def test_unpaused_backlog_rows_still_go_to_pending(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=BACKLOG_MIXED_PORTFOLIO)
+        pending, _, paused = cg.scan_todos(self.root)
+        self.assertEqual([todo.text for todo in pending],
+                         ["T1 未完成主线", "T4 边界词", "T5 中文未完成"])
+        # T2「待 C1」属外部条件语义：入暂停桶（⏸ 待外部），不计 pending（AMEND）
+        self.assertEqual([todo.text for todo in paused],
+                         ["⏸ 待外部：T2 待拍板"])
+
+    def test_blocked_backlog_rows_go_to_paused_bucket(self):
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=PORTFOLIO_PLAN)
+        pending, _, paused = cg.scan_todos(self.root)
+        self.assertEqual([todo.text for todo in pending],
+                         ["流A首个切片", "T1 可执行任务"])
+        self.assertIn("⛔ 阻塞：T3 已阻塞任务", [todo.text for todo in paused])
+
+    def test_paused_rows_do_not_trigger_immediate_wake(self):
+        self.write_fixture(stream=EMPTY_STREAM,
+                           portfolio=BACKLOG_PAUSED_QUEUE_PORTFOLIO)
+        self.agents = [HELM_IDLE]
+        guard = self.make_guard()
+        first = guard.run_once()
+        self.assertFalse(first["woke"])
+        self.assertEqual(first["backlogPaused"], 2)
+        second = guard.run_once()
+        self.assertFalse(second["woke"], "排队 ⏸ 不触发两轮 debounce 即时叫醒")
+        self.assertEqual(self.prompt_calls, [])
+
+
+class IdleBackoffWakeTest(GuardTestBase):
+    """2.2.26 T63：空闲兜底叫醒——安静期报平安 + Backlog 全量清单（含 ⏸ 条目）。"""
+
+    def config(self, rounds: int) -> dict:
+        return {"guard": {"idleWakeRounds": rounds}}
+
+    def quiet_fixture(self, config: dict) -> None:
+        self.write_fixture(stream=EMPTY_STREAM,
+                           portfolio=BACKLOG_PAUSED_QUEUE_PORTFOLIO,
+                           config=config)
+
+    def test_idle_backoff_wakes_after_n_rounds(self):
+        self.quiet_fixture(self.config(3))
+        self.agents = [HELM_IDLE]
+        guard = self.make_guard()
+        for i in range(3):
+            result = guard.run_once()
+            if i < 2:
+                self.assertFalse(result["woke"], f"第 {i + 1} 轮未达阈值不叫")
+        self.assertTrue(result["woke"], "第 3 轮空闲兜底叫醒")
+        self.assertTrue(result.get("idleWake"))
+        message = self.prompt_calls[0][1]
+        self.assertIn("报平安", message)
+        self.assertIn("空闲", message)
+        # AMEND：Backlog 全量清单含 ⏸ 条目
+        self.assertIn("T1 下批技能小修", message)
+        self.assertIn("T2 等评估收尾", message)
+        self.assertIn("⏸ 排队", message)
+
+    def test_idle_backoff_not_before_n_rounds_default(self):
+        self.quiet_fixture({})  # 默认 idleWakeRounds=5
+        self.agents = [HELM_IDLE]
+        guard = self.make_guard()
+        for i in range(4):
+            result = guard.run_once()
+            self.assertFalse(result["woke"], f"第 {i + 1} 轮未达默认 5 轮不叫")
+        self.assertEqual(self.prompt_calls, [])
+
+    def test_idle_backoff_helm_working_no_wake(self):
+        self.quiet_fixture(self.config(2))
+        self.agents = [{"name": "helm-1", "agent_status": "working"}]
+        guard = self.make_guard()
+        for _ in range(3):
+            result = guard.run_once()
+            self.assertFalse(result["woke"], "总舵 working 期间不兜底叫醒")
+        self.agents = [HELM_IDLE]
+        result = guard.run_once()
+        self.assertFalse(result["woke"], "转 idle 后第 1 轮计数从零起")
+        result = guard.run_once()
+        self.assertTrue(result["woke"])
+
+    def test_idle_backoff_helm_blocked_no_wake(self):
+        self.quiet_fixture(self.config(2))
+        self.agents = [{"name": "helm-1", "agent_status": "blocked"}]
+        guard = self.make_guard()
+        for _ in range(3):
+            result = guard.run_once()
+            self.assertFalse(result["woke"], "总舵 blocked 期间不兜底叫醒")
+
+    def test_idle_backoff_disabled_when_zero(self):
+        self.quiet_fixture(self.config(0))
+        self.agents = [HELM_IDLE]
+        guard = self.make_guard()
+        for _ in range(6):
+            result = guard.run_once()
+            self.assertFalse(result["woke"], "idleWakeRounds=0 关闭兜底")
+        self.assertEqual(self.prompt_calls, [])
+
+    def test_idle_backoff_respects_cooldown(self):
+        self.quiet_fixture(self.config(2))
+        self.agents = [HELM_IDLE]
+        guard = self.make_guard()
+        for _ in range(2):
+            guard.run_once()
+        self.assertTrue(self.prompt_calls, "首次兜底叫醒发生")
+        # 触发后计数清零：重新积累 2 轮再触达兜底条件，但仍在冷却窗口内
+        for i in range(2):
+            result = guard.run_once()
+            self.assertFalse(result["woke"], f"冷却窗口内第 {i + 1} 轮不重复叫醒")
+        self.assertTrue(any("冷却中" in line for line in self.logs))
+        self.assertEqual(len(self.prompt_calls), 1)
+
+    def test_idle_backoff_counter_resets_on_working_worker(self):
+        self.quiet_fixture(self.config(3))
+        self.agents = [HELM_IDLE]
+        guard = self.make_guard()
+        for _ in range(2):
+            guard.run_once()
+        self.agents = [HELM_IDLE, {"name": "worker-1", "agent_status": "working"}]
+        result = guard.run_once()
+        self.assertFalse(result["woke"])
+        self.assertEqual(result["idleQuietRounds"], 0, "出现 working 清零计数")
+        self.agents = [HELM_IDLE]
+        for i in range(3):
+            result = guard.run_once()
+        self.assertTrue(result["woke"], "重新积累满 3 轮后兜底叫醒")
+
+    def test_idle_backoff_counter_resets_when_pending_appears(self):
+        self.quiet_fixture(self.config(3))
+        self.agents = [HELM_IDLE]
+        guard = self.make_guard()
+        for _ in range(2):
+            guard.run_once()
+        # 有可派 pending 时交回既有 pending 通道，兜底计数清零
+        self.write_fixture(portfolio=BACKLOG_MIXED_PORTFOLIO, config=self.config(3))
+        result = guard.run_once()
+        self.assertFalse(result["woke"])
+        self.assertEqual(result["idleQuietRounds"], 0)
+
+    def test_idle_backoff_lists_external_and_queue_rows(self):
+        self.write_fixture(stream=EMPTY_STREAM,
+                           portfolio=BACKLOG_PAUSED_MIXED_PORTFOLIO,
+                           config=self.config(1))
+        self.agents = [HELM_IDLE]
+        guard = self.make_guard()
+        result = guard.run_once()
+        self.assertTrue(result["woke"])
+        message = self.prompt_calls[0][1]
+        self.assertIn("⏸ 排队", message)
+        self.assertIn("⏸ 待外部", message)
+        self.assertIn("T3 待拍板事项", message)
 
 
 if __name__ == "__main__":

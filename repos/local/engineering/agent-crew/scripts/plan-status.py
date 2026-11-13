@@ -11,7 +11,7 @@
                                               # 另附内容卫生提醒：Next Step 超长/含 ✅ 或 [x]、
                                               # 🟡 无 owner、样板占位残留；默认只提醒 rc=0，
                                               # --strict 才把卫生提醒升为失败）
-    python3 scripts/plan-status.py --brief    # 一屏摘要（≤40 行）：活跃流表（流/阶段/完成数+健康/
+    python3 scripts/plan-status.py --brief    # 一屏摘要（≤40 行）：活跃流表（流/阶段/阶段完成数+健康/
                                               # 下一步/待 Captain）+ 待 Captain 摘要 + 今日变化
                                               # （progress 今日条目 ≤3 行）；只读不写
     python3 scripts/plan-status.py --playbooks <path>
@@ -61,7 +61,7 @@ backlog.captainBlocks（T→C 阻塞映射）。
 承载，不计入活跃）/最差健康/待 Captain/今日变化）+ 健康图例一行（🟢 完成/🟡 进行中/
 🔴 阻塞或偏差）+ 今日变化 ≤3 行 + 待 Captain 摘要
 ≤5 条（与流表前置，selftest 守护）+ 流表（流/阶段/
-完成数+健康/下一步一句话/待 Captain 数，与 --brief 同表头；排序＝活跃 → 待立项 →
+阶段完成数+健康/下一步一句话/待 Captain 数，与 --brief 同表头；排序＝活跃 → 待立项 →
 已完成，已完成折叠为计数行，活跃/待立项不被体量上限挤出）+ 最近完成 ≤5 条 +
 偏差/Backlog 计数 + 证据/plan 指针；不整段导出总舵 Next Step、业务链逐节点、各流 todo
 与偏差/Backlog 明细（真源仍在各 plan，按指针 grep）；体量硬 ≤120 行/24KB，超限确定性
@@ -205,7 +205,15 @@ BRIEF_TODAY_SCAN = 20  # 今日变化最多回看的 progress 条目数（顶部
 BRIEF_NEXT_STEP_CELL_MAX = 60  # 表内「下一步」单元格字符上限
 BRIEF_CAPTAIN_CELL_MAX = 120   # 待 Captain 摘要单行字符上限
 BRIEF_TODAY_CELL_MAX = 120     # 今日变化单行字符上限
-BRIEF_TABLE_HEADER = "| 流 | 阶段 | 完成数/健康 | 下一步 | 待 Captain |"
+BRIEF_TABLE_HEADER = "| 流 | 阶段 | 阶段完成数/健康 | 下一步 | 待 Captain |"
+
+# 2.2.26 T62-b：plan section 标题尾部括注归一——`## 最近完成（最近 5 条）` → 最近完成。
+SECTION_PAREN_RE = re.compile(r"[（(][^）)]*[）)]\s*$")
+
+
+def _normalize_section(title: str) -> str:
+    """剥 section 标题尾部括注（全角/半角）并去空白；正文不受影响。"""
+    return SECTION_PAREN_RE.sub("", title).strip()
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -416,7 +424,7 @@ def parse_plan(path: Path, root: Path) -> Plan:
             plan.title = line[2:].strip()
             continue
         if line.startswith("## "):
-            section, phase = line[3:].strip(), None
+            section, phase = _normalize_section(line[3:].strip()), None
             plan.sections.setdefault(section, [])
             continue
         phase_head = PHASE_RE.match(line)
@@ -1023,7 +1031,7 @@ def _today_changes(root: Path, cfg: dict, today: str) -> list[str]:
 
 
 def _stream_table_row(name: str, target: Plan | None, fallback_health: str = "") -> str:
-    """流表一行（看板与 --brief 同口径）：流/阶段/完成数+健康/下一步一句话 ≤60 字符/
+    """流表一行（看板与 --brief 同口径）：流/阶段/阶段完成数+健康/下一步一句话 ≤60 字符/
     待 Captain 数；无 plan 的流按「Backlog 承载」占位。"""
     if target is None:
         return f"| {_clip(cell(name), BOARD_CELL_CLIP)} | — | —（Backlog 承载） | — | 0 |"
@@ -1058,7 +1066,7 @@ def _fit_board(lines: list[str], pdir: str) -> list[str]:
 
 def _render_brief(root: Path, cfg: dict, plans: list[Plan]) -> tuple[list[str], int]:
     """一屏摘要行（--brief 与 --handover 预算共用同一渲染口径）：活跃流表（流/阶段/
-    完成数+健康/下一步/待 Captain 计数）+ 待 Captain 摘要（portfolio C 前缀与 ⏸ 项 +
+    阶段完成数+健康/下一步/待 Captain 计数）+ 待 Captain 摘要（portfolio C 前缀与 ⏸ 项 +
     各流 Backlog/业务链 ⏸）+ 今日变化（progress 今日条目 ≤3 行）；末尾附卫生 lint
     提醒计数。返回 (≤BRIEF_MAX_LINES 行的输出, 截断前超出行数；0=未截断)。"""
     pattern = cfg["portfolioMatch"]
@@ -1607,12 +1615,102 @@ def _hygiene_file(path: Path, root: Path) -> list[LintIssue]:
 
 
 def hygiene_issues(plans: list[Plan]) -> list[LintIssue]:
-    """各 plan 的内容卫生提醒（不阻断）；完成流整体豁免（含收口型 Next Step）。"""
+    """各 plan 的内容卫生提醒（不阻断）；完成流整体豁免（含收口型 Next Step）。
+
+    2.2.26 T62-c：另加 portfolio 层跨文件三类维护缺口探针（progress-date /
+    plan-unregistered / phase-status-mismatch），不受完成流豁免影响（缺口探针的
+    语义恰是状态对不上）。
+    """
     issues: list[LintIssue] = []
     for plan in plans:
         if plan.phases and plan.complete >= plan.total:
             continue
         issues.extend(_hygiene_file(plan.path, plan.root))
+    issues.extend(_portfolio_hygiene(plans))
+    return issues
+
+
+def _progress_hygiene(root: Path, cfg: dict) -> list[LintIssue]:
+    """progress「自动驾驶里程」条目缺日期前缀提醒（T62-c1；应 `- YYYY-MM-DD …`）。"""
+    pdir = str(cfg.get("portfolioDir") or ".planning/portfolio").rstrip("/")
+    path = root / pdir / PROGRESS_NAME
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        rel = path.relative_to(root).as_posix()
+    except OSError:
+        return []
+    issues: list[LintIssue] = []
+    in_section = False
+    for line_no, raw in enumerate(lines, 1):
+        stripped = raw.strip()
+        if stripped.startswith("## "):
+            in_section = PROGRESS_SECTION in stripped
+            continue
+        if not in_section or not stripped.startswith("- "):
+            continue
+        if not PROGRESS_ENTRY_RE.match(stripped):
+            issues.append(LintIssue(rel, line_no, "progress-date",
+                f"progress 条目缺日期前缀（应 `- YYYY-MM-DD …`）：{_clip(stripped, 40)}"))
+    return issues
+
+
+def _portfolio_hygiene(plans: list[Plan]) -> list[LintIssue]:
+    """portfolio 层跨文件卫生提醒（T62-c；CASE helm6332-board-hygiene-20261113-1）：
+
+    - plan-unregistered：`.planning/*/task_plan.md` 存在但未登记 portfolio Phases
+      （无 `- plan:` 行）——登记或归档。
+    - phase-status-mismatch：portfolio Phase Status=complete 但引用 plan 内存在
+      非 complete Phase——两侧状态对齐。
+    """
+    if not plans:
+        return []
+    root = plans[0].root
+    cfg = load_config(root)
+    issues = _progress_hygiene(root, cfg)
+    pattern = cfg["portfolioMatch"]
+    portfolio = next(
+        (p for p in plans if fnmatch.fnmatch(p.path.parent.name, pattern)), None)
+    if portfolio is None:
+        return issues
+    index = {p.rel: p for p in plans}
+    registered: set[str] = set()
+    for line in portfolio.sections.get("Phases", []):
+        m = PLAN_REF_RE.match(line.strip())
+        if m:
+            registered.add(m.group(1).split("#")[0])
+    for plan in plans:
+        if plan is portfolio or plan.rel in registered:
+            continue
+        issues.append(LintIssue(plan.rel, 1, "plan-unregistered",
+            f"plan 未登记 portfolio Phases（缺 `- plan: {plan.rel}` 行）；"
+            "补登记或归档（移出 `.planning/*/task_plan.md` 扫描范围）"))
+    # phase-status-mismatch：重扫 portfolio 文件关联 Phase 状态与 `- plan:` 引用
+    #（`- plan:` 行通常先于 **Status:** 行出现，先收集再合成）
+    phase_complete: dict[str, bool] = {}
+    phase_ref: dict[str, tuple[int, str]] = {}
+    current = None
+    for line_no, raw in enumerate(portfolio.path.read_text(
+            encoding="utf-8").splitlines(), 1):
+        head = PHASE_RE.match(raw)
+        if head:
+            current = head.group(1)
+            continue
+        m = STATUS_RE.search(raw)
+        if m and current:
+            phase_complete[current] = m.group(1) == "complete"
+            continue
+        m = PLAN_REF_RE.match(raw.strip())
+        if m and current:
+            phase_ref[current] = (line_no, m.group(1).split("#")[0])
+    for name, (line_no, ref) in phase_ref.items():
+        target = index.get(ref)
+        if not phase_complete.get(name) or target is None:
+            continue
+        unfinished = [pname for pname, st in target.phases if st != "complete"]
+        if unfinished:
+            issues.append(LintIssue(portfolio.rel, line_no, "phase-status-mismatch",
+                f"portfolio Phase「{name}」complete 但引用 plan 内 Phase 未 "
+                f"complete（{', '.join(unfinished[:3])}）；两侧状态对齐"))
     return issues
 
 
@@ -1871,7 +1969,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--brief",
         action="store_true",
-        help=f"一屏摘要（≤{BRIEF_MAX_LINES} 行）：活跃流表（流/阶段/完成数+健康/下一步/待 Captain）"
+        help=f"一屏摘要（≤{BRIEF_MAX_LINES} 行）：活跃流表（流/阶段/阶段完成数+健康/下一步/待 Captain）"
              "+ 待 Captain 摘要 + 今日变化（progress 今日条目 ≤3 行）；只读 .planning，不写文件",
     )
     parser.add_argument(
