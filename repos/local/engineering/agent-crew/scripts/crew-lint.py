@@ -64,7 +64,8 @@ BUDGETS: tuple[tuple[str, int], ...] = (
     ("templates/_templates/ticket.md", 15),
 )
 TEMPLATE_FILES = tuple(rel for rel, _ in BUDGETS)
-EXTRA_DOCS = ("references/crew-rules.md", "references/crew-acceptance.md", "SKILL.md")
+EXTRA_DOCS = ("references/crew-rules.md", "references/crew-acceptance.md",
+              "references/verification-redlines.md", "SKILL.md")
 RULES_FILE = "references/crew-rules.md"
 ACCEPTANCE_FILE = "references/crew-acceptance.md"
 

@@ -134,7 +134,7 @@ class CrewLintTest(unittest.TestCase):
             text=True,
         )
         self.assertEqual(repo.returncode, 0, repo.stderr)
-        self.assertEqual(repo.stdout.strip(), "2.2.21")
+        self.assertEqual(repo.stdout.strip(), "2.2.22")
 
     # ---- 行数预算 --------------------------------------------------------
 
@@ -233,6 +233,26 @@ class CrewLintTest(unittest.TestCase):
         self.assertIn("duplicate", proc.stdout)
         self.assertIn("templates/AGENTS-编排节.md", proc.stdout)
         self.assertIn("templates/_templates/ticket.md", proc.stdout)
+
+    def test_verification_redlines_included_in_duplicate_scan(self):
+        # S-2：verification-redlines.md 纳入 EXTRA_DOCS 后，与既有正文的重复句必须报出
+        self.make_skill()
+        sentence = "验证红线重复句检查需要至少三十个字符才能被脚本报出来用于验证。"
+        self.write("references/verification-redlines.md", f"# VR\n\n{sentence}\n")
+        self.write("templates/_templates/ticket.md", f"# 工单\n\n{sentence}\n")
+        proc = self.lint()
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("duplicate", proc.stdout)
+        self.assertIn("references/verification-redlines.md", proc.stdout)
+
+    def test_verification_delivery_other_name_not_scanned(self):
+        # 防副本按精确文件名：CASE 式不同名文件（verification-and-delivery.md）不误报
+        self.make_skill()
+        sentence = "不同名项目扩展文件不应参与技能内置文档的跨文档重复句扫描验证。"
+        self.write("references/verification-and-delivery.md", f"# CASE\n\n{sentence}\n")
+        self.write("templates/_templates/ticket.md", f"# 工单\n\n{sentence}\n")
+        proc = self.lint()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
     def test_role_pair_duplicate_ignored(self):
         self.make_skill()

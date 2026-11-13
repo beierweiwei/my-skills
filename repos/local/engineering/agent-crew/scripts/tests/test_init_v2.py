@@ -178,6 +178,7 @@ class InitV2Test(unittest.TestCase):
         self.assertIn(".planning/orchestration.json", block)
         self.assertIn("skillRoot", block)
         for rel in ("references/crew-rules.md", "references/crew-acceptance.md",
+                    "references/verification-redlines.md",
                     "references/orchestration-guide.md", "references/plan-discipline.md",
                     "references/herdr-cheatsheet.md", "templates/playbooks/",
                     "templates/playbooks/README.md", "SKILL.md", "CHANGELOG.md"):
@@ -367,6 +368,28 @@ class InitV2Test(unittest.TestCase):
         code, out = self.run_init_at(fx.root, "--check")
         self.assertEqual(1, code, out)
         self.assertIn(copy_rel, out)
+
+    def test_check_flags_verification_redlines_copy_only(self):
+        # S-3：VR 正文同名副本判「规则/技能源副本」；不同名 CASE 扩展文件不误报
+        base = Path(self._tmp.name) / "fx"
+        fx = ProjectFixture(base)
+        fx.config["skillVersion"] = init_v2.read_skill_version()
+        fx.write_config()
+        self.write_aligned_manifest(fx)
+        copy = fx.root / "docs/crew/verification-redlines.md"
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        copy.write_text("# vr copy\n", encoding="utf-8")
+
+        code, out = self.run_init_at(fx.root, "--check")
+        self.assertEqual(1, code, out)
+        self.assertIn("docs/crew/verification-redlines.md", out)
+
+        copy.unlink()
+        other = fx.root / "docs/crew/verification-and-delivery.md"
+        other.write_text("# project extension\n", encoding="utf-8")
+        code, out = self.run_init_at(fx.root, "--check")
+        self.assertEqual(0, code, out)
+        self.assertNotIn("verification-and-delivery.md", out)
 
     def test_absolute_skill_root_warns(self):
         self.run_init("--yes")

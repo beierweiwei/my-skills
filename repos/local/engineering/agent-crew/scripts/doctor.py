@@ -76,7 +76,8 @@ AGENTS_COMMAND_NEXT = "安装缺失命令或改用已安装的 backend（backend
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 COPY_BASENAMES = ("crew-rules.md", "crew-acceptance.md",
-                  "orchestration-guide.md", "plan-discipline.md")
+                  "orchestration-guide.md", "plan-discipline.md",
+                  "verification-redlines.md")
 # docs.duplicate 扫描清单：AGENTS.md、配置 topology/projectExt、角色文件，以及
 # docs/**/*.md 中文件名匹配 编排|orchestration|协作|agents（大小写不敏感）的编排文档。
 ORCH_DOC_NAME_RE = re.compile(r"(编排|orchestration|协作|agents)", re.IGNORECASE)
@@ -1009,7 +1010,8 @@ class Doctor:
                 problems.append(f"skillRoot 位置非法：{rel}（只允许 .qoder/skills/ 或 .opencode/skills/）")
         copies: list[str] = []
         source_names = {"crew-rules.md", "crew-acceptance.md", "SKILL.md",
-                        "orchestration-guide.md", "plan-discipline.md"}
+                        "orchestration-guide.md", "plan-discipline.md",
+                        "verification-redlines.md"}
         for path in self.root.rglob("*"):
             rel = path.relative_to(self.root).as_posix()
             if not path.is_file() or rel.startswith(".git/") or rel.startswith(".planning/"):

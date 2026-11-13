@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.2.22 — 2026-11-13
+
+CASE 验证红线通用部分吸收：VR 文档（VR1–VR6）/真动作验证剧本/验收口径接线（A3.4、A4.4、A5.4、A5.8）/角色模板指针/防副本/T50 汇报首句业务术语；两轮对抗审查 BLOCK → 清零复评 PASS，互检/两轴评审/独立终验全 PASS，本地发布（push 未执行）。
+
+### 新增
+
+- **`references/verification-redlines.md`（VR1–VR6）**：证据层级、产品路径/执行模式（绕行需 Deviation/Captain 批准，浏览器自动化属产品路径）、口径当天同步、凭据指针、顶层验证、熔断建议；每条给与 A/F/X 编号的映射；纯指针不复述 X4/A4/D7 正文与 A3.1/F6 全文，不含 CASE 特有词。
+- **真动作验证剧本 `templates/playbooks/real-action-verification.md`**：83 行六检查点（前置检查/执行/取证时点/顶层验证/停止与熔断/证据清单与收口）；规则只引 VR1–VR6 编号；`templates/playbooks/README.md` 登记适用类型。
+- **验收口径接线**：`crew-acceptance.md` 新增 A3.4 三分法（业务功能按 VR5 顶层入口实测；技能/规则/模板/提示词/文档类按 F6 分级；调研/评审/发布维护类按 A2/F1/F14 核验；未列类型按最近似档判定）；A4.4/A5.8 各加一行 VR 指针；A5.4 扩写（首句业务术语/技术明细分离/正反例/自检，T50）。
+- **规则接线**：`crew-rules.md` F6 加 VR1/VR5 指针；X4 补禁止位置「仓库、证据与对话」与「平台（含平台数据目录）」消歧；G6/R5 不动。
+- **角色模板**：builder/reviewer/firstmate/runner/helm × qoder+opencode 双栈各加 `{{skill_root}}/references/verification-redlines.md` 指针；builder/runner 双栈另加真动作剧本指针；7 角色双栈汇报处并入 T50 首句业务术语要求；`templates/AGENTS-编排节.md` 补 VR 指针。
+- **防副本**：`verification-redlines.md` 纳入 doctor `COPY_BASENAMES`/`source_names`、init `COPY_BASENAMES`、crew-lint `EXTRA_DOCS` 三处脚本清单；本仓 `scripts/crew-lint.py` projectScripts 副本同步。
+
+### 修复
+
+- 删除 A3.4 内部审查编号「（S-R6）」，生产 references 不再含 `S-*` 形态编号；新增 grep 防回退断言（生产 references 全量扫描）。
+- 对抗审查两轮 BLOCK（首轮 3 阻断 + 11 建议 + S-12 上抛；复评残留 B-R1 + 6 建议）→ 逐条处置并清零复评 PASS；互检 PASS（0 阻断 + 4 建议）、两轴评审 PASS（0 阻断 + 3 建议）、独立终验 PASS（0 阻断 + 1 建议 + 2 观察）。
+
+### 测试
+
+- 新增 `test_2222_verification_redlines.py`、`test_2222_real_action_playbook.py`、`test_2222_templates.py`、`test_2222_t50_report_terms.py`；同名副本 fail 与不同名不误报夹具分落 lint/doctor/init 测试。
+- 全量 pytest 0 fail（本版 1482 passed + 1226 subtests）；`crew-lint`（含 `--purity`）、`plan-status --selftest`/`--playbooks` 全绿。
+- 版本 2.2.22：`SKILL.md` frontmatter 与标题、`init.py` fallback、本段、`test_crew_lint.py`、`test_220_final.py`、`test_224_retro.py`、`test_225_patch.py`、`test_2214_guard_presence.py` 版本断言同步。
+
 ## 2.2.21 — 2026-11-13
 
 FB-046 自动驾驶停摆修复：A 报告写入通道 / B guard 卡死检测 / C 周期心跳 / D 模板预防；独立对抗审查两轮 BLOCK → 清零复评 PASS 闭环，互检/两轴评审/独立终验全 PASS，本地发布（push 未执行）。
