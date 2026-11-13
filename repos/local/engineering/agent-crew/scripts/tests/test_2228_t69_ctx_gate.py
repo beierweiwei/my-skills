@@ -286,11 +286,11 @@ class GuardWorkerCtxScanTest(unittest.TestCase):
         self.reads.append(pane)
         return self.pane_text
 
-    def make_guard(self):
+    def make_guard(self, helm_name: str = "helm-1"):
         return cg.Guard(
             root=self.root,
             crew_dir=self.crew,
-            helm="helm-1",
+            helm=helm_name,
             interval=120,
             clock=lambda: self.now[0],
             list_agents=lambda: [
@@ -386,6 +386,40 @@ class GuardWorkerCtxScanTest(unittest.TestCase):
         self.assertNotIn("worker ctx 超阈值", result["reason"])
         self.assertEqual([], [p for p in self.reads if p == "pane-fm-1"],
                          "firstmate 编排角色不得被 worker ctx 扫描")
+
+    def test_helm_drifted_name_excluded_by_registry_role(self):
+        """发布门修复：helm 名漂移（registry 名≠配置名）按 registry role=helm 排除。
+
+        事故形态（2026-11-14 guard.log 17:19）：guard 记录
+        crew-orchestrator-helm，实际工位 crew-orchestrator-helm-10——配置名
+        排除失效，helm 42% 被误报「worker ctx 超阈值」。修后以 registry 最新
+        role=helm 记录为准，漂移名同样排除。
+        """
+        self._write(self.crew / "dispatch-agents.json", json.dumps(
+            {"crew-orchestrator-helm-10": {"role": "helm", "runtime": "claude"}}))
+        self.agents = [{"name": "crew-orchestrator-helm-10",
+                        "agent_status": "idle"}]
+        self.pane_text = "ctx 420k/1M"
+        guard = self.make_guard(helm_name="crew-orchestrator-helm")
+        result = guard.run_once()
+        self.assertNotIn("worker ctx 超阈值", result["reason"],
+                         "helm 漂移名不得触发 worker ctx 告警")
+        self.assertNotIn("crew-orchestrator-helm-10 42%", result["reason"])
+        self.assertNotIn("/compact", " ".join(
+            body for _, body in self.prompt_calls),
+            "helm 不适用 40/60 worker 口径（compact 指令不得下发）")
+
+    def test_helm_drifted_firstmate_role_not_scanned(self):
+        """漂移名 + registry role=firstmate 同样排除（role 判定统一，不看名字）。"""
+        self._write(self.crew / "dispatch-agents.json", json.dumps(
+            {"fm-drifted-2": {"role": "firstmate", "runtime": "qoder"}}))
+        self.agents = [{"name": "fm-drifted-2", "agent_status": "idle"}]
+        self.pane_text = "ctx 420k/1M"
+        guard = self.make_guard(helm_name="fm-drifted-1")
+        result = guard.run_once()
+        self.assertNotIn("worker ctx 超阈值", result["reason"])
+        self.assertEqual([], [p for p in self.reads if p == "pane-fm-drifted-2"],
+                         "firstmate 漂移名不得被 worker ctx 扫描")
 
     def test_unresolved_ctx_logged_and_deduped(self):
         """4c②：ctx 解析不出必须可见（按 agent 去重记日志），恢复后复位。"""

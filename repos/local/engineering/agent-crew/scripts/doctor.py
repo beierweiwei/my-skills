@@ -1676,9 +1676,13 @@ class Doctor:
                 problems.append("缺 composedPath")
             else:
                 composed_path = Path(str(composed))
+                # 白名单=各 runtime 组合产物落点（T57 起含 claude 栈
+                # .claude/agents；发布门修复：此前缺该落点，claude 启动
+                # 记录全报「composedPath 位置非法」）。
                 allowed = (is_inside(composed_path, crew / "compose")
                            or is_inside(composed_path, self.root / ".qoder/agents/crew")
-                           or is_inside(composed_path, self.root / ".opencode/agent"))
+                           or is_inside(composed_path, self.root / ".opencode/agent")
+                           or is_inside(composed_path, self.root / ".claude/agents"))
                 if not allowed:
                     problems.append(f"composedPath 位置非法：{composed}")
                 elif not composed_path.is_file():
