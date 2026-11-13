@@ -5,7 +5,7 @@
 ## 适用与退出条件
 
 - 适用：技能版本发布/升级——版本号与 CHANGELOG、全量测试与静态检查、同步与 push、用户目录刷新、项目 upgrade/init/doctor、升级后重启与可交接检查、安装后验证技能交付门与发布后维护循环。
-- 退出：五处版本一致且检查全绿；同步与 push 完成；用户目录与项目安装均为新版本；升级后 guard 重启验证通过、guard 存在核验（`python3 scripts/doctor.py --only runtime.guard` pass 且 detail 带 pid）通过、长驻角色处置与可交接性实测留证；收口回执发出；发布后维护循环结论（clean/changed/blocked）已落盘并写入发布回执；收口/终验报告落盘合规——禁止无引号 heredoc/命令替换；单引号 heredoc 写 `/tmp` 再 `cp`，或 Write 工具。
+- 退出：五处版本一致且检查全绿；同步与 push 完成；用户目录与项目安装均为新版本；升级后 guard 重启验证通过、guard 存在核验（`python3 scripts/doctor.py --only runtime.guard` pass 且 detail 带 pid）通过、长驻角色处置与可交接性实测留证；收口回执发出；发布后维护循环结论（clean/changed/blocked）已落盘并写入发布回执；报告落盘合规：禁止正文进 Bash 命令文本（heredoc/echo/printf 均算）；qoder 用 `python3 scripts/crew-write.py --from-transcript --out 目标路径`（正文放 crew-report 围栏并紧接调用），claude 走 crew-claude.py stdout，opencode/有 Write 角色用 Write，无 Write 且 transcript 不可用才分段兜底（单段反引号 ≤40、段内无 rm/rmdir 词、tie ≤40；禁止拆段/编码规避）；审批等待不可自救，检测归 guard 卡死检测。
 
 ## Phases
 
@@ -72,7 +72,7 @@
 
 ### Phase 8: 收口回执
 - owner: firstmate
-- [ ] 报告落盘：禁止无引号 heredoc/命令替换；单引号 heredoc 写 `/tmp` 再 `cp`，或 Write 工具（无引号 heredoc 内的命令替换会触发 Qoder 权限弹窗并卡住会话）
+- [ ] 报告落盘：禁止正文进 Bash 命令文本（heredoc/echo/printf 均算）；qoder 用 `python3 scripts/crew-write.py --from-transcript --out 目标路径`（正文放 crew-report 围栏并紧接调用），claude 走 crew-claude.py stdout，opencode/有 Write 角色用 Write，无 Write 且 transcript 不可用才分段兜底（单段反引号 ≤40、段内无 rm/rmdir 词、tie ≤40；禁止拆段/编码规避）；审批等待不可自救，检测归 guard 卡死检测。
 - [ ] 评审/终验报告必须与回执成对：报告路径/结论/工位处置随回执一并给出，缺回执不得报收口（交叉 FB-041）
 - [ ] 按 R2 写回执：版本/commit/push/用户目录/init/doctor/guard 新 pid/guard 存在核验（`doctor --only runtime.guard` 结果）/长驻角色处置/工位处置
 - [ ] 更新 plan 的 Status 与 Next Step，刷新看板（`python3 scripts/plan-status.py --write`）；交接前 `--check-fresh`

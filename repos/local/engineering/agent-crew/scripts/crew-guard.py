@@ -23,13 +23,27 @@ guard.wake 首行 `generated_at: <ISO8601 Z>`（兼容旧格式裸 ISO 首行）
 cwd 隔离：只统计 cwd 在本仓或 `git worktree list --porcelain` 列出的 linked worktree
 内的 agent；外部项目（其他仓）不参与 running/blocked/快速叫醒。cwd 缺失或不可解析时
 沿用旧口径包含（无法确认归属时不改变既有行为）。
-快速叫醒：上一轮有 working、本轮全部转 idle 且有待办时立即叫醒（仍受 10 分钟冷却）。
+快速叫醒：上一轮有 working、本轮全部转 idle 且有待办时立即叫醒（受全局冷却
+`guard.wakeCooldownMinutes`，默认 10 分钟；不受 pending 心跳间隔压制）。
 blocked 年龄与重复叫醒：按 agent 身份（name，缺省 pane_id）记录首次 blocked 时间；
-首次叫醒沿用 10 分钟全局冷却；仍 blocked 且距该 agent 上次 blocked 叫醒
-≥ config `guard.blockedRepeatMinutes`（默认 15，夹取 1–240）再叫醒，该重复叫醒
-不受全局冷却压制；blocked 累计 ≥ `guard.blockedGraceMinutes`（默认 30，夹取 1–240）
-时叫醒消息提示「按 R6 处置（re-task / close / escalate），应关闭工位或升级 Captain」；
-guard 不自动关闭/杀 agent；agent 不再 blocked 或消失即清除年龄。
+首次叫醒沿用全局冷却（`guard.wakeCooldownMinutes`，默认 10，夹取 1–240）；仍 blocked
+且距该 agent 上次 blocked 叫醒 ≥ config `guard.blockedRepeatMinutes`（默认 15，夹取
+1–240）再叫醒，该重复叫醒不受全局冷却压制；blocked 累计 ≥
+`guard.blockedGraceMinutes`（默认 30，夹取 1–240）时叫醒消息提示「按 R6 处置
+（re-task / close / escalate），应关闭工位或升级 Captain」；guard 不自动关闭/杀
+agent；agent 不再 blocked 或消失即清除年龄。
+等待审批（awaiting_approval）：qoder worker 等待权限对话框时 herdr 仍算 working，
+guard 另有「卡住」来源——`crew_approvals.pending_approvals` 从 qoder run 日志按
+callId 配对 `[permission-ask] prompt/settle`，未闭合且年龄 ≥
+`guard.approvalWaitMinutes`（默认 15，夹取 1–240）即叫醒；重复叫醒按
+agent+callId 去重，间隔 `guard.approvalRepeatMinutes`（默认 30，夹取 1–240）；
+≥ `guard.approvalGraceMinutes`（默认 60，夹取 1–240）附「A 人工批准 / B 关闭重派
+（close + 新 start）/ C 继续等待」建议；≥ `guard.approvalMaxAgeMinutes`（默认 240，
+夹取 1–1440）停止重复并记日志。安全矩阵：helm 自身有未闭合审批时只写 guard.wake +
+通知、不注入；绝不向等待审批的 worker pane 注入任何文本/按键；不自动 close。
+周期心跳：pending 且真 idle（无 working/blocked/awaiting_approval）持续时，按
+`guard.pendingHeartbeatMinutes`（默认 15，夹取 1–240）重复叫醒，仍受全局冷却约束；
+与 blocked/awaiting_approval 同轮只发一条叫醒（reason 合并）。
 自动交接：每轮读总舵 pane 的 `ctx Nk/1M`（`herdr pane read <pane> --lines 80`），
 兼容小数与百分比（`ctx 75.4k/1M`、`ctx 62.3%`）；pane 先按 agent 名解析，
 名字缺失/漂移时回退 <crew-dir>/dispatch-agents.json（按名或最近 role=helm 条目反查，
@@ -78,6 +92,10 @@ from typing import Callable
 
 sys.dont_write_bytecode = True  # 不在项目 scripts/ 留 __pycache__
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:  # 审批等待检测器缺失时仍保留旧值守能力（fail-soft，启动不崩）。
+    from crew_approvals import pending_approvals  # noqa: E402
+except Exception:  # noqa: BLE001
+    pending_approvals = None
 from crew_paths import CrewPathsError, crew_dir as resolve_crew_dir  # noqa: E402
 
 PHASE_RE = re.compile(r"^### Phase\s+\d+\s*[:：]\s*(.+?)\s*$")
@@ -86,7 +104,6 @@ TODO_RE = re.compile(r"^\s*-\s*\[\s\]\s*(.+)$")
 PAUSE_MARKS = ("⏸", "待 Captain", "留 Captain")
 # 英文完成态按词边界判定：避免 incomplete / undone 误命中 complete / done
 DONE_RE = re.compile(r"(?<![a-z])(?:complete|completed|done)(?![a-z])")
-COOLDOWN_SECONDS = 600
 WRITE_INTERVAL_SECONDS = 300
 # 存活 claude 运行注册的进程身份/年龄核验（互检建议-2）：pid 复用按死处理
 CLAUDE_PROCESS_MARKER = "crew-claude"
@@ -125,6 +142,15 @@ DEFAULT_BLOCKED_REPEAT_MINUTES = 15
 DEFAULT_BLOCKED_GRACE_MINUTES = 30
 BLOCKED_MINUTES_MIN = 1
 BLOCKED_MINUTES_MAX = 240
+# awaiting_approval（等待权限对话框）阈值：分钟，全部可经 orchestration.json 覆盖。
+DEFAULT_APPROVAL_WAIT_MINUTES = 15
+DEFAULT_APPROVAL_REPEAT_MINUTES = 30
+DEFAULT_APPROVAL_GRACE_MINUTES = 60
+DEFAULT_APPROVAL_MAX_AGE_MINUTES = 240
+APPROVAL_MAX_AGE_MAX = 1440
+# pending 真 idle 周期心跳与全局叫醒冷却（原硬编码 600s 配置化）。
+DEFAULT_WAKE_COOLDOWN_MINUTES = 10
+DEFAULT_PENDING_HEARTBEAT_MINUTES = 15
 WAKE_FILE_NAME = "guard.wake"
 DEFAULT_WAKE_TTL_SECONDS = 7200
 WAKE_GENERATED_RE = re.compile(r"^generated_at:\s*(\S+)\s*$")
@@ -303,6 +329,12 @@ def load_config(root: Path) -> dict:
         "guard": {
             "blockedRepeatMinutes": DEFAULT_BLOCKED_REPEAT_MINUTES,
             "blockedGraceMinutes": DEFAULT_BLOCKED_GRACE_MINUTES,
+            "approvalWaitMinutes": DEFAULT_APPROVAL_WAIT_MINUTES,
+            "approvalRepeatMinutes": DEFAULT_APPROVAL_REPEAT_MINUTES,
+            "approvalGraceMinutes": DEFAULT_APPROVAL_GRACE_MINUTES,
+            "approvalMaxAgeMinutes": DEFAULT_APPROVAL_MAX_AGE_MINUTES,
+            "wakeCooldownMinutes": DEFAULT_WAKE_COOLDOWN_MINUTES,
+            "pendingHeartbeatMinutes": DEFAULT_PENDING_HEARTBEAT_MINUTES,
         },
     }
     path = root / ".planning" / "orchestration.json"
@@ -340,14 +372,19 @@ def load_config(root: Path) -> dict:
             config["retro"]["periodDays"] = max(1, min(30, period))
     guard = data.get("guard")
     if isinstance(guard, dict):
-        for key, default in (
-            ("blockedRepeatMinutes", DEFAULT_BLOCKED_REPEAT_MINUTES),
-            ("blockedGraceMinutes", DEFAULT_BLOCKED_GRACE_MINUTES),
+        for key, low, high in (
+            ("blockedRepeatMinutes", BLOCKED_MINUTES_MIN, BLOCKED_MINUTES_MAX),
+            ("blockedGraceMinutes", BLOCKED_MINUTES_MIN, BLOCKED_MINUTES_MAX),
+            ("approvalWaitMinutes", BLOCKED_MINUTES_MIN, BLOCKED_MINUTES_MAX),
+            ("approvalRepeatMinutes", BLOCKED_MINUTES_MIN, BLOCKED_MINUTES_MAX),
+            ("approvalGraceMinutes", BLOCKED_MINUTES_MIN, BLOCKED_MINUTES_MAX),
+            ("approvalMaxAgeMinutes", BLOCKED_MINUTES_MIN, APPROVAL_MAX_AGE_MAX),
+            ("wakeCooldownMinutes", BLOCKED_MINUTES_MIN, BLOCKED_MINUTES_MAX),
+            ("pendingHeartbeatMinutes", BLOCKED_MINUTES_MIN, BLOCKED_MINUTES_MAX),
         ):
             value = guard.get(key)
             if isinstance(value, int) and not isinstance(value, bool):
-                config["guard"][key] = max(BLOCKED_MINUTES_MIN,
-                                           min(BLOCKED_MINUTES_MAX, value))
+                config["guard"][key] = max(low, min(high, value))
     return config
 
 
@@ -919,12 +956,18 @@ class Guard:
     run_rotate: Callable[[Path], tuple[int, str]] | None = None
     run_reaper: Callable[[Path, Path], tuple[int, str]] | None = None
     log_fn: Callable[[str], None] | None = None
+    # awaiting_approval 检测器：None = crew_approvals.pending_approvals（可注入便于单测）。
+    stuck_detect: Callable[[list[dict], float], list[dict]] | None = None
     consecutive: int = field(default=0, init=False)
     prev_working: int = field(default=0, init=False)
     last_wake_at: float | None = field(default=None, init=False)
+    last_pending_wake_at: float | None = field(default=None, init=False)
     last_write_at: float | None = field(default=None, init=False)
     blocked_since: dict[str, float] = field(default_factory=dict, init=False)
     blocked_last_wake: dict[str, float] = field(default_factory=dict, init=False)
+    approval_last_wake: dict[str, float] = field(default_factory=dict, init=False)
+    approval_max_logged: set[str] = field(default_factory=set, init=False)
+    approval_logged: set[str] = field(default_factory=set, init=False)
     handoff_attempted: bool = field(default=False, init=False)
     handoff_failed_noted: bool = field(default=False, init=False)
     handoff_wait_rounds: int = field(default=0, init=False)
@@ -1986,6 +2029,130 @@ class Guard:
             lines.append(text)
         return lines
 
+    def _approval_log(self, message: str) -> None:
+        """检测原因按消息去重，避免每轮为同一 agent 重复写 guard.log。"""
+        if message in self.approval_logged:
+            return
+        self.approval_logged.add(message)
+        self.log(message)
+
+    def _detect_stuck(self, agents: list[dict], now: float) -> list[dict]:
+        """检测未闭合 permission-ask（awaiting_approval）；失败 fail-soft 返回空。"""
+        try:
+            if self.stuck_detect is not None:
+                items = self.stuck_detect(agents, now)
+            elif pending_approvals is None:
+                self._approval_log(
+                    "审批等待检测器不可用（crew_approvals.py 缺失），跳过检测")
+                return []
+            else:
+                items = pending_approvals(agents, now, log=self._approval_log)
+        except Exception as exc:  # noqa: BLE001 - 检测失败不得中断值守
+            self.log(f"审批等待检测失败：{type(exc).__name__}: {exc}")
+            return []
+        return [item for item in items or [] if isinstance(item, dict)]
+
+    @staticmethod
+    def _approval_key(entry: dict) -> str:
+        agent = str(entry.get("agent") or entry.get("pane") or "?").strip()
+        call_id = str(entry.get("call_id") or "?").strip()
+        return f"{agent}|{call_id}"
+
+    @staticmethod
+    def _approval_label(entry: dict) -> str:
+        return str(entry.get("agent") or entry.get("pane") or "?").strip() or "?"
+
+    @staticmethod
+    def _approval_age(entry: dict) -> int:
+        try:
+            return max(0, int(entry.get("age_seconds") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _track_approvals(self, approvals: list[dict]) -> None:
+        """ask 消失即清除年龄/去重状态（只保留本轮仍存在的 agent+callId）。"""
+        active = {self._approval_key(item) for item in approvals}
+        for key in list(self.approval_last_wake):
+            if key not in active:
+                del self.approval_last_wake[key]
+        for key in list(self.approval_max_logged):
+            if key not in active:
+                self.approval_max_logged.discard(key)
+
+    def _approval_due(
+        self,
+        now: float,
+        approvals: list[dict],
+        guard_cfg: dict,
+    ) -> tuple[list[dict], bool]:
+        """返回（到期叫醒项，是否含重复叫醒）；≥max 停止重复并记日志。"""
+        wait = guard_cfg["approvalWaitMinutes"] * 60
+        repeat = guard_cfg["approvalRepeatMinutes"] * 60
+        max_age = guard_cfg["approvalMaxAgeMinutes"] * 60
+        due: list[dict] = []
+        repeat_due = False
+        for entry in approvals:
+            age = self._approval_age(entry)
+            if age < wait:
+                continue
+            key = self._approval_key(entry)
+            last = self.approval_last_wake.get(key)
+            if age >= max_age and last is not None:
+                if key not in self.approval_max_logged:
+                    self.approval_max_logged.add(key)
+                    self.log(
+                        f"审批等待超过上限（{guard_cfg['approvalMaxAgeMinutes']} 分钟），"
+                        f"停止重复叫醒：{key}（age={age // 60} 分钟）")
+                continue
+            if last is None:
+                due.append(entry)
+            elif now - last >= repeat:
+                due.append(entry)
+                repeat_due = True
+        return due, repeat_due
+
+    def _approval_wake_lines(
+        self,
+        approvals: list[dict],
+        guard_cfg: dict,
+    ) -> list[str]:
+        grace = guard_cfg["approvalGraceMinutes"] * 60
+        lines: list[str] = []
+        for entry in approvals:
+            age = self._approval_age(entry)
+            text = (f"- {self._approval_label(entry)}：等待审批 {age // 60} 分钟"
+                    f"（callId {entry.get('call_id') or '?'}"
+                    f"，tool={entry.get('tool') or '?'}）")
+            preview = str(entry.get("command_preview") or "").strip()
+            if preview:
+                text += f"；命令预览：{preview}"
+            if age >= grace:
+                text += ("\n  处置建议：A 人工批准（到 pane 处理对话框） / "
+                         "B 关闭重派（close + 新 start） / C 继续等待")
+            lines.append(text)
+        lines.append("安全矩阵：guard 不会向等待审批的 pane 注入任何文本/按键，"
+                     "也不会自动关闭/杀 agent；处置由 Captain/总舵决策。")
+        return lines
+
+    @staticmethod
+    def _stuck_payload(approvals: list[dict]) -> list[dict]:
+        payload: list[dict] = []
+        for entry in approvals:
+            age = Guard._approval_age(entry)
+            payload.append({
+                "agent": str(entry.get("agent") or ""),
+                "pane": str(entry.get("pane") or ""),
+                "callId": str(entry.get("call_id") or ""),
+                "tool": str(entry.get("tool") or ""),
+                "ageSeconds": age,
+                "ageMinutes": age // 60,
+                "commandPreview": str(entry.get("command_preview") or ""),
+            })
+        return payload
+
+    def _helm_has_pending_ask(self, helm_agent: dict, now: float) -> bool:
+        return bool(self._detect_stuck([helm_agent], now))
+
     def _periodic_write(self, now: float) -> None:
         if self.last_write_at is not None and now - self.last_write_at < WRITE_INTERVAL_SECONDS:
             return
@@ -2084,12 +2251,25 @@ class Guard:
             return None, f"pane {pane_id} 缺 focused 字段"
         return focused, ""
 
-    def _wake(self, message: str, agents: list[dict]) -> str:
+    def _wake(self, message: str, agents: list[dict],
+              now: float | None = None) -> str:
+        current = self.clock() if now is None else now
         helm_agent = next(
             (agent for agent in agents if str(agent.get("name") or "") == self.helm),
             None,
         )
         if helm_agent is not None:
+            if self._helm_has_pending_ask(helm_agent, current):
+                # 安全矩阵：注入会被权限对话框消费为「批准」，只通知不注入。
+                self._write_wake_file(message)
+                try:
+                    self.notify("guard 叫醒", message)
+                except Exception as exc:  # noqa: BLE001
+                    self.log(f"guard 通知失败：{exc}")
+                self.log(
+                    f"叫醒（helm 自身有未闭合审批，只写 guard.wake + 通知，不注入）："
+                    f"{message.splitlines()[0]}")
+                return "wake-file"
             focused, focus_reason = self._pane_focus_state(helm_agent)
             if focused is not False:
                 self._write_wake_file(message)
@@ -2146,6 +2326,11 @@ class Guard:
         claude_runs = self._claude_runs()
         # 年龄表先于 handoff 分支更新：交接期间 blocked 时长继续累计。
         blocked_since = self._track_blocked(now, blocked)
+        # awaiting_approval：等待权限对话框的 worker（herdr 仍可能是 working）。
+        stuck = self._detect_stuck(workers, now)
+        self._track_approvals(stuck)
+        guard_cfg = load_config(self.root)["guard"]
+        approval_due, approval_repeat_due = self._approval_due(now, stuck, guard_cfg)
         pending, residual = scan_todos(self.root)
 
         for todo in residual:
@@ -2162,20 +2347,34 @@ class Guard:
             self.consecutive += 1
         else:
             self.consecutive = 0
+        # 真 idle = 无 working（含 claude run）/无 blocked/无 awaiting_approval。
+        pending_idle = condition and not blocked and not stuck
 
-        reason = ""
+        reason_parts: list[str] = []
         if blocked:
             names = ", ".join(
                 str(agent.get("name") or agent.get("pane_id") or "?") for agent in blocked
             )
-            reason = f"worker 卡住（blocked）：{names}"
-        elif condition and fast_wake:
-            reason = (
-                f"有待办 {len(pending)} 条且无在跑 worker"
-                f"（上一轮 {prev_working} 个 working 已转 idle）"
+            reason_parts.append(f"worker 卡住（blocked）：{names}")
+        if stuck:
+            detail = ", ".join(
+                f"{self._approval_label(item)}（callId {item.get('call_id') or '?'}，"
+                f"{self._approval_age(item) // 60} 分钟）"
+                for item in stuck
             )
-        elif condition and self.consecutive >= 2:
-            reason = f"有待办 {len(pending)} 条且无在跑 worker（连续 {self.consecutive} 轮）"
+            reason_parts.append(f"worker 等待审批（awaiting_approval）：{detail}")
+        if not reason_parts:
+            if fast_wake:
+                reason_parts.append(
+                    f"有待办 {len(pending)} 条且无在跑 worker"
+                    f"（上一轮 {prev_working} 个 working 已转 idle）"
+                )
+            elif pending_idle and self.consecutive >= 2:
+                reason_parts.append(
+                    f"有待办 {len(pending)} 条且无在跑 worker"
+                    f"（连续 {self.consecutive} 轮）"
+                )
+        reason = "；".join(reason_parts)
 
         plan_path = pending[0].plan if pending else ""
         if plan_path and not Path(plan_path).is_absolute():
@@ -2186,6 +2385,7 @@ class Guard:
             "running": len(running),
             "blocked": len(blocked),
             "blockedAges": self._blocked_ages(now, blocked, blocked_since),
+            "stuck": self._stuck_payload(stuck),
             "consecutive": self.consecutive,
             "woke": False,
             "reason": reason,
@@ -2207,14 +2407,14 @@ class Guard:
         if handoff.get("action") in ("started", "wait", "done"):
             result["reason"] = handoff.get("reason", "")
             return result
-        if not blocked:
+        if not blocked and not stuck:
             retro_reason = self._retro_due(running, handoff)
             if retro_reason:
                 result["reason"] = retro_reason
                 result["retro"] = True
                 woke = False
                 try:
-                    self._wake(retro_reason, agents)
+                    self._wake(retro_reason, agents, now)
                     woke = True
                 except Exception as exc:  # noqa: BLE001
                     self.log(f"复盘叫醒失败：{type(exc).__name__}: {exc}")
@@ -2225,21 +2425,36 @@ class Guard:
                 return result
         if not reason:
             return result
-        guard_cfg = load_config(self.root)["guard"]
-        if blocked:
-            due, repeat_due = self._blocked_due(
-                now, blocked, guard_cfg["blockedRepeatMinutes"] * 60)
-            if not due:
-                self.log(f"blocked 未到重复叫醒间隔，跳过叫醒：{reason}")
+        cooldown = guard_cfg["wakeCooldownMinutes"] * 60
+        blocked_due: list[dict] = []
+        blocked_repeat_due = False
+        if blocked or approval_due:
+            if blocked:
+                blocked_due, blocked_repeat_due = self._blocked_due(
+                    now, blocked, guard_cfg["blockedRepeatMinutes"] * 60)
+            if not blocked_due and not approval_due:
+                self.log(f"卡住未到重复叫醒间隔，跳过叫醒：{reason}")
                 return result
             # 首次叫醒受全局冷却；重复叫醒按每 agent 自限速，不受全局冷却压制。
-            if (not repeat_due and self.last_wake_at is not None
-                    and now - self.last_wake_at < COOLDOWN_SECONDS):
+            if (not blocked_repeat_due and not approval_repeat_due
+                    and self.last_wake_at is not None
+                    and now - self.last_wake_at < cooldown):
                 self.log(f"冷却中，跳过叫醒：{reason}")
                 return result
-        elif self.last_wake_at is not None and now - self.last_wake_at < COOLDOWN_SECONDS:
-            self.log(f"冷却中，跳过叫醒：{reason}")
-            return result
+        else:
+            if not pending_idle:
+                # 只有未到阈值的 awaiting_approval/blocked：本轮不叫醒。
+                return result
+            if self.last_wake_at is not None and now - self.last_wake_at < cooldown:
+                self.log(f"冷却中，跳过叫醒：{reason}")
+                return result
+            # C 周期心跳：pending 真 idle 持续时按配置间隔重复叫醒（受冷却约束）。
+            # 快速叫醒是新的活动边沿，只受全局冷却，不被心跳间隔压制。
+            heartbeat = guard_cfg["pendingHeartbeatMinutes"] * 60
+            if (not fast_wake and self.last_pending_wake_at is not None
+                    and now - self.last_pending_wake_at < heartbeat):
+                self.log(f"pending 心跳未到间隔，跳过叫醒：{reason}")
+                return result
 
         lines = [f"guard 叫醒：{reason}"]
         if blocked:
@@ -2247,6 +2462,9 @@ class Guard:
             lines.extend(self._blocked_wake_lines(
                 now, blocked, blocked_since,
                 guard_cfg["blockedGraceMinutes"] * 60))
+        if approval_due:
+            lines.append("等待审批时长：")
+            lines.extend(self._approval_wake_lines(approval_due, guard_cfg))
         if pending:
             lines.append(f"待办（前 {min(5, len(pending))} 条）：")
             lines.extend(f"- {todo.label}" for todo in pending[:5])
@@ -2254,15 +2472,18 @@ class Guard:
         lines.append("请接手编排。")
         message = "\n".join(lines)
         try:
-            self._wake(message, agents)
+            self._wake(message, agents, now)
         except Exception as exc:  # noqa: BLE001
             self.log(f"叫醒失败：{type(exc).__name__}: {exc}")
         self.last_wake_at = now
-        if blocked:
-            for agent in blocked:
-                key = self._blocked_key(agent)
-                if key:
-                    self.blocked_last_wake[key] = now
+        for agent in blocked_due:
+            key = self._blocked_key(agent)
+            if key:
+                self.blocked_last_wake[key] = now
+        for entry in approval_due:
+            self.approval_last_wake[self._approval_key(entry)] = now
+        if not blocked and not approval_due:
+            self.last_pending_wake_at = now
         result["woke"] = True
         return result
 
@@ -2278,7 +2499,8 @@ class Guard:
 def build_parser() -> argparse.ArgumentParser:
     epilog = """\
 叫醒口径：有待办 + 无在跑 worker 连续 2 轮；若上一轮有 working、本轮全部转 idle
-则立即叫醒（仍受 10 分钟冷却）；blocked 单独叫醒；
+则立即叫醒（受 guard.wakeCooldownMinutes 全局冷却，默认 10 分钟）；blocked 与
+awaiting_approval 单独叫醒；pending 真 idle 按 guard.pendingHeartbeatMinutes 心跳；
 在跑 worker = Herdr agent_status == working + `<crew-dir>/runs/` 存活注册
 （`crew-claude.py run` 写入；死 pid/坏 JSON/缺 pid 忽略并记日志；存活注册需进程
 身份/年龄核验，pid 复用按死处理并删除注册）；
@@ -2294,11 +2516,22 @@ guard.wake 过期：首行 `generated_at: <ISO8601 Z>`（兼容旧格式裸 ISO 
 新鲜文件保留不动；wake 读写异常不中断值守。
 
 blocked 年龄与重复叫醒：按 agent 身份（name，缺省 pane_id）记录首次 blocked 时间；
-首次叫醒沿用 10 分钟全局冷却；仍 blocked 且距该 agent 上次 blocked 叫醒
-≥ guard.blockedRepeatMinutes（默认 15，夹取 1–240）再叫醒，不受全局冷却压制；
-累计 ≥ guard.blockedGraceMinutes（默认 30，夹取 1–240）时叫醒消息提示
-「按 R6 处置（re-task / close / escalate），应关闭工位或升级 Captain」；
-guard 不自动关闭/杀 agent。配置位于 .planning/orchestration.json。
+首次叫醒沿用 guard.wakeCooldownMinutes（默认 10，夹取 1–240）全局冷却；仍 blocked
+且距该 agent 上次 blocked 叫醒 ≥ guard.blockedRepeatMinutes（默认 15，夹取 1–240）
+再叫醒，不受全局冷却压制；累计 ≥ guard.blockedGraceMinutes（默认 30，夹取 1–240）
+时叫醒消息提示「按 R6 处置（re-task / close / escalate），应关闭工位或升级
+Captain」；guard 不自动关闭/杀 agent。配置位于 .planning/orchestration.json。
+
+等待审批（awaiting_approval）：按 callId 配对 qoder run 日志
+`[permission-ask] prompt/settle`；未闭合且年龄 ≥ guard.approvalWaitMinutes
+（默认 15，夹取 1–240）叫醒，重复间隔 guard.approvalRepeatMinutes（默认 30，
+夹取 1–240），≥ guard.approvalGraceMinutes（默认 60，夹取 1–240）附 A/B/C 处置
+建议，≥ guard.approvalMaxAgeMinutes（默认 240，夹取 1–1440）停止重复并记日志。
+安全矩阵：helm 自身有未闭合审批时只写 guard.wake + 通知、不注入；绝不向等待审批
+的 worker pane 注入任何文本/按键；不自动 close。--once --json 输出 stuck 列表与年龄。
+周期心跳：pending 且真 idle（无 working/blocked/awaiting_approval）时按
+guard.pendingHeartbeatMinutes（默认 15，夹取 1–240）重复叫醒，受全局冷却约束；
+与 blocked/awaiting_approval 同轮只发一条叫醒。
 
 自动交接：每轮 `herdr pane read <pane> --lines 80` 解析总舵 `ctx`，兼容
 `ctx (412k/1M)`、`ctx 75.4k/1M`（小数）、`ctx 62.3%`（百分比折算），多行取最后；
@@ -2345,8 +2578,8 @@ pane/tab 非现役、非聚焦、非白名单时经 dispatch 关 pane（tab 无�
     parser.add_argument("--once", action="store_true", help="只跑一轮（测试/人工抽查）")
     parser.add_argument("--json", action="store_true",
                         help="配合 --once 输出 JSON"
-                             "（crewDir/planPath/pending/workers/claudeRuns/wake/"
-                             "handoff/rework）")
+                             "（crewDir/planPath/pending/workers/claudeRuns/stuck/"
+                             "wake/handoff/rework）")
     return parser
 
 
@@ -2384,6 +2617,7 @@ def main(argv: list[str] | None = None) -> int:
                     "pending": result.get("pending", 0),
                     "workers": result.get("workers", []),
                     "claudeRuns": result.get("claudeRuns", []),
+                    "stuck": result.get("stuck", []),
                     "wake": bool(result.get("woke")),
                     "handoff": result.get("handoff", {}),
                     "rework": result.get("rework", []),

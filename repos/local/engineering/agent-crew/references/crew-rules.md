@@ -90,9 +90,9 @@
 ## G 值守
 
 - **G1 单实例轮询**：guard 单实例运行、固定周期轮询；多实例时后启动者退出。
-- **G2 唤醒条件**：仅当「有待办且无在跑 worker」连续两轮成立才叫醒；冷却期内同一待办不重复叫醒。
+- **G2 唤醒条件**：仅当「有待办且无在跑 worker」连续两轮成立才叫醒；全局冷却 `guard.wakeCooldownMinutes`（默认 10 分钟，夹取 1–240）内同一待办不重复叫醒；pending 且真 idle（无 working/blocked/awaiting_approval）持续时按 `guard.pendingHeartbeatMinutes`（默认 15 分钟，夹取 1–240）周期心跳叫醒，仍受冷却约束。等待审批 worker 走 G4 的 awaiting_approval 通道，同轮不叠加 pending 叫醒。存在 awaiting_approval 时该轮不推导 pending 心跳（阈值内等待/超 max 停止重复同理）。
 - **G3 待办口径**：活跃流 plan 中未勾选且未标 ⏸/待 Captain 的 Phase 待办，加 portfolio Backlog 中无阻塞的 T 行；已完成 Phase 的残留待办只记日志，不叫醒。
-- **G4 在跑口径**：在跑 = Herdr `agent_status=working` + `<crew-dir>/runs/` 存活注册（`crew-claude.py run` 运行时原子写入，含 pid/role/started_at/out_dir）；死 pid、坏 JSON、缺 pid 的注册忽略并记日志，注册失败只告警不阻断运行；blocked 单独作为「卡住」叫醒理由，叫醒带年龄与重复叫醒——达到 15 分钟未处置再叫醒，达到 blockedGrace（默认 30 分钟）提示「应关闭或升级」，不自动杀 agent；idle/done/unknown 不算在跑。
+- **G4 在跑口径**：在跑 = Herdr `agent_status=working` + `<crew-dir>/runs/` 存活注册（`crew-claude.py run` 运行时原子写入，含 pid/role/started_at/out_dir）；死 pid、坏 JSON、缺 pid 的注册忽略并记日志，注册失败只告警不阻断运行；blocked 单独作为「卡住」叫醒理由，叫醒带年龄与重复叫醒——达到 15 分钟未处置再叫醒，达到 blockedGrace（默认 30 分钟）提示「应关闭或升级」，不自动杀 agent；idle/done/unknown 不算在跑。**awaiting_approval（2.2.21）**：qoder run 日志 `[permission-ask] prompt/settle` 按 callId 配对，未闭合 ask ≥ `guard.approvalWaitMinutes`（默认 15 分钟，夹取 1–240）视为卡住（此时 herdr 仍可能是 working，blocked 不出现）；重复叫醒按 agent+callId 去重、间隔 `guard.approvalRepeatMinutes`（默认 30 分钟，夹取 1–240），≥ `guard.approvalGraceMinutes`（默认 60 分钟，夹取 1–240）附「A 人工批准 / B 关闭重派 / C 继续等待」建议，≥ `guard.approvalMaxAgeMinutes`（默认 240 分钟，夹取 1–1440）停止重复并记日志；首次叫醒受全局冷却、重复叫醒不受。**安全矩阵**：目标有未闭合 ask 时 guard / crew-msg / dispatch 一律只通知不注入；绝不向等待审批的 pane 注入文本/按键，不自动 close。
 - **G5 零输出与边界**：正常零输出；可提示「回执 done 但 plan 未更新」，不代写 plan；外置定时只检查 guard 存活；人工抽查工具不承担自动叫醒。
 - **G6 口头决策落盘**：Captain 口头/会话决策由收到指令的 owner **当轮**写入对应 plan 的 `## Decisions Made` 或 portfolio `progress.md`（含生效口径与时间），并在回复回显「已落盘：<文件>/<条目>」；未落盘不得当作已决执行；交接 digest 必须列「未落盘决策」（无则写「无」）。
 - **G7 guard 自动交接口径**：交接操作前以 `oldPane` 反查 `oldTab`（pane list 权威、agent list 兜底）；缺失/不一致以反查为准关闭并写回 `<crew-dir>/guard.handoff` + 告警，反查不到（pane/agent 消失）fail-soft，不按未验证 `oldTab` 关 tab。`phase=done` 后对残留旧 helm 做一次有界回收：仅 idle/done、非现役、非聚焦、非白名单才关；working/blocked/unknown 不关、只记日志。guard 周期调用 `crew-reaper.py --apply --json`（失败只记 guard.log、不阻断值守）；一键入口与安全边界见 [orchestration-guide.md](orchestration-guide.md) §5.12。

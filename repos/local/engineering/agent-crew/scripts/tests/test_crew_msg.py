@@ -255,6 +255,9 @@ class DeliveryBoundaryTest(CrewDirTestBase):
                     stdout=json.dumps({"result": {"panes": [
                         {"pane_id": "wX:p1", "focused": focused}]}}),
                     stderr="")
+            if argv[:3] == ["herdr", "pane", "process-info"]:
+                # 2.2.21：审批检测在无 agent_session 时回退 pid 查询；夹具视为不可用。
+                return mock.Mock(returncode=1, stdout="", stderr="process info down")
             prompt_calls.append(list(argv))
             return mock.Mock(returncode=prompt_rc, stdout="",
                              stderr="agent not found" if prompt_rc else "")

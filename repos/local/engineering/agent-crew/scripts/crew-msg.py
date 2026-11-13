@@ -15,6 +15,9 @@
   回执落 inbox + Herdr 通知，投递结果记 `delivery=inbox_fallback`；
   `herdr pane list` 不可用/字段缺失按 fail-safe 同样不注入（`--via herdr` 同此口径，
   不注入、落 inbox + 通知，结果字段与 note 显式标注）；
+- 审批安全矩阵（2.2.21）：qoder 直推前另查目标是否有未闭合 permission-ask
+  （`crew_approvals.pending_approvals`）；有则跳过注入（注入可能被审批对话框
+  消费为「批准」），回执落 inbox + 通知，delivery 记 `inbox_fallback`；
 - 可达性（A-1）：显式 qoder 直推时目标不在本机 `herdr agent list`，或 agent list
   调用失败/不可解析，按「目标不可达」处理——不注入、`ok=False`、退出码 3，
   不冒充 inbox_fallback 成功；
@@ -78,6 +81,7 @@ import secrets
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -86,6 +90,10 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True  # 不在项目 scripts/ 留 __pycache__
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:  # 2.2.21：注入前审批等待检测；模块缺失时保持旧行为（fail-soft）。
+    from crew_approvals import pending_approvals
+except Exception:  # noqa: BLE001
+    pending_approvals = None
 from crew_paths import CrewPathsError, crew_dir  # noqa: E402
 
 SENDER_RUNTIMES = ("qoder", "opencode", "claude", "codex")
@@ -588,6 +596,54 @@ def pane_focus_state(name: str, timeout: float = 10.0) -> tuple[bool | None, str
     return focused, "", True
 
 
+def herdr_agent_entry(name: str, timeout: float = 10.0) -> tuple[dict | None, str]:
+    """`herdr agent list` 中按名取 agent 条目（审批检测用）。"""
+    if not name:
+        return None, "缺目标 agent 名"
+    try:
+        proc = subprocess.run(
+            ["herdr", "agent", "list"],
+            text=True, capture_output=True, check=False, timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"herdr agent list 调用失败：{exc}"
+    if proc.returncode != 0:
+        return None, f"herdr agent list 退出码 {proc.returncode}"
+    try:
+        data = json.loads(proc.stdout)
+    except ValueError as exc:
+        return None, f"herdr agent list 输出非 JSON：{exc}"
+    result = data.get("result") if isinstance(data, dict) else None
+    agents = result.get("agents") if isinstance(result, dict) else None
+    if not isinstance(agents, list):
+        return None, "herdr agent list 缺 agents"
+    entry = next((agent for agent in agents
+                  if isinstance(agent, dict) and agent.get("name") == name), None)
+    if entry is None:
+        return None, f"目标 {name} 不在本机 herdr agent list"
+    return entry, ""
+
+
+def pending_approval_block(name: str, timeout: float = 10.0) -> tuple[bool, str]:
+    """目标是否有未闭合审批；检测失败 fail-soft 返回不可判定（不拦截旧行为）。"""
+    if pending_approvals is None:
+        return False, "审批检测器不可用"
+    entry, reason = herdr_agent_entry(name, timeout=timeout)
+    if entry is None:
+        return False, reason
+    try:
+        items = pending_approvals([entry], time.time())
+    except Exception as exc:  # noqa: BLE001 - 检测失败不阻断投递
+        return False, f"审批检测失败：{type(exc).__name__}: {exc}"
+    if not items:
+        return False, ""
+    first = items[0]
+    age_minutes = int(first.get("age_seconds") or 0) // 60
+    return True, (
+        f"目标有未闭合审批（callId {first.get('call_id') or '?'}，"
+        f"tool={first.get('tool') or '?'}，等待 {age_minutes} 分钟）")
+
+
 def _resolve_peer_inbox(to: str | None, timeout: float = 10.0) -> tuple[Path | None, str]:
     """目标 agent → 收件方 `<git-common-dir>/crew/inbox`（T28）。
 
@@ -767,6 +823,15 @@ def deliver_qoder(
         )
         if via == "herdr":
             reason += "（--via herdr 强制模式同此口径：聚焦/不可判定不注入）"
+        return _inbox_fallback_result(
+            receipt, crew_dir, target, focused=focused, reason=reason)
+    approval_blocked, approval_reason = pending_approval_block(target, timeout=timeout)
+    if approval_blocked:
+        reason = (
+            f"{approval_reason}；按安全矩阵跳过 herdr 注入"
+            "（注入可能被审批对话框消费为批准）")
+        if via == "herdr":
+            reason += "（--via herdr 强制模式同此口径：有未闭合审批不注入）"
         return _inbox_fallback_result(
             receipt, crew_dir, target, focused=focused, reason=reason)
     ok, error = herdr_prompt(target, format_message(receipt), timeout=timeout)

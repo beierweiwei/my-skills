@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.2.21 — 2026-11-13
+
+FB-046 自动驾驶停摆修复：A 报告写入通道 / B guard 卡死检测 / C 周期心跳 / D 模板预防；独立对抗审查两轮 BLOCK → 清零复评 PASS 闭环，互检/两轴评审/独立终验全 PASS，本地发布（push 未执行）。
+
+### 新增
+
+- **A 报告写入通道 `scripts/crew-write.py`**：核心是「正文不进 Bash 命令文本」——主通道 `--from-transcript` 从当前 agent 会话 JSONL 取最近一次 tool_result 之后最后一个 ```crew-report 围栏原子落盘（命令文本只有参数）；兜底 `--from-file`；路径边界（项目根内、`.git/` 外、防 `..`/symlink 逃逸、单文件 ≤2MB）、空正文/NUL 拒绝；`--check-stdin` 内置 tie 重演自检（≤40）与 `\brm(dir)?\b` 词拒收，禁止拆段/编码规避。qoder/opencode 模板 9 文件 10 处旧「单引号 heredoc 写 /tmp 再 cp」文案替换为按 runtime 分流的通道口径（qoder transcript / claude stdout / opencode 或带 Write 角色 Write / 无 Write 分段兜底）。
+- **B guard 卡死检测 `scripts/crew_approvals.py`**：agent→session→segment→run 日志映射（pid 从 herdr 补、manifest 回退）+ `[permission-ask] prompt`/`settle` 按 callId 配对（dialog 不闭合，保守口径）；`guard.approvalWaitMinutes=15`（夹取 1–240）+ repeat/grace/max 阶梯与 agent+callId 去重；安全矩阵——未闭合审批 pane 只通知不注入，`guard._wake`、`crew-msg.py` herdr 推送、`dispatch.py prompt` 三条注入路径共用同一检测器，打断走 Captain close/re-task 决策；真实 run 日志回放命中事故条、现场扫描零误报。
+- **C 周期心跳（与事故解耦）**：pending 且真 idle（idle/done，不含 working）才叫醒，复用 G2 单通道并与 B 同轮去重；`guard.wakeCooldownMinutes=10`/`guard.pendingHeartbeatMinutes=15` 可配置（夹取 1–240，`upgrade.py --rollback` 可回滚）。
+- **D 模板预防**：删除执行型「单命令 >5 分钟无返回→blocked 回执/结束」设想（挂起会话不运行模型循环，无法执行），改为预防型条款「审批等待不可自救，检测职责归 guard 卡死检测」；grep 测试防回退，模板行数预算未破。
+- `crew-rules.md` G2/G4 与 `orchestration-guide` 同步 awaiting_approval / 心跳口径；`manifest` 登记 `crew-write.py`/`crew_approvals.py` 两个新受管脚本（init/upgrade/doctor/release-check 全链路）。
+
+### 修复
+
+- 对抗审查两轮 BLOCK（4 阻断 + 7 建议）→ 按建议改版（A 主通道 transcript、B 安全矩阵、C 并入 B 去重、D 改预防）→ 清零复评 PASS（阻断 0）；互检 PASS（0 阻断 + 7 建议，注入面两小项下批首单）；两轴评审首评 BLOCK（R-1 性能测试缺失）→ 补测 2 条（>1MB 日志尾部解析、20 agent 单轮上限）→ 同一 reviewer 复评 PASS；独立终验 PASS（0 阻断 + 2 建议）。
+- 评审 S-7 G2 文字随 R-1 补测同步（working 含 claude run 永不催）。
+
+### 测试
+
+- 新增 `test_2221_write_channel.py`、`test_2221_stuck_detect.py`、`test_2221_heartbeat.py`；适配 `test_crew_guard.py`（隔离真实日志/冷却夹具）、`test_crew_msg.py`（process-info 失败分支 mock）、`test_2215_t32_report_writing.py`（旧 heredoc 文案断言迁移为新条款，防回退结构保留）；先红后绿。
+- 全量 pytest 0 fail（本版 1441 passed + 1137 subtests）；`crew-lint`（含 `--purity`）、`plan-status --selftest`/`--playbooks` 绿。
+- 版本 2.2.21：`SKILL.md` frontmatter 与标题、`init.py` fallback、本段、`test_crew_lint.py`、`test_220_final.py`、`test_224_retro.py`、`test_225_patch.py`、`test_2214_guard_presence.py` 版本断言同步。
+
 ## 2.2.20 — 2026-11-12
 
 关键决策对抗审查硬门（D7）、窗口对账回收（crew-reaper）、交接残留根因（FB-045），含互检/评审补口与本地发布。
