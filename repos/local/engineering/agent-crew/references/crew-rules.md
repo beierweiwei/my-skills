@@ -9,7 +9,7 @@
 
 | 前缀 | 领域 | 编号 |
 |---|---|---|
-| D | 派单 | D1–D7 |
+| D | 派单 | D1–D8 |
 | R | 回执与反馈 | R1–R6 |
 | W | 工位 | W1–W5 |
 | O | 占用 | O1–O3 |
@@ -38,7 +38,7 @@
 - **D5 AMEND**：任何扩围必须先提交 AMEND（原因/文件/风险）并获确认；禁止静默扩围。
 - **D6 发现清单**：范围外问题只报不修；回执必须含发现清单，无发现写「无」。
 - **D7 关键决策对抗审查（硬）**：涉主数据、架构口径、验收口径、数据安全、范围变更的关键决策，实施前先派独立 Reviewer 以对抗立场审查（Captain 直令不豁免，取证可并行），阻断项清零才允许实施；结论与证据写 plan Decisions 或需求目录。未出示报告路径与 PASS/阻断清零记录即阻断，流程骨架见 `templates/playbooks/adversarial-review.md`。
-- **D8 YOLO 派单**：`dispatch.py start` 派 worker 一律带 `--permission-mode bypass_permissions`（qoder）/`--auto`（opencode），所有角色无例外（含 scout/runner/planner）；发送前自检命令含该参数，派单记录与回执写明 permissionMode（dispatch 日志/registry 自动记录该字段）；只代表工单边界内免确认，合并/推送/清理与数据安全门禁不放宽。缺该参数的 qoder 工位由 pane-audit `yolo-missing` 巡检告警。
+- **D8 YOLO 派单**：`dispatch.py start` 派 qoder worker 一律带 `--permission-mode bypass_permissions`；缺省由配置 `agents.permissionMode` 自动补传并记录来源（explicit/config-default），显式传参以显式值为准。opencode 工位的 YOLO 由角色模板 frontmatter `permission:` 块承担（不经 CLI 旗标；传 `--permission-mode` 会被 dispatch 拒绝 rc=2，registry/agent-log 记录 `permissionMode=template`）。所有角色无例外（含 scout/runner/planner）；发送前自检命令参数与运行时匹配；派单记录与回执写明 permissionMode 及来源；只代表工单边界内免确认，合并/推送/清理与数据安全门禁不放宽。缺该参数的 qoder 工位由 pane-audit `yolo-missing` 巡检告警；opencode 工位由 pane-audit 按组合产物 frontmatter `permission:` 块静态校验。
 
 ## R 回执
 

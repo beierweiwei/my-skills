@@ -18,7 +18,7 @@
 | 流 plan | 单条流的 task_plan：Goal/Next Step/Current Phase/Phases/Decisions/Errors | 与 portfolio 同骨架，无 Backlog/Deviation |
 | 派生看板 | 由 `scripts/plan-status.py --write` 从 plan 生成的进度视图，勿手改 | 落点见配置 `board.path` |
 | 三道人工门 | 单需求需求门、全局需求基线门、验收门；人工确认，不可由 Agent 自批 | |
-| YOLO 模式 | worker/副舵启动时放宽权限确认（`--permission-mode bypass_permissions` / opencode `--auto`） | 不放宽合并/推送/清理与数据安全门禁 |
+| YOLO 模式 | worker/副舵启动时放宽权限确认（qoder：`--permission-mode bypass_permissions`，缺省取配置 `agents.permissionMode`；opencode：角色模板 `permission` 块） | 不放宽合并/推送/清理与数据安全门禁 |
 
 ## 业务术语
 
