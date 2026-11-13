@@ -939,7 +939,8 @@ def run_herdr(argv: list[str]) -> str:
     return proc.stdout
 
 
-def herdr_agent_names() -> list[str]:
+def herdr_agents_detail() -> list[dict]:
+    """S2：带状态的 herdr agent 明细（name + agent_status 原样）。"""
     output = run_herdr(["herdr", "agent", "list"])
     try:
         data = json.loads(output)
@@ -949,8 +950,15 @@ def herdr_agent_names() -> list[str]:
     agents = result.get("agents") if isinstance(result, dict) else None
     if not isinstance(agents, list):
         return []
-    return [agent["name"] for agent in agents
-            if isinstance(agent, dict) and isinstance(agent.get("name"), str)]
+    return [
+        {"name": agent["name"], "status": agent.get("agent_status")}
+        for agent in agents
+        if isinstance(agent, dict) and isinstance(agent.get("name"), str)
+    ]
+
+
+def herdr_agent_names() -> list[str]:
+    return [item["name"] for item in herdr_agents_detail()]
 
 
 RECEIPT_LINE = "请完成处置后回执到发送方 inbox（R2），并注明 receipt_id。"
@@ -2159,24 +2167,43 @@ def cmd_close(args: argparse.Namespace, root: Path) -> int:
     return 0
 
 
+ONLINE_AGENT_STATUSES = ("working", "idle", "blocked", "pending")
+
+
+def _render_status_lines(detail: list[dict], registry: dict,
+                         show_all: bool) -> list[str]:
+    """S2：默认只列在线（working/idle/blocked/pending），历史/done 折叠计数。"""
+    online = [item["name"] for item in detail
+              if item["status"] in ONLINE_AGENT_STATUSES]
+    retired = [item["name"] for item in detail
+               if item["status"] not in ONLINE_AGENT_STATUSES]
+    names = online + retired if show_all else online
+    lines = [f"Herdr agents：{', '.join(names) or '（无）'}"]
+    if not show_all and retired:
+        lines.append(f"历史/done {len(retired)} 个（--all 展开）")
+    lines.append(f"dispatch 托管：{', '.join(sorted(registry)) or '（无）'}")
+    return lines
+
+
 def cmd_status(args: argparse.Namespace, root: Path) -> int:
     try:
         state_dir = crew_dir(root)
     except CrewPathsError as exc:
         raise DispatchError(str(exc), 3) from exc
-    agents = herdr_agent_names()
+    detail = herdr_agents_detail()
     registry = load_registry(root)
     payload = {
         "crewDir": str(state_dir),
-        "agents": agents,
+        "agents": [item["name"] for item in detail],
         "managed": registry,
+        "agentsDetail": detail,
     }
     if args.json:
         print_json(payload)
     else:
         print(f"crewDir：{state_dir}")
-        print(f"Herdr agents：{', '.join(agents) or '（无）'}")
-        print(f"dispatch 托管：{', '.join(sorted(registry)) or '（无）'}")
+        for line in _render_status_lines(detail, registry, getattr(args, "all", False)):
+            print(line)
     return 0
 
 
@@ -2524,6 +2551,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     status_p = sub.add_parser("status", help="角色/agent/工位状态")
     status_p.add_argument("--json", action="store_true")
+    status_p.add_argument(
+        "--all",
+        action="store_true",
+        help="展开历史/done agent 全量名（默认只列在线并折叠计数）",
+    )
     status_p.set_defaults(func=cmd_status)
 
     list_p = sub.add_parser("list", help="列出角色文件与可发现性")

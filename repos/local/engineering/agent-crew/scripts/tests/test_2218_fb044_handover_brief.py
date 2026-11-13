@@ -107,7 +107,7 @@ class TemplateRulesTest(unittest.TestCase):
                 self.assertIn(BRIEF_FIRST_ITEM, whitelist)
                 self.assertNotIn("只读白名单＝看板", whitelist)
                 # S-5：White list 的 Status grep 只是核对手段，不计入交接必读预算。
-                self.assertIn("活跃流 plan 的 Next Step 首条", whitelist)
+                self.assertIn("活跃流 plan 的 Next Step **未完成**首条", whitelist)
                 self.assertIn("Status 仅核对", whitelist)
                 self.assertIn("不计入", whitelist)
                 self.assertIn("单文件 >20KB 不整读", whitelist)

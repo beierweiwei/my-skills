@@ -45,6 +45,7 @@ INBOX_DIR = "inbox"
 CURSOR_FILE = "inbox-read-cursor.json"
 DEFAULT_WAKE_TTL_SECONDS = 7200
 DETAIL_ITEMS_MAX = 10
+UNREAD_SHOW_MAX = 3  # S3：inbox 未读默认展示上限（--full 展开全量）
 CTX_READS_MAX = 8
 HERDR_TIMEOUT = 10.0
 PLAN_STATUS_TIMEOUT = 60.0
@@ -199,7 +200,7 @@ def _read_inbox(folder: Path) -> tuple[list[dict], list[str]]:
     return entries, broken
 
 
-def check_inbox(crew: Path | None, crew_error: str = "") -> dict:
+def check_inbox(crew: Path | None, crew_error: str = "", full: bool = False) -> dict:
     if crew is None:
         return _crew_missing("inbox", crew_error)
     folder = crew / INBOX_DIR
@@ -236,6 +237,10 @@ def check_inbox(crew: Path | None, crew_error: str = "") -> dict:
         f"kind={item['kind']} from={item['from']} task={item['task']}"
         for item in unread
     ]
+    if not full and len(lines) > UNREAD_SHOW_MAX:
+        # S3：未读默认只展示前 3 条，其余折叠计数（--full 保持全量）。
+        rest = len(lines) - UNREAD_SHOW_MAX
+        lines = lines[:UNREAD_SHOW_MAX] + [f"…另有 {rest} 条（--full 展开）"]
     lines.extend(f"- {item}" for item in broken)
     return _check(
         "inbox", available=True, ok=not broken,
@@ -460,7 +465,8 @@ def check_guard(crew: Path | None, crew_error: str = "") -> dict:
                   source=source, detail=f"cmdline={cmdline}" if cmdline else "")
 
 
-def collect_checks(root: Path, wake_ttl: int) -> tuple[list[dict], Path | None, str]:
+def collect_checks(root: Path, wake_ttl: int,
+                   full: bool = False) -> tuple[list[dict], Path | None, str]:
     try:
         crew = resolve_crew_dir(root)
         crew_error = ""
@@ -468,7 +474,7 @@ def collect_checks(root: Path, wake_ttl: int) -> tuple[list[dict], Path | None, 
         crew, crew_error = None, str(exc)
     return [
         check_wake(crew, wake_ttl, crew_error),
-        check_inbox(crew, crew_error),
+        check_inbox(crew, crew_error, full=full),
         check_agents(root),
         check_board(root),
         check_guard(crew, crew_error),
@@ -508,13 +514,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--wake-ttl", type=int, default=DEFAULT_WAKE_TTL_SECONDS,
         help=f"guard.wake 过期阈值秒数（默认 {DEFAULT_WAKE_TTL_SECONDS}）")
+    parser.add_argument(
+        "--full", action="store_true",
+        help="展开 inbox 未读全量明细（默认只展示前 3 条并折叠计数）")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     root = Path(args.root).expanduser().resolve() if args.root else SCRIPT_ROOT
-    checks, crew, crew_error = collect_checks(root, args.wake_ttl)
+    checks, crew, crew_error = collect_checks(root, args.wake_ttl, full=args.full)
     healthy = all(item["available"] and item["ok"] for item in checks)
     if args.json:
         print(json.dumps({

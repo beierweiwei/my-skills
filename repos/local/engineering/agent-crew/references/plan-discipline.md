@@ -107,7 +107,7 @@
 1. **Next Step 只放未完成**（≤10 条、每条 ≤1 行 ≤100 字）；完成项迁入 `## 最近完成`（≤10 条，含 commit/测试/证据指针）。
 2. **待 Captain 项只在 Backlog**（C 行）；Next Step 只引用编号，不复制待办正文。
 3. **progress 事件触发写入**：决策/阻塞/派单/收口/异常各写一次，最长 30–60 分钟兜底；一段多里程碑、一条一行。
-4. **交接一屏优先**：交接只读白名单＝`python3 scripts/plan-status.py --brief` 一屏 + `python3 scripts/plan-status.py --handover` 摘要 + 活跃流 Next Step 首条（grep；Status 仅核对进度时按需 grep，不计入交接必读预算）+ feedback 待复盘条目（grep）+ `guard.handoff` + 最近 3 段 progress + 需求当前章节；禁整读 看板/progress/task_plan/feedback/历史流 plan/共识；交接必读 ≤32KB（含 `--handover` 输出与必读文件），超阈值先摘要/关键词 grep，写明只读段，再定向补读；`Decisions`/`Deviation`/`Backlog` 不整读（需要时按关键词 grep）；单文件 >20KB 不整读；看板仅按关键词 grep，不整读；看板未刷新或源 sha 不一致时，禁止交接。看板与 `--brief` 同口径（同一表头/待 Captain 计数/今日变化来源），只做一屏速读视图，不整段导出计划正文；看板体量 ≤120 行且 ≤24KB。交接预算只计实际要求读的段（摘要/brief/活跃流整行/feedback 待复盘命中/handoff），整看板/整 plan 不计入；`--handover` 输出硬 ≤32KB，超限截断并标注「已截断，详情见 plan」。
+4. **交接一屏优先**：交接只读白名单＝`python3 scripts/plan-status.py --brief` 一屏 + `python3 scripts/plan-status.py --handover` 摘要 + 活跃流 Next Step 未完成首条（跳过 `- [x]` 已完成项，折叠计数；grep；Status 仅核对进度时按需 grep，不计入交接必读预算）+ feedback 待复盘条目（grep）+ `guard.handoff` + 最近 3 段 progress + 需求当前章节；禁整读 看板/progress/task_plan/feedback/历史流 plan/共识；交接必读 ≤32KB（含 `--handover` 输出与必读文件），超阈值先摘要/关键词 grep，写明只读段，再定向补读；`Decisions`/`Deviation`/`Backlog` 不整读（需要时按关键词 grep）；单文件 >20KB 不整读；看板仅按关键词 grep，不整读；看板未刷新或源 sha 不一致时，禁止交接。看板与 `--brief` 同口径（同一表头/待 Captain 计数/今日变化来源），只做一屏速读视图，不整段导出计划正文；看板体量 ≤120 行且 ≤24KB。交接预算只计实际要求读的段（摘要/brief/活跃流整行/feedback 待复盘命中/handoff），整看板/整 plan 不计入；`--handover` 输出硬 ≤8KB（必读预算 ≤32KB 语义不变），超限截断并标注「已截断，详情见 plan」。
 
 > 交接 digest 另含 pane 清单与待关项；工位/tab 回收规则见 [orchestration-guide.md](orchestration-guide.md) §5.10（单一真源，此处只留指针）。
 

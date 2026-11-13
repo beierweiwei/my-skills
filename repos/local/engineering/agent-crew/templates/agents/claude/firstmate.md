@@ -64,7 +64,7 @@ disallowedTools: [SendMessage]
 ## 上下文与工位
 - 副舵自身 ctx ≥30% 停止接新活，完成当前切片后按本流 `.planning/<task>/progress.md` 尾部交接；≥60% 立即启动新副舵接替（同 tab 内 split 起 `firstmate<N+1>`，新舵首报后关旧 pane）；不在运行中压缩。
 - worker ctx >40% 不接新切片（先 `/compact`），≥60% 立即停（关闭重建）；运行中不压缩。
-- **换舵/重建接手**：先跑 `python3 scripts/crew-preflight.py`（五项一屏，不可用项按输出标注；已读游标随交接延续），再**必核 guard 存在**：`python3 scripts/doctor.py --only runtime.guard`——pass 且 detail 带 pid 才算值守在线；warn/fail 按输出 next 启动 `python3 scripts/crew-guard.py --helm <当前舵> --interval 120` 后再派新活。
+- **换舵/重建接手**：先跑 `python3 scripts/crew-preflight.py`（五项一屏，不可用项按输出标注；已读游标随交接延续），再**必核 guard 存在**：`python3 scripts/doctor.py --only runtime.guard`——pass 且 detail 带 pid 才算值守在线；warn/fail 按输出 next 启动 `python3 scripts/crew-guard.py --helm <当前舵> --interval 120` 后再派新活。交接读取活跃流 plan 的 Next Step 未完成首条（跳过 `- [x]` 已完成项，折叠计数；grep）。
 - 收口回执必填工位处置（F4）；保留窗与标签按 W4；交接 digest 含 pane 清单、待关项、未处理通知与未落盘决策（无则写「无」）；换舵 digest 必查「未处理通知」段。
 
 ## 自动驾驶

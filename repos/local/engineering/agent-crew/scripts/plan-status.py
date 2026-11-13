@@ -22,7 +22,7 @@
     python3 scripts/plan-status.py --archive docs/历史/进度追踪-截至20260101.md --write
                                               # 一次性在看板头部写入归档链接（显式动作）
     python3 scripts/plan-status.py --handover
-                                              # ≤49 行、≤32KB 交接摘要到 stdout（只读：Goal
+                                              # ≤49 行、≤8KB 交接摘要到 stdout（只读：Goal
                                               # ≤2 行/Next Step/活跃流一行/待 Captain ≤3 条+
                                               # 溢出/未处理通知/最近 3 条 progress 与完成/
                                               # 证据入口/看板新鲜；超限确定性截断并标注；
@@ -121,7 +121,7 @@ HANDOVER_RECENT = 3
 # 计入）+ feedback 待复盘命中（最多计 10 行）+ guard.handoff；整看板/整 plan 不整读、
 # 不计入；超阈值只提示先摘要/grep。封顶/超预算时另输出封顶前原值（raw_total + 各分项
 # 原值，B-1：不得让报告数字低于真实必读），handoff 原值过大给清理提示。
-HANDOVER_MAX_BYTES = 32 * 1024
+HANDOVER_MAX_BYTES = 8 * 1024  # S4：交接摘要 stdout 硬上限（必读预算 32KB 语义不变）
 HANDOVER_BUDGET_BYTES = 32 * 1024
 HANDOVER_BUDGET_HINT = (
     "- 超预算：先摘要/关键词 grep、写明只读段（Decisions/Deviation/Backlog 不整读），"
@@ -373,6 +373,32 @@ def _todo_line(line: str) -> str:
 def _next_step_lines(plan: Plan) -> list[str]:
     """流 plan Next Step 节的非空行（保持行序，供分节 todo 渲染）。"""
     return [l.strip() for l in plan.sections.get("Next Step", []) if l.strip()]
+
+
+_DONE_STEP_RE = re.compile(r"^(?:-\s*\[[xX]\]\s*|-\s*✅\s*|✅\s*)")
+
+
+def _pick_next_step(lines: list[str]) -> tuple[str, int]:
+    """S5：Next Step 只取未完成首条（跳过 `- [x]`/`- ✅`/行首 `✅` 已完成项，
+    容忍缩进与空行）；返回 (显示文本, 已完成折叠计数)。全完成/空返回 ("—", n)。"""
+    done = 0
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+        if _DONE_STEP_RE.match(line):
+            done += 1
+            continue
+        return _todo_line(line), done
+    return "—", done
+
+
+def _next_step_pick(plan: Plan) -> str:
+    """S5：活跃流/流表共用的 Next Step 一句 = 未完成首条 + 已完成折叠计数。"""
+    text, done = _pick_next_step(_next_step_lines(plan))
+    if done:
+        text = f"{text}（另有 {done} 条已完成）"
+    return text
 
 
 def _captain_lines(plans: list[Plan], portfolio: Plan, cap_prefix: str,
@@ -690,37 +716,39 @@ def _handover_budget(root: Path, cfg: dict, pdir: str, stream_bytes: int,
     total = summary + brief + streams + feedback + handoff
     raw_total = summary_bytes + brief + stream_bytes + feedback_raw + handoff_raw
     clipped = ["feedback"] if feedback_clipped else []
-    if total > HANDOVER_MAX_BYTES:
+    # S4：预算封顶/超预算判定用 HANDOVER_BUDGET_BYTES（32KB 预算语义不变）；
+    # 输出自身硬上限由 handover() 按 HANDOVER_MAX_BYTES（8KB）独立截断。
+    if total > HANDOVER_BUDGET_BYTES:
         # 最小收缩档下理论不可达；确定性封顶，保证 total 硬 ≤32KB（A1）。
         # 每次收缩记录被截分项，供报告归因（B-1）。
-        shrunk = max(0, min(handoff, HANDOVER_MAX_BYTES - (
+        shrunk = max(0, min(handoff, HANDOVER_BUDGET_BYTES - (
             summary + brief + streams + feedback)))
         if shrunk != handoff:
             handoff = shrunk
             clipped.append("handoff")
         total = summary + brief + streams + feedback + handoff
-        if total > HANDOVER_MAX_BYTES:
-            shrunk = max(0, min(feedback, HANDOVER_MAX_BYTES - (
+        if total > HANDOVER_BUDGET_BYTES:
+            shrunk = max(0, min(feedback, HANDOVER_BUDGET_BYTES - (
                 summary + brief + streams + handoff)))
             if shrunk != feedback:
                 feedback = shrunk
                 if "feedback" not in clipped:
                     clipped.append("feedback")
             total = summary + brief + streams + feedback + handoff
-        if total > HANDOVER_MAX_BYTES:
-            shrunk = max(0, min(brief, HANDOVER_MAX_BYTES - (summary + streams)))
+        if total > HANDOVER_BUDGET_BYTES:
+            shrunk = max(0, min(brief, HANDOVER_BUDGET_BYTES - (summary + streams)))
             if shrunk != brief:
                 brief = shrunk
                 clipped.append("brief")
             total = summary + brief + streams + feedback + handoff
-        if total > HANDOVER_MAX_BYTES:
-            shrunk = max(0, min(streams, HANDOVER_MAX_BYTES - summary))
+        if total > HANDOVER_BUDGET_BYTES:
+            shrunk = max(0, min(streams, HANDOVER_BUDGET_BYTES - summary))
             if shrunk != streams:
                 streams = shrunk
                 clipped.append("streams")
             total = summary + brief + streams + feedback + handoff
-        if total > HANDOVER_MAX_BYTES:
-            shrunk = max(0, min(summary, HANDOVER_MAX_BYTES))
+        if total > HANDOVER_BUDGET_BYTES:
+            shrunk = max(0, min(summary, HANDOVER_BUDGET_BYTES))
             if shrunk != summary:
                 summary = shrunk
                 clipped.append("summary")
@@ -730,7 +758,7 @@ def _handover_budget(root: Path, cfg: dict, pdir: str, stream_bytes: int,
         "summary": summary, "brief": brief, "board": 0,
         "streams": streams, "feedback": feedback, "handoff": handoff,
         "capped": int(bool(clipped)),
-        "over_budget": int(raw_total > HANDOVER_MAX_BYTES),
+        "over_budget": int(raw_total > HANDOVER_BUDGET_BYTES),
         "raw_total": raw_total,
         "raw": {"summary": summary_bytes, "brief": brief, "streams": stream_bytes,
                 "feedback": feedback_raw, "handoff": handoff_raw},
@@ -813,7 +841,7 @@ def _handover_streams(portfolio: Plan | None, plans: list[Plan],
         if target is None or target.complete >= target.total:
             continue
         name_by_rel[target.rel] = name
-        next_step = (_next_step_lines(target) or ["—"])[0]
+        next_step = _next_step_pick(target)
         active.append(
             f"- **{_clip(cell(name), HANDOVER_STREAM_NAME_MAX)}**（`{ref or target.rel}`）"
             f"— 当前阶段：{_clip(cell(current_phase(target)), HANDOVER_STREAM_NAME_MAX)}；"
@@ -855,8 +883,12 @@ def _handover_lines(root: Path, cfg: dict, plans: list[Plan], portfolio: Plan | 
         recent_progress = [_clip(line, progress_clip) for line in recent_progress]
 
     if include_next_step and portfolio is not None:
-        next_step = _clip(_one_line(portfolio.sections.get("Next Step", [])),
-                          HANDOVER_STREAM_NEXT_STEP_MAX) or "—"
+        # S5：portfolio Next Step 同口径——只取未完成首条，不整段拼行。
+        next_text, next_done = _pick_next_step(
+            portfolio.sections.get("Next Step", []))
+        if next_done:
+            next_text = f"{next_text}（另有 {next_done} 条已完成）"
+        next_step = _clip(next_text, HANDOVER_STREAM_NEXT_STEP_MAX) or "—"
     else:
         next_step = "—"
 
@@ -952,7 +984,7 @@ def handover(root: Path, cfg: dict, plans: list[Plan]) -> int:
     """≤HANDOVER_MAX_LINES 行、≤HANDOVER_MAX_BYTES 字节交接摘要到 stdout；只读 .planning
     与 crew inbox，不写任何文件。末尾附「交接必读预算」（V2/D-2 + S-1：摘要不含活跃流行 +
     brief 一屏 + 活跃流整行 + feedback 待复盘命中 + handoff，整看板/整 plan 不计入），
-    必读总量与输出均硬 ≤32KB（A1：超限封顶并标注，其余按需 grep；B-1：封顶/超预算时
+    必读总量硬 ≤32KB、输出自身硬 ≤8KB（A1：超限封顶并标注，其余按需 grep；B-1：封顶/超预算时
     同时输出封顶前原值，不让报告数字低于真实必读）；输出超硬上限按 HANDOVER_SHRINK_STEPS
     确定性截断并标注「已截断，详情见 plan」。"""
     pattern = cfg["portfolioMatch"]
@@ -982,8 +1014,8 @@ def handover(root: Path, cfg: dict, plans: list[Plan]) -> int:
         out = lines + _handover_budget_lines(budget)
         if index > 0:
             out.append(HANDOVER_TRUNCATED_MARK)
-        if (_text_bytes(out) <= HANDOVER_MAX_BYTES
-                and budget["total"] <= HANDOVER_MAX_BYTES):
+        # S4：输出自身硬 ≤8KB 即收（预算封顶已由 _handover_budget 按 32KB 完成）。
+        if _text_bytes(out) <= HANDOVER_MAX_BYTES:
             break
     else:
         out = _hard_truncate(out, HANDOVER_TRUNCATED_MARK, HANDOVER_MAX_BYTES)
@@ -1035,7 +1067,7 @@ def _stream_table_row(name: str, target: Plan | None, fallback_health: str = "")
     待 Captain 数；无 plan 的流按「Backlog 承载」占位。"""
     if target is None:
         return f"| {_clip(cell(name), BOARD_CELL_CLIP)} | — | —（Backlog 承载） | — | 0 |"
-    next_step = (_next_step_lines(target) or ["—"])[0]
+    next_step = _next_step_pick(target)
     return (
         f"| {_clip(cell(name), BOARD_CELL_CLIP)} "
         f"| {_clip(cell(current_phase(target)), BOARD_CELL_CLIP)} "
@@ -1989,7 +2021,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--handover",
         action="store_true",
-        help="打印 ≤49 行、≤32KB 交接摘要（Goal ≤2 行/Next Step/活跃流一行/待 Captain ≤3 条/"
+        help="打印 ≤49 行、≤8KB 交接摘要（Goal ≤2 行/Next Step/活跃流一行/待 Captain ≤3 条/"
              "未处理通知/最近 3 条 progress 与完成/证据入口/看板新鲜；超限确定性截断标注）；"
              "只读 .planning，不写文件，progress 只读尾部",
     )
