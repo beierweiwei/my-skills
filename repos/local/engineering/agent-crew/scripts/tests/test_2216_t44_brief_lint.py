@@ -2,7 +2,7 @@
 """plan-status.py 一屏摘要（--brief）与内容卫生 lint 用例（2.2.16 T44）。
 
 覆盖：
-① --brief：活跃流一屏表（流｜阶段｜完成数/健康｜下一步｜待 Captain）+ 今日变化 3 行；
+① --brief：活跃流一屏表（流｜阶段｜阶段完成数/健康｜下一步｜待 Captain）+ 今日变化 3 行；
    「待 Captain」含 portfolio Backlog ⏸/C 前缀项摘要；行数 ≤ BRIEF_MAX_LINES；
    无活跃流/无 portfolio/无看板时明确提示不崩；只读不落盘。
 ② 卫生 lint（--lint 附带，非阻断）：Next Step 超长（阈值 HYGIENE_NEXT_STEP_MAX）/
@@ -33,7 +33,7 @@ _spec.loader.exec_module(ps)
 
 TODAY = datetime.now().strftime("%Y-%m-%d")
 YESTERDAY = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-BRIEF_HEADER = "| 流 | 阶段 | 完成数/健康 | 下一步 | 待 Captain |"
+BRIEF_HEADER = "| 流 | 阶段 | 阶段完成数/健康 | 下一步 | 待 Captain |"
 
 
 def make_repo(

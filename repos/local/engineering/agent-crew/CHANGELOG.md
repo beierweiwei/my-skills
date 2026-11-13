@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.2.26 — 2026-11-13
+
+批修四项（T63+T58+T61+T62）。T63 为 P1（Captain 两次质疑「熄火了吗/你也没被叫醒」）：全仓 Backlog 全标 ⏸ 排队时待办=0，三条叫醒通道全哑，安静期零可见性；AMEND 补充根因口径与 ⏸ 两态规则。
+
+### 修复
+
+- **T63 guard 空闲兜底叫醒（P1）**：新增「空闲兜底」——无待办、无在跑、无卡住且总舵 idle/done 连续 `guard.idleWakeRounds` 轮（默认 5≈10 分钟，夹取 0–240，0=关闭）→ 报平安叫醒 + Backlog 清单（不含已完成；可派/⏸/⛔ 全列）；受全局冷却去重、触发后计数清零；总舵 working/blocked/缺失不累计。**Backlog ⏸ 两态（AMEND）**：⏸ 行仅当含外部条件语义（待 Captain/待 C/留 Captain/待拍板/待评审/待授权/待窗口）才排除（「⏸ 待外部」）；其余 ⏸（下批/batch/评估中等排队语义）计「⏸ 排队」——计入待办数据但不触发即时叫醒，由空闲兜底承载；⛔ blocked 行只进兜底清单。`scan_todos` 返回三元组（pending/residual/paused），`--once --json` 增 `backlogPaused/idleQuietRounds/idleWake`；crew-rules G2/G3 同步 ⏸ 口径防漂移。
+- **T61 release.md 剧本对齐默认 push（P2）**：Phase 3 push 改默认执行（Captain 2026-11-13 口径：push 不设授权闸门，commit 后默认 push 技能源发布分支与 my-skills `origin/master`）+ 远端 HEAD 核对（`git ls-remote`，记录 push 前后 hash）+ local-only 仓例外注明「local-only 不推」。
+- **T62 plan-status 看板可用性三改（P2，CASE 回执 `helm6332-board-hygiene-20261113-1` 建议）**：①流表表头「完成数/健康」→「阶段完成数/健康」（口径为 Phase 完成数，防与勾选数混淆）②plan section 标题尾部括注归一（`## 最近完成（最近 5 条）` 命中「最近完成」）③hygiene 三类新提醒（默认提醒 `--strict` 阻断）：`progress-date`（progress 条目缺日期前缀）/ `plan-unregistered`（有 plan 未登记 portfolio Phases）/ `phase-status-mismatch`（portfolio Phase complete 但引用 plan 内 Phase 未 complete）。
+
+### 文档
+
+- **T58 verify-crew（项目技能，不随技能分发）**：补 `crew-claude-model-flag` feature 配方——claude 通道模型级联解析（playbook 角色>全局角色>default，`meta.model_source` 记来源）、`--model` CLI 传参（不走 env）、空模型通道默认、超时证据、meta 记录；驱动配方 = `test_2223_t56_model_flag.py` + builder-flash-verify 实跑证据。
+
+### 测试
+
+- `test_crew_guard.py` 新增 `BacklogPausedScanTest`（⏸ 三桶解析与两态）与 `IdleBackoffWakeTest`（N 轮兜底/未达不叫/helm working·blocked 不叫/0 关闭/冷却去重/计数清零），既有 scan_todos 用例解包三元组。
+- 新增 `test_2226_t62_board_usability.py`：表头断言、括注归一、三类 lint 各一例（正/反）。
+- `test_2216_t44_brief_lint.py` BRIEF_HEADER 同步新表头。
+- 版本 2.2.26：`SKILL.md` frontmatter 与标题、`init.py` fallback、本段、`test_crew_lint.py`、`test_220_final.py`、`test_224_retro.py`、`test_225_patch.py`、`test_2214_guard_presence.py` 版本断言同步。
+
 ## 2.2.25 — 2026-11-13
 
 T60 小修：修复 2.2.24 独立审查（`.planning/patch-2224/evidence/review/review-2223-2224.md`）判定的 B1/B2 阻断，补齐 dispatch 默认权限模式与 opencode 静态度量。

@@ -45,11 +45,11 @@
 - **真源与视图**：`.planning/*/task_plan.md` 是唯一状态真源；派生看板只由 `python3 scripts/plan-status.py --write` 生成，**勿手改**。
 - **落点与标题**：由项目 `.planning/orchestration.json` 的 `board.path` / `board.title` 配置（默认 `docs/进度追踪.md`）；父目录不存在会自动创建。
 - **portfolio 识别**：按配置 `portfolioMatch` glob 匹配 plan 目录名（默认 `*portfolio*`）。
-- **看板结构**（2.2.19 B 人类速读）：现在状态一句（活跃流/最差健康/待 Captain/今日变化）+ 健康图例一行（🟢 完成/🟡 进行中/🔴 阻塞或偏差）+ 今日变化 ≤3 行 + 待 Captain 摘要 ≤5 条 + 流表（与 `--brief` 同表头：流/阶段/完成数+健康/下一步一句话 ≤60 字符/待 Captain 数；排序＝活跃 → 待立项 → 已完成，已完成折叠为一行计数 + 指针，活跃/待立项不被挤出）+ 最近完成 ≤5 条一行 + 偏差/Backlog 计数 + 证据/plan 指针；不整段导出总舵 Next Step、业务链逐节点、各流 todo 与偏差/Backlog 明细（真源在 plan，按指针 grep）。
+- **看板结构**（2.2.19 B 人类速读）：现在状态一句（活跃流/最差健康/待 Captain/今日变化）+ 健康图例一行（🟢 完成/🟡 进行中/🔴 阻塞或偏差）+ 今日变化 ≤3 行 + 待 Captain 摘要 ≤5 条 + 流表（与 `--brief` 同表头：流/阶段/阶段完成数+健康/下一步一句话 ≤60 字符/待 Captain 数；排序＝活跃 → 待立项 → 已完成，已完成折叠为一行计数 + 指针，活跃/待立项不被挤出）+ 最近完成 ≤5 条一行 + 偏差/Backlog 计数 + 证据/plan 指针；不整段导出总舵 Next Step、业务链逐节点、各流 todo 与偏差/Backlog 明细（真源在 plan，按指针 grep）。
 - **体量上限**：看板 ≤120 行且 ≤24KB；超限按行保留前缀并给截断指针，`--check-fresh` 指纹行不受影响。
 - **归档**：不内置；需要归档历史看板时以 `--archive <path>` 一次性显式执行。`board.archive` 配置为空时看板不写归档链接行。
 - **自检**：`python3 scripts/plan-status.py --selftest` 验证 T/C 分流与流表结构（核心契约），部署后先跑一次。
-- **一屏摘要**：`python3 scripts/plan-status.py --brief` 输出活跃流表（流｜阶段｜完成数/健康｜下一步｜待 Captain）+ 待 Captain 摘要 + 今日变化（≤40 行）；用于每轮汇报与交接速读，只读不落盘。
+- **一屏摘要**：`python3 scripts/plan-status.py --brief` 输出活跃流表（流｜阶段｜阶段完成数/健康｜下一步｜待 Captain）+ 待 Captain 摘要 + 今日变化（≤40 行）；用于每轮汇报与交接速读，只读不落盘。
 - **卫生 lint**：`--lint` 的结构错误按 `文件:行号` 非零退出；内容卫生（Next Step 超长/含 ✅、🟡 无 owner、样板残留）默认不阻断（只提醒 rc=0），加 `--strict` 才升失败。
 
 ## 4. 业务链与看板写法规范（Captain 2026-10-30）
