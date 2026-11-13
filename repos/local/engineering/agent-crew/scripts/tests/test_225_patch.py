@@ -128,12 +128,12 @@ class Nf003CheatsheetDispatchTest(unittest.TestCase):
 
 class Version225Test(unittest.TestCase):
     def test_version_225_synced(self):
-        self.assertIn("version: 2.2.23", read(SKILL_MD))
-        self.assertIn("v2.2.23", read(SKILL_MD))
-        self.assertIn('SKILL_VERSION_FALLBACK = "2.2.23"', read(INIT))
-        self.assertIn("## 2.2.23", read(CHANGELOG))
-        self.assertIn('"2.2.23"', read(TEST_CREW_LINT))
-        self.assertIn("2.2.23", read(TEST_220))
+        self.assertIn("version: 2.2.24", read(SKILL_MD))
+        self.assertIn("v2.2.24", read(SKILL_MD))
+        self.assertIn('SKILL_VERSION_FALLBACK = "2.2.24"', read(INIT))
+        self.assertIn("## 2.2.24", read(CHANGELOG))
+        self.assertIn('"2.2.24"', read(TEST_CREW_LINT))
+        self.assertIn("2.2.24", read(TEST_220))
 
 
 if __name__ == "__main__":

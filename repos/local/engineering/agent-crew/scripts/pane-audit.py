@@ -108,6 +108,7 @@ KIND_TEXT = {
     "orphan-registry": "registry 无 pane",
     "empty-tab": "空 tab",
     "blocked-overdue": "blocked 工位超时未处置",
+    "yolo-missing": "qoder 工位缺 YOLO 权限参数",
 }
 
 
@@ -964,6 +965,40 @@ def helm_reclaim_findings(
     return findings
 
 
+def collect_qoder_cmdlines() -> list[tuple[str, str]]:
+    """采集在跑 qodercli 工位 (agent 名, cmdline)；无法采集返回空表（仅 Linux /proc）。"""
+    try:
+        proc = subprocess.run(
+            ["pgrep", "-f", "qoderclicn"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    entries: list[tuple[str, str]] = []
+    for pid in proc.stdout.split():
+        try:
+            raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except OSError:
+            continue
+        parts = [chunk.decode("utf-8", "replace")
+                 for chunk in raw.split(b"\0") if chunk]
+        name = ""
+        for index, part in enumerate(parts):
+            if part == "--name" and index + 1 < len(parts):
+                name = parts[index + 1]
+        if name:
+            entries.append((name, " ".join(parts)))
+    return entries
+
+
+def yolo_missing_entries(
+        entries: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """返回缺 `--permission-mode bypass_permissions` 的 (agent 名, cmdline)。"""
+    return [
+        (name, cmdline) for name, cmdline in entries
+        if "--permission-mode" not in cmdline
+        or "bypass_permissions" not in cmdline
+    ]
+
+
 def audit(
     snapshot: dict,
     whitelist_prefixes: tuple[str, ...] = DEFAULT_WHITELIST_PREFIXES,
@@ -976,6 +1011,7 @@ def audit(
     now: datetime | None = None,
     blocked_grace_minutes: int = DEFAULT_BLOCKED_GRACE_MINUTES,
     helm_context: HelmContext | None = None,
+    yolo_entries: list[tuple[str, str]] | None = None,
 ) -> list[Finding]:
     tabs = snapshot.get("tabs") or []
     panes = snapshot.get("panes") or []
@@ -1158,6 +1194,18 @@ def audit(
                 "blocked 工位不适用 2 小时保留窗",
             ))
 
+    if yolo_entries is None:
+        yolo_entries = []
+    for name, cmdline in yolo_missing_entries(yolo_entries):
+        findings.append(Finding(
+            "yolo-missing", name, "（进程）",
+            f"{name} 的 qodercli 进程缺 --permission-mode bypass_permissions"
+            "（D8 YOLO 派单；自动驾驶会卡权限确认）",
+            None,
+            "dispatch.py close 后按 D8 重启：start 显式带 "
+            "--permission-mode bypass_permissions",
+        ))
+
     findings.sort(key=lambda finding: (finding.target, finding.kind))
     return findings
 
@@ -1301,6 +1349,8 @@ def build_parser() -> argparse.ArgumentParser:
             "blocked 巡检：读取 <crew-dir>/inbox 回执，blocked agent 取最新回执（ts 最大），"
             "仍 blocked 且年龄 > --blocked-grace（默认 30 分钟）时告警 blocked-overdue，"
             "按 R6 处置（re-task / close / escalate）；仅报告，--apply 不关闭。\n"
+            "YOLO 巡检：pgrep qoderclicn 读 /proc cmdline，工位缺 "
+            "--permission-mode bypass_permissions 时告警 yolo-missing（D8）；仅报告。\n"
             "后台 job 语义：pane 内后台 job（& / nohup 等）在 --apply 关闭 pane 时仍可能"
             "收到 SIGHUP；本工具只按前台进程组/进程信息判定，不保证后台 job 安全。\n"
             "示例：python3 scripts/pane-audit.py --snapshot snapshot.json\n"
@@ -1400,6 +1450,7 @@ def main(argv: list[str] | None = None) -> int:
         blocked_receipts=blocked_receipts,
         blocked_grace_minutes=args.blocked_grace,
         helm_context=helm_context,
+        yolo_entries=collect_qoder_cmdlines(),
     )
     if not findings:
         print(

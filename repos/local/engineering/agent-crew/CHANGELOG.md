@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.2.24 — 2026-11-13
+
+T59 小修：YOLO 派单口径补齐（CASE `req2-docalign-scout-1` 启动缺 `--permission-mode bypass_permissions`，Captain 报障实测——副舵派单经正规 dispatch 通道但漏传权限参数，YOLO 要求此前只写在速查表一行，角色模板与规则正文均无；dispatch 日志也不记该字段，事后无法巡检）。
+
+### 新增
+
+- **crew-rules D8 YOLO 派单**：`dispatch.py start` 派 worker 一律带 `--permission-mode bypass_permissions`（qoder）/`--auto`（opencode），所有角色无例外（含 scout/runner/planner）；派单记录与回执写明 permissionMode；门禁不放宽。
+- **firstmate 双栈模板派单段**加 YOLO 硬口径（qoder 版 bypass_permissions / opencode 版 `--auto`）与发送前自检要求。
+- **pane-audit `yolo-missing` 巡检**：pgrep qoderclicn 读 `/proc/<pid>/cmdline`，工位缺 `--permission-mode bypass_permissions` 告警（仅报告，next 指引按 D8 重启）；`yolo_missing_entries` 纯函数 + `collect_qoder_cmdlines` 采集器，`audit()` 经 `yolo_entries` 注入可测。
+
+### 修复
+
+- `dispatch.py` start：registry 条目与 agent-log 行补记 `permissionMode` 字段（空=未传/通道默认），补可观测缺口。
+
+### 测试
+
+- 新增 `test_2224_yolo_dispatch.py`（规则/双栈模板/dispatch 记录静态断言 + pane-audit 判定/注入/清洁三态）；`test_dispatch.py` 补 permissionMode 记录两例（显式/缺省）。
+- 版本 2.2.24：`SKILL.md` frontmatter 与标题、`init.py` fallback、本段、`test_crew_lint.py`、`test_220_final.py`、`test_224_retro.py`、`test_225_patch.py`、`test_2214_guard_presence.py` 版本断言同步。
+
 ## 2.2.23 — 2026-11-13
 
 T56 小修：claude 通道模型传参 env → `--model`（实测 `~/.claude/settings.json` env 块覆盖子进程 `ANTHROPIC_MODEL`，按角色指定模型静默失效；网关模型发现开启后 `--model` 纯文本/带工具均正常——T39/FB-036 的 env 方案与旧证据过期，证据 crew-orchestrator `.scratch/model-routing-20261113/{ov,mf,mt}.json`）；`init --refresh-block` 块最新时仍重算 manifest configHash（FB-048，doctor manifest.config warn 的 next 修复路径失效）。Captain 直令（agents 全量 backend=claude，builder=glm-5.3-flash、planner/reviewer=glm-5.3）后实测发现，helm 直跑发布。

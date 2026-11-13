@@ -529,6 +529,27 @@ class DispatchTest(unittest.TestCase):
         self.assertNotIn("proj-builder", registry)
         self.assertEqual("custom-builder", self.agent_log()[-1]["agent"])
 
+    def test_start_records_permission_mode_in_log_and_registry(self):
+        self._write_composed("qoder", "builder")
+        proc = self.run_dispatch(
+            "start", "--role", "builder", "--runtime", "qoder",
+            "--pane", "wX:p1", "--name", "yolo-builder",
+            "--permission-mode", "bypass_permissions", "--json")
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        row = self.agent_log()[-1]
+        self.assertEqual("start", row["action"])
+        self.assertEqual("bypass_permissions", row["permissionMode"])
+        registry = json.loads(
+            (self.root / ".git/crew/dispatch-agents.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            "bypass_permissions", registry["yolo-builder"]["permissionMode"])
+
+    def test_start_without_permission_mode_records_empty(self):
+        proc = self.start("builder", "qoder")
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        self.assertEqual("", self.agent_log()[-1]["permissionMode"])
+
     def test_start_rejects_invalid_explicit_name_before_herdr(self):
         proc = self.start("builder", "qoder", name="Bad Name")
         self.assertEqual(1, proc.returncode)
