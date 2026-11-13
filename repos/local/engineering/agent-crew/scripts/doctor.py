@@ -473,9 +473,17 @@ class Doctor:
                 continue  # managed 组合基础代理，不是项目角色
             custom = path.name.startswith("custom-")
             entries.append({"path": path, "runtime": "opencode", "custom": custom})
+        cl_dir = self.root / ".claude/agents"
+        if cl_dir.is_dir():
+            for path in sorted(cl_dir.glob("*.md")):
+                if path.name.startswith("crew-"):
+                    continue  # managed 组合基础代理，不是项目角色
+                custom = path.name.startswith("custom-")
+                entries.append({"path": path, "runtime": "claude", "custom": custom})
         for entry in entries:
             stem = entry["path"].stem
-            if entry["runtime"] == "opencode" and entry["custom"] and stem.startswith("custom-"):
+            if entry["runtime"] in ("opencode", "claude") and entry["custom"] \
+                    and stem.startswith("custom-"):
                 stem = stem[len("custom-"):]
             entry["id"] = stem
         return entries
@@ -490,6 +498,10 @@ class Doctor:
         if oc_dir.is_dir():
             nested.extend(path for path in oc_dir.rglob("*.md")
                           if path.parent != oc_dir)
+        cl_dir = self.root / ".claude/agents"
+        if cl_dir.is_dir():
+            nested.extend(path for path in cl_dir.rglob("*.md")
+                          if path.parent != cl_dir)
         return sorted(nested)
 
     # ---------- 通用 ----------
@@ -1584,14 +1596,18 @@ class Doctor:
         }
         problems: list[str] = []
         checked = 0
-        for runtime in ("qoder", "opencode"):
+        for runtime in ("qoder", "opencode", "claude"):
             for role in enabled:
                 try:
                     dispatch_lib.locate_role(self.root, str(role), runtime)
                 except Exception:  # noqa: BLE001
                     continue
-                rel = (Path(".qoder/agents/crew") / f"{role}.md" if runtime == "qoder"
-                       else Path(".opencode/agent") / f"crew-{role}.md")
+                if runtime == "qoder":
+                    rel = Path(".qoder/agents/crew") / f"{role}.md"
+                elif runtime == "claude":
+                    rel = Path(".claude/agents") / f"crew-{role}.md"
+                else:
+                    rel = Path(".opencode/agent") / f"crew-{role}.md"
                 path = self.root / rel
                 if not path.is_file():
                     problems.append(f"缺少组合基础代理：{rel.as_posix()}")
@@ -1767,6 +1783,21 @@ class Doctor:
             return Result("role.discovery.opencode", "fail", f"文件存在但未被发现：{missing}")
         return Result("role.discovery.opencode", "pass", f"{len(entries)} 个 opencode 角色被发现")
 
+    def check_role_discovery_claude(self) -> Result:
+        """claude 栈落点规范检查（claude 无 agent list 等价 CLI，只查落点）。"""
+        nested = [path for path in self.nested_role_files()
+                  if ".claude/agents" in path.as_posix()]
+        if nested:
+            return Result("role.discovery.claude", "fail",
+                          "非规范落点："
+                          f"{[p.relative_to(self.root).as_posix() for p in nested]}；"
+                          "自定义角色应在顶层 custom-<id>.md")
+        entries = [entry for entry in self.role_entries() if entry["runtime"] == "claude"]
+        if not entries:
+            return Result("role.discovery.claude", "pass", "无 claude 角色文件")
+        return Result("role.discovery.claude", "pass",
+                      f"{len(entries)} 个 claude 角色文件落点规范")
+
     def _runtime_direct_files(self) -> list[Path]:
         files: list[Path] = []
         agents = self.root / "AGENTS.md"
@@ -1911,6 +1942,34 @@ class Doctor:
         if warns:
             return Result("runtime.names", "warn", "；".join(warns))
         return Result("runtime.names", "pass", f"Herdr {len(agents)} 个 agent 命名合法")
+
+    def check_runtime_legacy_registry(self) -> Result:
+        """R7（T57）：dispatch-agents.json 旧过渡记录（actualRuntime 双轨）一次性
+        warn 提示清理——close 后自然淘汰，或人工把 runtime 改为实际 runtime。
+        只读不改写（不自动改写存量记录）。"""
+        crew = self.crew()
+        if crew is None:
+            return Result("runtime.legacy-registry", "env", self._crew_error)
+        registry_path = crew / "dispatch-agents.json"
+        if not registry_path.is_file():
+            return Result("runtime.legacy-registry", "pass", "无 dispatch 注册表")
+        try:
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            return Result("runtime.legacy-registry", "env",
+                          f"dispatch-agents.json 不可读：{exc}")
+        if not isinstance(registry, dict):
+            return Result("runtime.legacy-registry", "pass", "注册表为空")
+        legacy = sorted(
+            name for name, info in registry.items()
+            if isinstance(info, dict) and "actualRuntime" in info
+        )
+        if legacy:
+            return Result(
+                "runtime.legacy-registry", "warn",
+                f"旧过渡记录（actualRuntime 双轨，T57 前手工登记）：{legacy}；"
+                "close 后自然淘汰，或人工把 runtime 字段改为实际 runtime 并删除 actualRuntime")
+        return Result("runtime.legacy-registry", "pass", "注册表无旧过渡记录")
 
     def check_runtime_lock(self) -> Result:
         crew = self.crew()
@@ -2387,10 +2446,11 @@ CHECKS = [
     "role.frontmatter", "role.descriptor", "role.capability", "role.inherit",
     "role.compose", "role.overlay_budget", "role.composed", "role.delivery", "role.gates",
     "role.names",
-    "role.discovery.qoder", "role.discovery.opencode", "role.runtime-direct",
+    "role.discovery.qoder", "role.discovery.opencode", "role.discovery.claude",
+    "role.runtime-direct",
     "role.orphan",
     "runtime.dir", "runtime.state", "runtime.names", "runtime.lock", "runtime.guard",
-    "runtime.worktree",
+    "runtime.worktree", "runtime.legacy-registry",
     "hooks.schema", "hooks.gates", "hooks.scripts",
     "install.log", "install.version", "install.scripts_source", "upgrade.scripts",
     "skill.purity", "skill.lint",
@@ -2430,6 +2490,7 @@ METHODS = {
     "role.names": "check_role_names",
     "role.discovery.qoder": "check_role_discovery_qoder",
     "role.discovery.opencode": "check_role_discovery_opencode",
+    "role.discovery.claude": "check_role_discovery_claude",
     "role.runtime-direct": "check_role_runtime_direct",
     "role.orphan": "check_role_orphan",
     "runtime.dir": "check_runtime_dir",
@@ -2438,6 +2499,7 @@ METHODS = {
     "runtime.lock": "check_runtime_lock",
     "runtime.guard": "check_runtime_guard",
     "runtime.worktree": "check_runtime_worktree",
+    "runtime.legacy-registry": "check_runtime_legacy_registry",
     "hooks.schema": "check_hooks_schema",
     "hooks.gates": "check_hooks_gates",
     "hooks.scripts": "check_hooks_scripts",

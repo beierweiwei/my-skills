@@ -80,14 +80,15 @@ class InitV21Test(unittest.TestCase):
         self.assertEqual(agents.count("<!-- agent-crew:orchestration:start -->"), 1)
         self.assertEqual(agents.count("<!-- agent-crew:orchestration:end -->"), 1)
         stubs = [p for p in list((self.root / ".qoder/agents").glob("*.md")) +
-                 list((self.root / ".opencode/agent").glob("*.md"))
+                 list((self.root / ".opencode/agent").glob("*.md")) +
+                 list((self.root / ".claude/agents").glob("*.md"))
                  if not p.name.startswith("crew-")]
-        self.assertEqual(len(stubs), 14)
+        self.assertEqual(len(stubs), 21)
         manifest = json.loads((self.root / "docs/crew/manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(len(manifest["composedAgents"]), 14)
+        self.assertEqual(len(manifest["composedAgents"]), 21)
         self.assertEqual(manifest["manifestVersion"], 1)
         self.assertEqual({entry["kind"] for entry in manifest["entries"]}, {"file", "block"})
-        self.assertEqual(len(manifest["roleStubs"]), 14)
+        self.assertEqual(len(manifest["roleStubs"]), 21)
         self.assertTrue(manifest["configHash"])
         for rel in ("docs/crew-rules.md", "docs/crew-acceptance.md",
                     "docs/orchestration-guide.md", "docs/plan-discipline.md"):

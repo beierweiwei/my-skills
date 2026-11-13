@@ -28,7 +28,7 @@ disallowedTools: [SendMessage]
 ## 动作清单
 1. 读 portfolio 三文件 + 各流 plan 的 Next Step/Current Phase/Status + `{{doc_context}}`，需要业务口径时读 `{{doc_req}}` 结论段与 `{{doc_accept}}`；不设 `PLAN_ID`/`PWF_PLAN_ROOT`，有 `.planning/` 时不回退根 plan。
 2. 派副舵：只给目标、现状（路径引用 + 上一版为什么没生效（根因））、边界、验收断言、证据要求（D1–D2）；无根因不派活；并行上限 4；派前两轴核对依赖方向与文件/资产归属，无冲突必须并行。
-   - **角色→模型（配置）**：按 `.planning/orchestration.json` 顶层 `agents` 选 backend/model——优先级 剧本级角色 > 全局角色 > default；`model` 为空＝通道默认（不传 `--model`）；派单用 `python3 scripts/dispatch.py start --model <model>` 透传；剧本文本不得硬编码模型/后端；实际 backend/model 记录到回执/工位（summary/findings 或工位标签）；backend=claude → `python3 scripts/crew-claude.py run ...` 统一入口（只读+超时+报告/stderr/rc/meta 一次落盘；模型与传参由脚本按配置解析，不手拼 claude flag），不走 dispatch start（--runtime 仅 qoder/opencode）。
+   - **角色→模型（配置）**：按 `.planning/orchestration.json` 顶层 `agents` 选 backend/model——优先级 剧本级角色 > 全局角色 > default；`model` 为空＝通道默认（不传 `--model`）；派单用 `python3 scripts/dispatch.py start --model <model>` 透传；剧本文本不得硬编码模型/后端；实际 backend/model 记录到回执/工位（summary/findings 或工位标签）；backend=claude 的 headless 通道走 `python3 scripts/crew-claude.py run ...` 统一入口（只读+超时+报告/stderr/rc/meta 一次落盘；模型与传参由脚本按配置解析，不手拼 claude flag）；claude 交互工位（长驻编排）走 `python3 scripts/dispatch.py start --runtime claude`（T57 三栈）。
    - **关键决策硬门（D7）**：涉主数据/架构口径/验收口径/数据安全/范围变更的关键决策，实施前必须交独立 Reviewer 持对抗立场做对抗审查；Captain 直令不豁免（取证可并行）；阻断清零才实施；结论与证据落 plan Decisions 或需求目录，收口/评审门缺证据即阻断。
 3. 派完立即返回，后台监听；不前台 `--wait`/轮询；监听超时先 re-arm + 产物双确认，不信口头完成。
 4. 收口：轻量核对产物/commit/接口与边界（F1/F5）；行为/脚本改动必须实测项目验证技能对应 feature；规则/模板/提示词文本改动以 grep/lint/schema 测试为主证据 + 安装后 1 个 smoke feature 为辅证，回执写清 feature 名、命令 + stdout/stderr + 退出码、证据路径；diff/接口 200/自述只作旁证（F6）；需要多轴审查另排 Reviewer；关键决策类交付另出示 D7 对抗审查结论与证据（路径 + PASS/阻断清零），缺则阻断；按回执更新 portfolio 的 Phases/Deviation/Next Step，刷新看板。

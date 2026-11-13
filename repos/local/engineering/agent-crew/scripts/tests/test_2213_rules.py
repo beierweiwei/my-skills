@@ -432,8 +432,9 @@ class ModelSelectionTest(unittest.TestCase):
                 "backend=claude",
                 "`python3 scripts/crew-claude.py run ...`",
                 "不手拼 claude flag",
-                "不走 dispatch start",
-                "--runtime 仅 qoder/opencode",
+                # T57 三栈：headless 通道不走 dispatch start；交互工位走 --runtime claude
+                "headless 通道",
+                "--runtime claude",
             ):
                 self.assertIn(keyword, text, f"{rel} 缺少：{keyword}")
 

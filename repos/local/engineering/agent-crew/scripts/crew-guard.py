@@ -45,7 +45,7 @@ agent+callId 去重，间隔 `guard.approvalRepeatMinutes`（默认 30，夹取 
 `guard.pendingHeartbeatMinutes`（默认 15，夹取 1–240）重复叫醒，仍受全局冷却约束；
 与 blocked/awaiting_approval 同轮只发一条叫醒（reason 合并）。
 空闲兜底（2.2.26 T63）：无待办、无在跑、无卡住且总舵 idle/done 连续
-`guard.idleWakeRounds` 轮（默认 5≈10 分钟，夹取 0–240，0=关闭）→ 报平安叫醒，
+`guard.idleWakeRounds` 轮（默认 30≈60 分钟（T64，对齐每小时心跳口径），夹取 0–240，0=关闭）→ 报平安叫醒，
 附 Backlog 清单（不含已完成；可派/⏸ 排队/⏸ 待外部/⛔ 阻塞全列）；受全局冷却
 去重，触发后计数清零；总舵
 working/blocked/缺失不累计。Backlog ⏸ 两态（AMEND）：含外部条件语义
@@ -161,7 +161,7 @@ DEFAULT_WAKE_COOLDOWN_MINUTES = 10
 DEFAULT_PENDING_HEARTBEAT_MINUTES = 15
 # 2.2.26 T63 空闲兜底叫醒：连续 N 轮全仓安静（无 pending/无在跑/无卡住）且 helm
 # idle/done → 报平安 + Backlog 全量清单（含 ⏸ 条目）。0=关闭。
-DEFAULT_IDLE_WAKE_ROUNDS = 5
+DEFAULT_IDLE_WAKE_ROUNDS = 30
 IDLE_WAKE_ROUNDS_MAX = 240
 # 2.2.26 T63 AMEND ⏸ 两态：Backlog ⏸ 行仅当含外部条件语义才排除（待外部），
 # 其余 ⏸ 为纯排队（不即时叫醒、由空闲兜底承载）。
@@ -173,6 +173,40 @@ DEFAULT_WAKE_TTL_SECONDS = 7200
 WAKE_GENERATED_RE = re.compile(r"^generated_at:\s*(\S+)\s*$")
 # 同一 task 回执达到该数量时写一条非阻断「返工提醒」（不叫醒、不改 plan、不删回执）
 REWORK_RECEIPT_THRESHOLD = 3
+
+# T57：runtime 三栈；交接 start_args 按现役舵 runtime 组装（R2）
+HANDOFF_RUNTIMES = ("qoder", "opencode", "claude")
+
+
+def effective_helm_runtime(info: object) -> str:
+    """dispatch registry 记录的有效 runtime；R7 backwards：旧过渡记录
+    （runtime=qoder + actualRuntime=claude 双轨）在新语义下读作 claude。
+    actualRuntime 仅此读取点兼容存量（close 后自然淘汰，doctor 提示清理）；
+    新启动一律写如实 runtime。非法/缺失返回 ""。"""
+    if not isinstance(info, dict):
+        return ""
+    actual = info.get("actualRuntime")
+    if actual in HANDOFF_RUNTIMES:
+        return str(actual)
+    runtime = info.get("runtime")
+    return runtime if runtime in HANDOFF_RUNTIMES else ""
+
+
+def handoff_start_args(runtime: str, pane: str, name: str) -> list[str]:
+    """交接继任舵的 dispatch start 实参（R2：继承现役舵 runtime，非单值假设）。
+
+    qoder/未知 → qoder 形态 bypass_permissions；claude → bypassPermissions；
+    opencode → 不传 --permission-mode（dispatch 拒绝该旗标，rc=2）。
+    runtime 已知时显式带 --runtime。"""
+    args = ["start", "--role", "helm", "--pane", pane]
+    if runtime == "claude":
+        args += ["--permission-mode", "bypassPermissions"]
+    elif runtime != "opencode":
+        args += ["--permission-mode", "bypass_permissions"]
+    if runtime:
+        args += ["--runtime", runtime]
+    args += ["--name", name, "--json"]
+    return args
 
 
 @dataclass(frozen=True)
@@ -1273,8 +1307,7 @@ class Guard:
         except (OSError, ValueError):
             return ""
         info = registry.get(self.helm) if isinstance(registry, dict) else None
-        runtime = info.get("runtime") if isinstance(info, dict) else None
-        return runtime if runtime in ("qoder", "opencode") else ""
+        return effective_helm_runtime(info)
 
     def _successor_name(self, agents: list[dict]) -> str:
         names = {str(agent.get("name") or "") for agent in agents}
@@ -1455,12 +1488,8 @@ class Guard:
         # FB-038：tab create 后确认新 tab 只有一个 pane（多出空 pane 关闭，失败只告警）。
         self._ensure_handoff_tab_single_pane(new_tab, new_pane)
 
-        start_args = ["start", "--role", "helm", "--pane", new_pane,
-                      "--permission-mode", "bypass_permissions"]
         runtime = self._helm_runtime()
-        if runtime:
-            start_args.extend(["--runtime", runtime])
-        start_args.extend(["--name", successor, "--json"])
+        start_args = handoff_start_args(runtime, new_pane, successor)
         code, output, error = self.dispatch(self.root, start_args)
         if code != 0:
             return self._handoff_fail("dispatch start", error or output, base)
@@ -2478,7 +2507,7 @@ class Guard:
                     self.last_wake_at = now
                     result["woke"] = True
                 return result
-        # 2.2.26 T63 空闲兜底：安静期连续 idleWakeRounds 轮（默认 5≈10 分钟）→
+        # 2.2.26 T63 空闲兜底：安静期连续 idleWakeRounds 轮（默认 30≈60 分钟（T64，对齐每小时心跳口径））→
         # 报平安 + Backlog 全量清单（含 ⏸ 排队/⏸ 待外部条目，AMEND）；受全局冷却
         # 去重；触发后计数清零；总舵 working/blocked/缺失不累计（见上方计数逻辑）。
         if idle_wake_cfg > 0 and self.idle_quiet_rounds >= idle_wake_cfg:
@@ -2594,7 +2623,7 @@ def build_parser() -> argparse.ArgumentParser:
 则立即叫醒（受 guard.wakeCooldownMinutes 全局冷却，默认 10 分钟）；blocked 与
 awaiting_approval 单独叫醒；pending 真 idle 按 guard.pendingHeartbeatMinutes 心跳；
 空闲兜底（2.2.26）：无待办/无在跑/无卡住且 helm idle/done 连续 guard.idleWakeRounds
-轮（默认 5≈10 分钟，0=关闭）报平安 + Backlog 清单（不含已完成；可派/⏸/⛔ 全列）；
+轮（默认 30≈60 分钟（T64，对齐每小时心跳口径），0=关闭）报平安 + Backlog 清单（不含已完成；可派/⏸/⛔ 全列）；
 Backlog ⏸ 两态：含外部条件语义（待 Captain/待 C/留 Captain/待拍板/待评审/待授权/
 待窗口）→「⏸ 待外部」不计待办；其余 ⏸（排队语义）→「⏸ 排队」计入待办数据但不
 触发即时叫醒，由空闲兜底承载；

@@ -25,6 +25,27 @@ function readStdin() {
   }
 }
 
+/**
+ * T57/R1 校准辅助：STATUSLINE_PAYLOAD_LOG 指向目录时把 stdin 原始 JSON 落盘
+ * （每 session_id 最多 3 条样本），供 ctx 取值链与真实 payload 比对。
+ * 失败静默（状态栏异常不能打断主流程）。
+ */
+function dumpPayload(raw, d) {
+  const dir = env.STATUSLINE_PAYLOAD_LOG;
+  if (!dir) return;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const sid = String(d?.session_id || 'nosession').slice(0, 40);
+    const marker = path.join(dir, `.seen-${sid}`);
+    let seen = 0;
+    try { seen = Number(fs.readFileSync(marker, 'utf8')) || 0; } catch {}
+    if (seen >= 3) return;
+    fs.writeFileSync(
+      path.join(dir, `payload-${sid}-${seen}.json`), raw, { flag: 'wx' });
+    fs.writeFileSync(marker, String(seen + 1));
+  } catch {}
+}
+
 function gitInfo(dir) {
   const run = (args) => {
     try {
@@ -87,40 +108,65 @@ function resolveModelName(d) {
   );
 }
 
-/** 返回 { used, size, pct }，缺失的项为 null */
+/**
+ * 返回 { used, size, pct }，缺失的项为 null。
+ *
+ * T57/R1 校准（对齐 claude code 官方 statusline stdin schema）：
+ * - claude 的 `context_window.total_input_tokens` = 当前上下文窗口 token 数
+ *   （input 含 cache 读+写）；`used_percentage` 为官方预计算，口径=input-only
+ *   （input + cache_creation + cache_read，不含 output_tokens）。
+ * - 未上报形态：total_input_tokens=0 且 current_usage=null（首个 API 响应前）
+ *   ——此时 0 不是真实用量，返回 null（渲染为 `--`，guard 解析失败显式未知，
+ *   不再产出假 0/1M 让 guard ratio 恒 0 静默失效）。
+ */
 function contextUsage(d) {
   const ctx = d.context_window || d.context || d.usage || {};
 
-  let size = Number(first(ctx.context_window_size, ctx.max_tokens, ctx.window_size));
-  let pct = Number(first(ctx.used_percentage, ctx.percent, ctx.context_percent));
+  const size = Number(first(ctx.context_window_size, ctx.max_tokens, ctx.window_size));
+  const pctRaw = Number(first(ctx.used_percentage, ctx.percent, ctx.context_percent));
 
-  let used = Number(first(ctx.used_tokens, ctx.tokens_used, ctx.context_used));
-  if (!Number.isFinite(used)) {
-    const cu = ctx.current_usage;
-    if (cu) {
-      const keys = ['input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'output_tokens'];
-      const vals = keys.map((k) => Number(cu[k])).filter(Number.isFinite);
-      if (vals.length) used = vals.reduce((a, b) => a + b, 0);
+  // cu 非 null 时为权威分类计数（官方：/compact 后直到下次 API 前为 null）
+  const cu = ctx.current_usage;
+  let used;
+  if (cu && typeof cu === 'object') {
+    const keys = ['input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'];
+    const vals = keys.map((k) => Number(cu[k])).filter(Number.isFinite);
+    used = vals.length ? vals.reduce((a, b) => a + b, 0) : NaN;
+  } else {
+    used = Number(first(ctx.used_tokens, ctx.tokens_used, ctx.context_used));
+    if (!Number.isFinite(used)) {
+      const ti = Number(ctx.total_input_tokens);
+      const to = Number(ctx.total_output_tokens);
+      if (Number.isFinite(ti) && ti !== 0) used = ti;
+      else if (Number.isFinite(ti) || Number.isFinite(to)) {
+        used = (Number.isFinite(ti) ? ti : 0) + (Number.isFinite(to) ? to : 0);
+      }
+    }
+    // 0 但官方预计算 pct>0 → 0 是未上报假象，用 pct 反推
+    if (used === 0 && Number.isFinite(pctRaw) && pctRaw > 0
+        && Number.isFinite(size) && size > 0) {
+      used = Math.round((pctRaw / 100) * size);
     }
   }
-  if (!Number.isFinite(used)) {
-    const ti = Number(ctx.total_input_tokens);
-    const to = Number(ctx.total_output_tokens);
-    if (Number.isFinite(ti) || Number.isFinite(to)) {
-      used = (Number.isFinite(ti) ? ti : 0) + (Number.isFinite(to) ? to : 0);
-    }
-  }
-  if (!Number.isFinite(used) && Number.isFinite(pct) && Number.isFinite(size)) {
-    used = Math.round((pct / 100) * size);
-  }
+  let pct = pctRaw;
   if (!Number.isFinite(pct) && Number.isFinite(used) && Number.isFinite(size) && size > 0) {
     pct = (used / size) * 100;
   }
 
+  // 未上报/异常上报判定（T57/R1）：真实 ctx 永远 > 0（system prompt 起步即数千
+  // token），所以「used=0 且无任何非零信号」都是网关未带 usage 的全零上报
+  //（实测 payload：cu 全零 + total=0 + pct=0，渲染假 `0/1M`）→ unknown，
+  // 渲染 `--`，guard parse_ctx_k 失败显式未知，不产出假 0 让交接静默失效。
+  const hasSignal = (Number.isFinite(used) && used > 0)
+    || (Number.isFinite(pctRaw) && pctRaw > 0)
+    || (cu && typeof cu === 'object' && Number(cu.input_tokens) > 0)
+    || (Number.isFinite(Number(ctx.total_input_tokens))
+        && Number(ctx.total_input_tokens) > 0);
+
   return {
-    used: Number.isFinite(used) ? used : null,
+    used: hasSignal && Number.isFinite(used) ? used : null,
     size: Number.isFinite(size) ? size : null,
-    pct: Number.isFinite(pct) ? pct : null,
+    pct: hasSignal && Number.isFinite(pct) ? pct : null,
   };
 }
 
@@ -160,7 +206,9 @@ function render(d) {
 
 try {
   const raw = readStdin().trim();
-  process.stdout.write(render(raw ? JSON.parse(raw) : {}) + '\n');
+  const data = raw ? JSON.parse(raw) : {};
+  dumpPayload(raw, data);
+  process.stdout.write(render(data) + '\n');
 } catch {
   // 状态栏异常不能打断主流程
   process.stdout.write('\n');

@@ -32,7 +32,7 @@ permission:
 ## 动作清单
 1. 启动：读 `{{skill_root}}/references/orchestration-guide.md`、portfolio 三文件与各流 plan；用 `dispatch.py status/list` 看角色与工位，只读命令优先。
 2. 派活：工单按 D1–D2 写目标、现状（含上一版为什么没生效（根因））、验收断言、边界、回执要求；无根因不派活；优先复用副舵与工位，不新建平行入口。
-   - **角色→模型（配置）**：按 `.planning/orchestration.json` 顶层 `agents` 选 backend/model——优先级 剧本级角色 > 全局角色 > default；`model` 为空＝通道默认（不传 `--model`）；派单用 `python3 scripts/dispatch.py start --model <model>` 透传；剧本文本不得硬编码模型/后端；实际 backend/model 记录到回执/工位（summary/findings 或工位标签）；backend=claude → `python3 scripts/crew-claude.py run ...` 统一入口（只读+超时+报告/stderr/rc/meta 一次落盘；模型与传参由脚本按配置解析，不手拼 claude flag），不走 dispatch start（--runtime 仅 qoder/opencode）。
+   - **角色→模型（配置）**：按 `.planning/orchestration.json` 顶层 `agents` 选 backend/model——优先级 剧本级角色 > 全局角色 > default；`model` 为空＝通道默认（不传 `--model`）；派单用 `python3 scripts/dispatch.py start --model <model>` 透传；剧本文本不得硬编码模型/后端；实际 backend/model 记录到回执/工位（summary/findings 或工位标签）；backend=claude 的 headless 通道走 `python3 scripts/crew-claude.py run ...` 统一入口（只读+超时+报告/stderr/rc/meta 一次落盘；模型与传参由脚本按配置解析，不手拼 claude flag）；claude 交互工位（长驻编排）走 `python3 scripts/dispatch.py start --runtime claude`（T57 三栈）。
    - **关键决策硬门（D7）**：涉主数据/架构口径/验收口径/数据安全/范围变更的关键决策，实施前必须交独立 Reviewer 持对抗立场做对抗审查；Captain 直令不豁免（取证可并行）；阻断清零才实施；结论与证据落 plan Decisions 或需求目录，收口/评审门缺证据即阻断。
 3. 生命周期：启动/关闭/工位变更只走 `python3 scripts/dispatch.py`；`start-*.sh` 是薄包装，不直启 runtime。
 4. 值守：后台 `agent-watch`/guard 观察，不前台阻塞；定时自检先跑 `python3 scripts/pane-audit.py --apply` 收敛工位（working 永不关、白名单跳过、个人 tab 不动），再跑 `python3 scripts/crew-reaper.py --apply --json` 对账回收旧总舵 tab/旧 helm 残留；guard 叫醒后先核状态与产物再续派。guard 在跑口径＝Herdr working + `<crew-dir>/runs/` 存活注册（`crew-claude.py run` 写入；死 pid/坏 JSON 忽略）。

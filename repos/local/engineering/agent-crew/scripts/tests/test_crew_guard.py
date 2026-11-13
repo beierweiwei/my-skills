@@ -731,7 +731,7 @@ class BlockedSlaTest(GuardTestBase):
              "approvalWaitMinutes": 15, "approvalRepeatMinutes": 30,
              "approvalGraceMinutes": 60, "approvalMaxAgeMinutes": 240,
              "wakeCooldownMinutes": 10, "pendingHeartbeatMinutes": 15,
-             "idleWakeRounds": 5},
+             "idleWakeRounds": 30},
             cg.load_config(self.root)["guard"],
         )
         cases = (
