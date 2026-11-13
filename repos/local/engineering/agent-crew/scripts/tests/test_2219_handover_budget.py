@@ -514,18 +514,20 @@ class TemplateRulesSyncTest(unittest.TestCase):
     def test_plan_discipline_and_crew_rules_synced(self):
         discipline = next(line for line in read(DISCIPLINE).splitlines()
                           if line.startswith("4. **"))
-        for keyword in ("实际要求读的段", "整看板", "输出硬 ≤32KB", "已截断，详情见 plan"):
+        # AMEND-1：输出硬上限 8KB；预算 ≤32KB 语义不变（§5.1.4/F11 同口径）。
+        for keyword in ("实际要求读的段", "整看板", "输出硬 ≤8KB",
+                        "必读预算 ≤32KB", "已截断，详情见 plan"):
             self.assertIn(keyword, discipline, f"§5.1.4 缺少：{keyword}")
         f11 = next(line for line in read(RULES).splitlines() if "**F11 " in line)
         for keyword in ("实际要求读的段", "整看板/整 plan 不计入",
-                        "输出硬 ≤32KB", "已截断"):
+                        "输出硬 ≤8KB", "必读预算 ≤32KB", "已截断"):
             self.assertIn(keyword, f11, f"F11 缺少：{keyword}")
 
     def test_status_grep_not_billed_in_discipline_and_helm(self):
         # S-5：白名单 Status grep 只是核对手段，不计入交接必读预算；与 F11/模板预算行一致。
         discipline = next(line for line in read(DISCIPLINE).splitlines()
                           if line.startswith("4. **"))
-        self.assertIn("Next Step 首条", discipline)
+        self.assertIn("Next Step 未完成首条", discipline)
         self.assertIn("Status 仅核对", discipline)
         self.assertIn("不计入", discipline)
         for rel in HELM:
