@@ -51,7 +51,7 @@ TEMPLATES = SKILL_DIR / "templates"
 MARK_START = "<!-- agent-crew:orchestration:start -->"
 MARK_END = "<!-- agent-crew:orchestration:end -->"
 MARK_PREFIX = "<!-- agent-crew:orchestration:"
-SKILL_VERSION_FALLBACK = "2.2.22"
+SKILL_VERSION_FALLBACK = "2.2.23"
 
 CONFIG_REL = Path(".planning/orchestration.json")
 MANIFEST_REL = Path("docs/crew/manifest.json")
@@ -1096,7 +1096,35 @@ def refresh_block(root: Path, templates: Path, skill_version: str, confirm: bool
         return 1
     new_body = marker_scan(section)["body"]
     if new_body == scan["body"]:
-        print("refresh-block: 块内容已是最新，无需重渲染")
+        # 块未变仍要重算 manifest configHash（FB-048）：配置文件改动后 doctor
+        # manifest.config warn 的 next 指引即本命令，跳过会让修复路径失效。
+        config_on_disk = json.loads((root / CONFIG_REL).read_text(encoding="utf-8"))
+        actual_hash = config_hash(config_on_disk)
+        if manifest.get("configHash") == actual_hash:
+            print("refresh-block: 块内容已是最新，无需重渲染")
+            return 0
+        try:
+            with init_lock(root):
+                manifest["configHash"] = actual_hash
+                atomic_write_text(root / MANIFEST_REL,
+                                  json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+            append_install_log(root, {
+                "ts": utc_now(),
+                "action": "refresh-block",
+                "operator": os.environ.get("USER") or "unknown",
+                "projectId": manifest.get("projectId"),
+                "skillVersion": skill_version,
+                "configHash": actual_hash,
+                "root": str(root),
+                "result": "ok",
+                "files": [],
+                "conflicts": [],
+                "next": "",
+            })
+        except InitLocked:
+            print("refresh-block: 另一个 init/upgrade 正在运行（locked）", file=sys.stderr)
+            return 1
+        print("refresh-block: 块内容已是最新；已重算 manifest configHash")
         return 0
     if not confirm:
         print("refresh-block: 检测到块内容变化（未写入）。确认后重跑 --refresh-block --confirm。")

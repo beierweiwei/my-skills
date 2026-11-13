@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""backend=claude 统一执行器（T39）。
+"""backend=claude 统一执行器（T39；T56 模型传参改 --model）。
 
-所有 `backend=claude` 的外部调用只走本入口：按项目配置解析模型，自定义网关模型经
-子进程环境 `ANTHROPIC_MODEL` 传递、**不传 `--model`**（Claude Code CLI 不识别网关
-自定义模型名，带工具的长任务会挂起；证据 `.planning/patch-2215/evidence/interrogate/
-claude-probe.txt`），默认只读工具白名单 + 超时，报告/stderr/rc/meta 一次落盘，失败
-快速报并非零退出。
+所有 `backend=claude` 的外部调用只走本入口：按项目配置解析模型，模型经
+`--model <model>` 旗标传递（**不走 env**：`~/.claude/settings.json` 的 env 块会
+覆盖子进程传入的 `ANTHROPIC_MODEL`，实测静默失效；开启
+`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` 后 `--model` 传网关自定义模型 ID
+纯文本与带工具调用均正常——T39 时期的 env 方案与「--model 不识别网关模型」的旧
+证据已过期；证据 crew-orchestrator `.scratch/model-routing-20261113/{ov,mf,mt}.json`），
+默认只读工具白名单 + 超时，报告/stderr/rc/meta 一次落盘，失败快速报并非零退出。
 
 用法：
   python3 scripts/crew-claude.py run --role <role> --prompt <prompt.md> \\
@@ -35,8 +37,8 @@ stdout 只打印一行摘要；诊断写 stderr。
   124 超时（与 timeout(1) 一致；已杀子进程组）
   其余镜像 claude rc（负信号按 128+n 转 shell 口径）
 
-模型空白＝通道默认：`model=""` 合法，rc=0，不设 `ANTHROPIC_MODEL`（子进程用
-CLI 自身默认模型），不会返回 2。
+模型空白＝通道默认：`model=""` 合法，rc=0，不传 `--model`（子进程用
+CLI/设置默认模型），不会返回 2。
 
 运行注册（FB-040）：启动 claude 前在 `<crew-dir>/runs/` 原子写
 `claude-<pid>-<随机>.json`（pid/role/backend/model/started_at/out_dir/root/command），
@@ -44,8 +46,9 @@ CLI 自身默认模型），不会返回 2。
 （try/finally）。注册失败只 stderr 告警，不阻断 run；`meta.json` 的 `runs_registry`
 记注册文件路径（未注册为 null）。
 
-决策：不判断模型是否为 CLI 已知别名，一律走 env（网关自定义模型 CLI 不识别；已知
-别名走 env 同样生效），避免双分支。
+决策：模型非空一律追加 `--model <model>`，不再判断是否为 CLI 已知别名，也不走
+env（settings.json env 会覆盖子进程同名变量；`--model` 对别名与网关模型 ID 均
+生效），避免双分支。
 """
 
 from __future__ import annotations
@@ -286,11 +289,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             Path(claude_bin).is_file() and os.access(claude_bin, os.X_OK)):
         raise EnvError(f"--claude-bin 不是可执行文件：{claude_bin}")
 
-    env = dict(os.environ)
-    if model:
-        env["ANTHROPIC_MODEL"] = model
     argv = [claude_bin, "-p", "--allowedTools", *ALLOWED_TOOLS,
             "--disallowedTools", *DISALLOWED_TOOLS]
+    if model:
+        argv.extend(["--model", model])
 
     report_path = out_dir / f"{name}.md"
     stderr_path = out_dir / f"{name}.stderr"
@@ -304,7 +306,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             try:
                 proc = subprocess.Popen(
                     argv, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    cwd=str(root), env=env, start_new_session=True)
+                    cwd=str(root), start_new_session=True)
             except OSError as exc:
                 raise EnvError(f"启动 claude 失败：{exc}") from exc
             try:

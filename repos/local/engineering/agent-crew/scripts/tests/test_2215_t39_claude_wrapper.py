@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """T39：backend=claude 统一执行器（crew-claude.py）回归。
 
-行为断言：模型级联解析、ANTHROPIC_MODEL 传参与不传 --model、只读工具白名单、
+行为断言：模型级联解析、--model 传参与不注入 env（T56）、只读工具白名单、
 超时杀进程、报告/stderr/rc/meta 一次落盘、空报告/rc≠0/超时/backend≠claude 的非零
 诊断，以及 SCRIPT_MANIFEST 与角色模板/剧本 README/速查表的统一入口口径。
 """
@@ -146,7 +146,9 @@ class ClaudeWrapperTest(unittest.TestCase):
         meta = self.meta()
         self.assertEqual("pb-model", meta["model"])
         self.assertEqual("playbooks.interrogate.roles.adversary", meta["model_source"])
-        self.assertEqual("pb-model", self.record_data()["env_model"])
+        argv = self.record_data()["argv"]
+        self.assertIn("--model", argv)
+        self.assertEqual("pb-model", argv[argv.index("--model") + 1])
 
         code, _, _ = self.run_cli(name="global")
         self.assertEqual(0, code)
@@ -171,18 +173,24 @@ class ClaudeWrapperTest(unittest.TestCase):
 
     # ---------- 传参口径与证据 ----------
 
-    def test_env_model_argv_and_artifacts(self):
+    def test_model_flag_argv_and_artifacts(self):
         self.write_config(agents_config(role_model="glm-5.3"))
-        code, out, err = self.run_cli()
+        saved = os.environ.pop("ANTHROPIC_MODEL", None)
+        try:
+            code, out, err = self.run_cli()
+        finally:
+            if saved is not None:
+                os.environ["ANTHROPIC_MODEL"] = saved
         self.assertEqual(0, code, err)
 
         rec = self.record_data()
         self.assertEqual([
             "-p", "--allowedTools", "Bash", "Read", "Grep", "Glob",
             "--disallowedTools", "Edit", "Write", "NotebookEdit",
+            "--model", "glm-5.3",
         ], rec["argv"])
-        self.assertNotIn("--model", rec["argv"])
-        self.assertEqual("glm-5.3", rec["env_model"])
+        # 不注入 env：settings.json env 会覆盖子进程同名变量，注入无效且误导
+        self.assertIsNone(rec["env_model"])
         self.assertEqual("只读任务：输出 pwd。\n", rec["prompt"])
         self.assertEqual(str(self.root.resolve()), rec["cwd"])
 
@@ -206,7 +214,7 @@ class ClaudeWrapperTest(unittest.TestCase):
         self.assertEqual(1, len(lines), out)
         self.assertTrue(lines[0].startswith("crew-claude: ok"), lines[0])
 
-    def test_empty_model_does_not_set_env(self):
+    def test_empty_model_omits_model_flag(self):
         self.write_config(agents_config(role_model=""))
         saved = os.environ.pop("ANTHROPIC_MODEL", None)
         try:
@@ -215,6 +223,7 @@ class ClaudeWrapperTest(unittest.TestCase):
             if saved is not None:
                 os.environ["ANTHROPIC_MODEL"] = saved
         self.assertEqual(0, code, err)
+        self.assertNotIn("--model", self.record_data()["argv"])
         self.assertIsNone(self.record_data()["env_model"])
         self.assertEqual("", self.meta()["model"])
 
