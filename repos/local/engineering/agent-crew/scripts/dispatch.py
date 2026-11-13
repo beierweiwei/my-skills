@@ -1530,6 +1530,7 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
         "composePath": delivery["composePath"],
         "composedSha256": outcome.report["composedSha256"],
         "model": model,
+        "permissionMode": (args.permission_mode or "").strip(),
         "startedAt": utc_now(),
     }
     save_registry(root, registry)
@@ -1540,6 +1541,7 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
         "runtime": runtime,
         "agent": name,
         "model": model,
+        "permissionMode": (args.permission_mode or "").strip(),
         "delivery": delivery["delivery"],
         "policySource": "base",
         "baseRef": f"{skill_version or 'unknown'}:{base_rel}",
