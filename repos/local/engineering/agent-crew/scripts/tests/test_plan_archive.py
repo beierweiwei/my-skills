@@ -294,6 +294,42 @@ class PlanArchiveTest(unittest.TestCase):
         body = archives[0].read_text(encoding="utf-8")
         self.assertIn("## 2026-11-01", body)
 
+    def test_second_apply_after_real_append(self):
+        # 阻断-1 回归：真实追加路径（write_plans 整体重写会绕开指针行分支）——
+        # 首轮归档后在「自动驾驶里程」节内追加新条目（流 progress 顺序追加、
+        # 最新在底部；指针行保持末行）再造超限，二次 apply 须走
+        # 「末行已是指针行 → 原地更新」分支，不得误报行数对账
+        self.write_plans(progress=make_progress(30))
+        p1 = self.run_cli("--apply", "--owner", OWNER)
+        self.assertEqual(0, p1.returncode, p1.stderr)
+        live = self.task_dir / "progress.md"
+        lines = live.read_text(encoding="utf-8").splitlines()
+        ptr_idx = next(i for i, ln in enumerate(lines) if ln.startswith("归档记录："))
+        sec_idx = next(i for i, ln in enumerate(lines) if "自动驾驶里程" in ln)
+        entry_end = sec_idx + 1
+        while entry_end < len(lines) and (lines[entry_end].startswith("- 2026-")
+                                          or lines[entry_end][:1] in (" ", "\t")):
+            entry_end += 1
+        rebuilt = (lines[:entry_end] + [entry(f"新条目 {n}") for n in range(25)]
+                   + lines[entry_end:])
+        live.write_text("\n".join(rebuilt) + "\n", encoding="utf-8")
+        p2 = self.run_cli("--apply", "--owner", OWNER)
+        self.assertEqual(0, p2.returncode, f"二次归档误报：{p2.stderr}")
+        after_text = live.read_text(encoding="utf-8")
+        after_lines = after_text.splitlines()
+        self.assertTrue(after_lines[-1].startswith("归档记录："),
+                        "二次归档后指针行仍须是末行（原地更新不累积）")
+        self.assertEqual(1, sum(1 for ln in after_lines if ln.startswith("归档记录：")),
+                         "指针行不得逐次累积")
+        self.assertIn("原地更新", p2.stdout)
+        # 行数对账：无「须人工核对」报错即 rc=0 已验证；再锁条目对账
+        live_e = sum(1 for ln in after_lines if ln.startswith("- 2026-"))
+        arch_text = sorted(self.archive_dir.glob("fixture-progress-*.md"))[0].read_text(encoding="utf-8")
+        arch_e = sum(1 for ln in arch_text.splitlines() if ln.startswith("- 2026-"))
+        # 首轮归档 20 + 二次归档 25，live 剩 10
+        self.assertEqual(10, live_e)
+        self.assertEqual(45, arch_e, "两段归档条目守恒（20+25）")
+
     def test_keep_flag(self):
         self.write_plans(progress=make_progress(15))
         proc = self.run_cli("--apply", "--owner", OWNER, "--keep", "5")

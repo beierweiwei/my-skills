@@ -320,9 +320,12 @@ def process_file(root: Path, task: str, filename: str, owner: str, now: datetime
         return False, out
     for name, body in plan["move"]:
         out.append(f"  将归档 {Path(rel).name}：{name}（{len(body)} 行）")
-    after_with_pointer = plan["after"] + 1  # 尾部归档指针行（§5.2）
+    # 指针行口径（§5.2「live 指针：尾部留一行」）：末行已是指针行时原地更新、不再追加，
+    # 否则二次归档对账按 +1 必误报且指针行逐次累积
+    tail_is_pointer = bool(plan["keep"]) and plan["keep"][-1].startswith(POINTER_PREFIX)
+    after_with_pointer = plan["after"] + (0 if tail_is_pointer else 1)
     out.append(f"  {Path(rel).name}：{plan['before']} 行 → {after_with_pointer} 行"
-               f"（含归档指针；before {len(raw_before)}B）")
+               f"（含归档指针{'（原地更新）' if tail_is_pointer else ''}；before {len(raw_before)}B）")
     if not apply:
         return True, out
 
@@ -335,11 +338,11 @@ def process_file(root: Path, task: str, filename: str, owner: str, now: datetime
     header = seg_header(now, rel, owner, plan["before"], after_with_pointer,
                         sha_before, plan["move"])
     append_archive(target, header, [ln for _, body in plan["move"] for ln in body])
-    new_text = "\n".join(plan["keep"]) + ("\n" if text.endswith("\n") else "")
     pointer = (f"{POINTER_PREFIX}{now:%Y-%m-%d %H:%M} 移出 "
                f"{sum(len(b) for _, b in plan['move'])} 行 → `{target.relative_to(root)}`")
-    if plan["keep"] and not plan["keep"][-1].startswith(POINTER_PREFIX):
-        new_text += pointer + "\n"
+    keep_lines = plan["keep"][:-1] if tail_is_pointer else plan["keep"]
+    new_text = "\n".join(keep_lines) + ("\n" if text.endswith("\n") or keep_lines else "")
+    new_text += pointer + "\n"
     atomic_write(path, new_text.encode("utf-8"))
     raw_after = read_bytes(path)
     kept_sha = sha256_bytes(raw_after)
@@ -375,6 +378,9 @@ def run(args: argparse.Namespace) -> int:
 
     lock_path = root / LOCK_REL
     if args.apply:
+        # 锁释放采用 unlink（不残留，§5.2）：unlink 与持锁释放间存在竞态窗口
+        # （后到者可能对 unlink 后新建的同名 inode 拿锁，而本进程尚在返回路径），
+        # 但本脚本所有写盘动作在持锁段内已完成，窗口内无写盘，风险可接受（CASE 版同款口径）。
         try:
             lock_path.parent.mkdir(parents=True, exist_ok=True)
             lock_fh = open(lock_path, "w")
@@ -383,6 +389,14 @@ def run(args: argparse.Namespace) -> int:
             return fail(f"锁 {LOCK_REL} 被占用（写者活跃禁止 apply，§5.2）：{exc}")
     try:
         targets = [f for f in ("task_plan.md", "progress.md") if (task_dir / f).is_file()]
+        if args.task == "portfolio":
+            # §5.2 归属：portfolio progress 归 plan-status --rotate（条目最新在顶部，
+            # 与本脚本「最新在底部」裁剪方向不符，防裁错方向不处理）
+            targets = [f for f in targets if f != "progress.md"]
+            if not targets:
+                return fail("portfolio progress 归 plan-status.py --rotate（§5.2），"
+                            "plan-archive 只处理 portfolio task_plan.md")
+            print("[note] portfolio progress 跳过（归 plan-status.py --rotate，§5.2）")
         if not targets:
             return fail(f"{task_dir} 内无 task_plan.md / progress.md")
         any_moved = False

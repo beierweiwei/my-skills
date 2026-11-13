@@ -139,6 +139,16 @@ def cmd_settings(args: argparse.Namespace) -> int:
         overrides = data.get("agents", {}).get("overrides", {})
         if not isinstance(overrides, dict) or not overrides:
             return fail(f"agents.overrides 为空或结构异常，无键可改：{settings}")
+        # 结构校验（dry-run/apply 同关口）：值或 modelConfig 非对象（含 null）拒绝，
+        # 不静默重建、不 traceback；给出可执行修法
+        bad = [name for name, conf in overrides.items()
+               if not isinstance(conf, dict)
+               or ("modelConfig" in conf and not isinstance(conf["modelConfig"], dict))]
+        if bad:
+            return fail(
+                f"agents.overrides 结构异常（键 {'、'.join(bad)}：值或 modelConfig 为 "
+                f"null/非对象），拒绝写入；请先手工修复 {settings}"
+                f"（将该键改为 {{\"modelConfig\": {{}}}} 或删除该键）")
         before = {
             name: (conf or {}).get("modelConfig", {}).get("model")
             if isinstance(conf, dict) else None

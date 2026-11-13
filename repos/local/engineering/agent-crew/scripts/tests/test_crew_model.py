@@ -170,6 +170,31 @@ class CrewModelTest(unittest.TestCase):
         self.assertEqual(json.loads(self.qoder_settings.read_text(encoding="utf-8")),
                          {"agents": {"overrides": {} }}, "拒绝后不得半写")
 
+    def test_settings_qoder_null_modelconfig_structural_error(self):
+        # 建议-1：modelConfig 为 null 时 dry-run/apply 均给明确结构错误，不 traceback
+        broken = {"agents": {"overrides": {"helm": {"modelConfig": None}}}}
+        self.qoder_settings.write_text(json.dumps(broken), encoding="utf-8")
+        before = self.qoder_settings.read_text(encoding="utf-8")
+        proc = self.run_cli("settings", "--runtime", "qoder", "--model", MODEL)
+        self.assertEqual(1, proc.returncode)
+        self.assertIn("结构异常", proc.stderr)
+        self.assertIn("helm", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr, "dry-run 不得 traceback")
+        proc = self.run_cli("settings", "--runtime", "qoder", "--model", MODEL, "--apply")
+        self.assertEqual(1, proc.returncode)
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertEqual(before, self.qoder_settings.read_text(encoding="utf-8"),
+                         "结构异常拒绝后不得半写")
+
+    def test_settings_qoder_null_value_structural_error(self):
+        # overrides 值本身为 null 同样拒绝
+        self.qoder_settings.write_text(json.dumps({"agents": {"overrides": {"helm": None}}}),
+                                       encoding="utf-8")
+        proc = self.run_cli("settings", "--runtime", "qoder", "--model", MODEL)
+        self.assertEqual(1, proc.returncode)
+        self.assertIn("结构异常", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+
     # ---------- 断言 3：settings claude ----------
 
     def test_settings_claude_top_level_only(self):
