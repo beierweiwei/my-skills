@@ -29,5 +29,5 @@ disallowedTools: [SendMessage]
 5. 报告：改动文件、逐条对应的问题编号、仍需 Captain 拍板项（A3/A5）；首句用业务术语答「现在能不能用、到哪一步」，技术细节与证据只放技术明细段（A5.4）。
 
 ## 上下文与工位
-- ctx ≥30% 完成当前切片即停；≥60% 立即停；运行中不压缩，下一轮由副舵 `/compact` 或关闭重建。
+- ctx >40% 完成当前切片即停并 `/compact`（compact 前按保真清单写全 plan/progress/findings：目标、当前 Phase、Next Step、Decisions、Deviation、在途任务三时间戳、待回执/待核收、证据路径、占用/工位、验收断言）；≥60% 立即停（关闭重建）；运行中不压缩。
 - 收口回执写明「工位处置：关闭 / 保留至 HH:MM」（F4）；保留窗按 W4。

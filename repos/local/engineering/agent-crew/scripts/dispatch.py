@@ -39,6 +39,7 @@ import os
 import re
 import secrets
 import shutil
+import socket as socket_module
 import subprocess
 import sys
 import time
@@ -955,6 +956,104 @@ def herdr_agent_names() -> list[str]:
 RECEIPT_LINE = "请完成处置后回执到发送方 inbox（R2），并注明 receipt_id。"
 GENERATION_RE = re.compile(r"-(\d+)$")
 
+# —— T69①：worker ctx 硬门（Captain 2026-11-13 口径：>40% compact、≥60% 关闭重建；
+# helm/firstmate 自身交接阈值（30% warn/50% 交接）不走本门，由 guard 管理）——
+WORKER_CTX_COMPACT = 0.40
+WORKER_CTX_REBUILD = 0.60
+COMPACT_CHECKLIST = (
+    "compact 保真清单（compact 前确保 plan/progress/findings 写全）：目标、"
+    "当前 Phase、Next Step、Decisions、Deviation、在途任务三时间戳、待回执/"
+    "待核收、证据路径、占用/工位、验收断言；compact 后先读回 plan/progress/"
+    "findings 再继续。")
+CTX_RE = re.compile(
+    r"ctx\s*\(?\s*(?:"
+    r"(?P<used>\d+(?:\.\d+)?)\s*k\s*/\s*(?P<total>\d+(?:\.\d+)?)\s*(?P<unit>[kKmM])"
+    r"|(?P<percent>\d+(?:\.\d+)?)\s*%"
+    r")\s*\)?",
+    re.IGNORECASE,
+)
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def parse_ctx_k(text: str) -> float | None:
+    """从 `herdr pane read` 文本解析 ctx，统一折算为每 1M 的 k 值。
+
+    与 crew-guard.py 同一口径（正则同源，两侧测试锁定）：兼容
+    `ctx (412k/1M)`、`ctx 75.4k/1M`、`ctx 62.3%`；多行取最后一个匹配；
+    解析失败（含 `ctx unknown`、空串、缺总量）返回 None。
+    """
+    if not isinstance(text, str):
+        return None
+    matches = list(CTX_RE.finditer(ANSI_RE.sub("", text)))
+    if not matches:
+        return None
+    match = matches[-1]
+    percent = match.group("percent")
+    if percent is not None:
+        return float(percent) * 10.0
+    used = float(match.group("used"))
+    total = float(match.group("total"))
+    if total <= 0:
+        return None
+    total_k = total * (1000.0 if match.group("unit").lower() == "m" else 1.0)
+    return used / total_k * 1000.0
+
+
+def worker_ctx_ratio(name: str) -> tuple[float | None, str]:
+    """目标 agent ctx 读数（pane read 80 行 + parse_ctx_k）；None=解析不出。
+
+    pane read 命令异常（herdr 不可用等）归一为 (None, reason)——4b③：
+    统一进 fail-closed 分支，逃生门对该路径同样有效。
+    """
+    agents = herdr_agents()
+    entry = next((a for a in agents if a.get("name") == name), None)
+    if entry is None:
+        return None, f"目标 {name} 不在本机 herdr agent list"
+    pane = str(entry.get("pane_id") or "").strip()
+    if not pane:
+        return None, f"目标 {name} 缺 pane_id"
+    try:
+        output = run_herdr(["herdr", "pane", "read", pane, "--lines", "80"])
+    except DispatchError as exc:
+        return None, f"目标 {name}（pane {pane}）pane read 调用失败：{exc}"
+    ctx_k = parse_ctx_k(output)
+    if ctx_k is None:
+        return None, f"目标 {name}（pane {pane}）ctx 解析失败"
+    return ctx_k / 1000.0, f"pane {pane}"
+
+
+def check_worker_ctx(name: str, role: str | None,
+                     allow_unknown: bool) -> tuple[float | None, str]:
+    """T69① worker ctx 硬门；超阈/未知时抛 DispatchError（rc=1）。
+
+    helm/firstmate（编排角色，非切片 worker）不走本门：其 ctx 归角色纪律与
+    总舵监督——helm 交接阈值 30% warn/50% 交接由 guard 管理（helm.ctxWarn/
+    helm.ctxHandoff），firstmate 交接口径见角色模板；4c③ 更正此前「由 guard
+    交接机制管理」的不实表述（guard 30/50 只作用 helm）。ctx 解析不出
+    fail-closed 拒派（plan Decisions），逃生门 --allow-unknown-ctx 显式放行。
+    通过时返回 (ratio, reason) 供 log 记录。
+    """
+    if str(role or "").strip().lower() in ("helm", "firstmate"):
+        return None, ("编排角色（helm/firstmate）非切片 worker：ctx 归角色纪律"
+                      "与总舵监督，跳过 worker 门")
+    ratio, reason = worker_ctx_ratio(name)
+    if ratio is None:
+        if allow_unknown:
+            return None, f"ctx 未知（{reason}）——--allow-unknown-ctx 显式放行"
+        raise DispatchError(
+            f"ctx 解析不出，fail-closed 拒派（{reason}）：先人工确认目标工位"
+            "状态，确认无误后用 --allow-unknown-ctx 显式放行。" + COMPACT_CHECKLIST, 1)
+    if ratio >= WORKER_CTX_REBUILD:
+        raise DispatchError(
+            f"目标 {name} ctx {ratio:.0%} ≥60%：拒绝派活，请关闭该工位并重建"
+            f"（冷启动新工位）后再派。" + COMPACT_CHECKLIST, 1)
+    if ratio > WORKER_CTX_COMPACT:
+        raise DispatchError(
+            f"目标 {name} ctx {ratio:.0%} >40%：拒绝派新切片，先让 worker "
+            "/compact（compact 前按保真清单写全 plan/progress/findings），"
+            "compact 后重试。" + COMPACT_CHECKLIST, 1)
+    return ratio, f"ctx {ratio:.0%}"
+
 
 def herdr_agents() -> list[dict]:
     output = run_herdr(["herdr", "agent", "list"])
@@ -1073,8 +1172,9 @@ def resolve_notify_target(agents: list[dict], workspace: str | None, role: str) 
     """按 workspace + role 选当前活跃 helm/角色，返回 agent 名。
 
     helm 按名称尾部数字取最新代际（最新代际须唯一）；其他角色要求唯一匹配，多实例
-    并存时用 --agent 显式指定。agent_status 归一化（strip+lower）后仅 idle/working
-    视为活跃；blocked 单独拒绝，缺失/空白/done/unknown/其他值一律 rc=1 拒绝。
+    并存时用 --agent 显式指定。agent_status 归一化（strip+lower）后 idle/working/done
+    均可选为目标（done=待命≠不可达，FB-052：投递侧跳过注入、落 inbox 兜底）；
+    blocked 单独拒绝，缺失/空白/unknown/其他值一律 rc=1 拒绝。
     """
     candidates = [agent for agent in agents
                   if isinstance(agent.get("name"), str)
@@ -1114,7 +1214,7 @@ def resolve_notify_target(agents: list[dict], workspace: str | None, role: str) 
         raise DispatchError(
             f"目标处于 blocked（{target['name']}，agent_status=blocked），"
             "herdr 会拒绝投递；先处置 blocked 或改用 --agent", 1)
-    if status not in ("idle", "working"):
+    if status not in ("idle", "working", "done"):
         if raw_status is None:
             shown = "缺失/None"
         else:
@@ -1712,6 +1812,35 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
         "gates": outcome.gates,
         "result": "ok",
     }
+    # S9：启动后校验工位 cwd==项目根（herdr agent list 的 cwd 字段）。
+    # 不符不阻断（工位已起），stderr 告警 + log 标 cwdMismatch 供值班处置。
+    cwd_expected = str(root)
+    cwd_actual = ""
+    try:
+        agents = herdr_agents()
+        entry = next((a for a in agents if a.get("name") == name), None)
+        cwd_actual = str((entry or {}).get("cwd")
+                         or (entry or {}).get("foreground_cwd") or "").strip()
+    except Exception as exc:  # noqa: BLE001 - 校验失败不阻断启动结果
+        cwd_actual = ""
+        print(f"dispatch: 警告：启动后 cwd 校验失败（herdr agent list 不可用）：{exc}",
+              file=sys.stderr)
+    cwd_mismatch = bool(cwd_actual) and Path(cwd_actual).resolve() != Path(
+        cwd_expected).resolve()
+    row["cwd"] = cwd_actual or "unknown"
+    row["cwdExpected"] = cwd_expected
+    if cwd_mismatch:
+        row["result"] = "cwdMismatch"
+        print(
+            f"dispatch: 警告：工位 {name} cwd={cwd_actual} ≠ 项目根 {cwd_expected}"
+            "（cwdMismatch）：建议 close 后在项目根重新 start；工位内 cd 到项目根"
+            "可临时纠正",
+            file=sys.stderr)
+    elif not cwd_actual:
+        row["cwd"] = "unknown"
+        print(
+            f"dispatch: 警告：无法确认工位 {name} 的 cwd（agent list 缺字段）",
+            file=sys.stderr)
     append_log(root, row)
     payload = {
         "agent": name,
@@ -1738,6 +1867,35 @@ def cmd_prompt(args: argparse.Namespace, root: Path) -> int:
     info = registry.get(args.agent)
     if not isinstance(info, dict):
         raise DispatchError(f"{args.agent} 不是 dispatch 托管的 agent；不能用 prompt 直发")
+    # T69①：worker ctx 硬门（>40% 拒派新切片、≥60% 拒派关闭重建、解析不出
+    # fail-closed；helm/firstmate 编排角色豁免）。安全门（聚焦/审批）在其后照常。
+    # S-4：拒派必须落 agent-log（result=refused-ctx），事后可查「为何没派出去」。
+    try:
+        ctx_ratio, ctx_note = check_worker_ctx(
+            args.agent, info.get("role"), getattr(args, "allow_unknown_ctx", False))
+    except DispatchError as exc:
+        append_log(root, {
+            "ts": utc_now(),
+            "action": "prompt",
+            "agent": args.agent,
+            "role": info.get("role"),
+            "runtime": info.get("runtime"),
+            "delivery": "none",
+            "focus": "unchecked",
+            "sender": sender_agent_name(),
+            "task": getattr(args, "task", None),
+            "ctx": "refused-ctx",
+            "receipt_required": None,
+            "result": "refused-ctx",
+            "reason": str(exc)[:200],
+        })
+        raise
+    # FB-057②：prompt 是派单主通道，默认追加回执要求行（与 notify 的 RECEIPT_LINE
+    # 同源），防止工单/提示漏写回执要求导致 worker 完成后静默。
+    receipt_required = not args.no_require_receipt
+    message = args.message
+    if receipt_required and not message.rstrip("\n").endswith(RECEIPT_LINE):
+        message = message.rstrip("\n") + "\n" + RECEIPT_LINE
     focused, focus_reason, _present = pane_focus_state(args.agent)
     if focused is not False:
         append_log(root, {
@@ -1749,6 +1907,10 @@ def cmd_prompt(args: argparse.Namespace, root: Path) -> int:
             "delivery": "none",
             "focus": "focused" if focused else "unknown",
             "focus_reason": focus_reason or None,
+            "sender": sender_agent_name(),
+            "task": getattr(args, "task", None),
+            "ctx": ctx_note,
+            "receipt_required": receipt_required,
             "result": "refused",
         })
         if focused:
@@ -1776,6 +1938,10 @@ def cmd_prompt(args: argparse.Namespace, root: Path) -> int:
             "runtime": info.get("runtime"),
             "delivery": "inbox_fallback",
             "focus": "unfocused",
+            "sender": sender_agent_name(),
+            "task": getattr(args, "task", None),
+            "ctx": ctx_note,
+            "receipt_required": receipt_required,
             "result": "refused",
             "approvalPending": {
                 "callId": first.get("call_id"),
@@ -1785,7 +1951,7 @@ def cmd_prompt(args: argparse.Namespace, root: Path) -> int:
         })
         herdr_notify("dispatch prompt 未注入", reason)
         raise DispatchError(reason, 2)
-    run_herdr(["herdr", "agent", "prompt", args.agent, args.message])
+    run_herdr(["herdr", "agent", "prompt", args.agent, message])
     append_log(root, {
         "ts": utc_now(),
         "action": "prompt",
@@ -1794,6 +1960,10 @@ def cmd_prompt(args: argparse.Namespace, root: Path) -> int:
         "runtime": info.get("runtime"),
         "delivery": "herdr",
         "focus": "unfocused",
+        "sender": sender_agent_name(),
+        "task": getattr(args, "task", None),
+        "ctx": ctx_note,
+        "receipt_required": receipt_required,
         "result": "ok",
     })
     print(f"已发送提示：{args.agent}" if not args.json else json.dumps(
@@ -1804,7 +1974,8 @@ def cmd_prompt(args: argparse.Namespace, root: Path) -> int:
 def cmd_notify(args: argparse.Namespace, root: Path) -> int:
     """跨项目通知：先落收件方 inbox，再 herdr agent prompt；不查/不写注册表，
     不 start/close/碰 pane/tab。目标 pane 聚焦或状态无法判定时不注入（T37），
-    保留 inbox 并推送 Herdr 通知；收件方 inbox 解析失败时显式告知。"""
+    目标 done 时不注入、只落 inbox 兜底（FB-052）；保留 inbox 并推送 Herdr
+    通知；收件方 inbox 解析失败时显式告知。"""
     if args.ack:
         if args.message or args.agent or args.workspace or args.role:
             raise DispatchError("--ack 只能单独使用（不发送、不解析目标）", 1)
@@ -1874,7 +2045,18 @@ def cmd_notify(args: argparse.Namespace, root: Path) -> int:
     notified = False
     channel = "herdr"
     skip_reason = ""
-    if focused is True or (focused is None and present):
+    target_status = str((target_entry or {}).get("agent_status") or "").strip().lower()
+    if target_status == "done":
+        # FB-052：done=待命≠不可达；one-shot worker 收口后 pane 注入无意义，
+        # 通知至少落收件方 inbox 兜底（上方已落盘），不调用 herdr agent prompt。
+        channel = "inbox_fallback"
+        prompt_skipped = "done"
+        skip_reason = "目标已完成回合（agent_status=done）：只落收件方 inbox，不注入"
+        notified = herdr_notify(
+            "跨项目通知（未注入）",
+            f"{target}：{skip_reason}。\n{message}",
+        )
+    elif focused is True or (focused is None and present):
         channel = "inbox_fallback"
         prompt_skipped = "focused" if focused else "unknown"
         skip_reason = (
@@ -2054,13 +2236,158 @@ def cmd_list(args: argparse.Namespace, root: Path) -> int:
     return 0
 
 
+# —— T65：herdr socket API（tab.list / tab.move，CLI 无 tab 重排命令）——
+HERDR_SOCKET_DEFAULT = Path.home() / ".config" / "herdr" / "herdr.sock"
+
+
+def socket_call(method: str, params: dict, timeout: float = 5.0) -> dict:
+    """herdr unix socket NDJSON 单次调用（报告 .scratch/herdr-tab-probe/报告.md §3.2）。
+
+    请求 `{"id","method","params"}` + 换行；响应同帧；error 字段抛 DispatchError
+    （rc=3）。端点：env HERDR_SOCKET_PATH > ~/.config/herdr/herdr.sock。
+    """
+    sock_path = os.environ.get("HERDR_SOCKET_PATH") or str(HERDR_SOCKET_DEFAULT)
+    sock = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect(sock_path)
+        request = {"id": f"dispatch:{method}", "method": method, "params": params}
+        sock.sendall((json.dumps(request) + "\n").encode("utf-8"))
+        buf = b""
+        while b"\n" not in buf:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+    except (OSError, socket_module.timeout) as exc:
+        raise DispatchError(f"herdr socket 调用失败（{method}）：{exc}", 3) from exc
+    finally:
+        sock.close()
+    if not buf:
+        raise DispatchError(f"herdr socket 无响应：{method}", 3)
+    try:
+        resp = json.loads(buf.split(b"\n", 1)[0])
+    except ValueError as exc:
+        raise DispatchError(f"herdr socket 响应非 JSON：{method}: {exc}", 3) from exc
+    if isinstance(resp, dict) and resp.get("error"):
+        err = resp["error"]
+        raise DispatchError(
+            f"herdr socket {method} 失败：{err.get('code')}: {err.get('message')}", 3)
+    return resp
+
+
+def tab_list(workspace: str) -> list[dict]:
+    resp = socket_call("tab.list", {"workspace_id": workspace})
+    result = resp.get("result") if isinstance(resp, dict) else None
+    tabs = result.get("tabs") if isinstance(result, dict) else None
+    return tabs if isinstance(tabs, list) else []
+
+
+def create_tab_near(args: argparse.Namespace, root: Path) -> int:
+    """`tab create --near <agent>`：新 tab 建在目标 agent 所在 tab 之后一位（T65）。
+
+    步骤：agent list 定位锚 tab 与 workspace → tab.list 取锚下标 → tab.create
+    （追加末尾）→ 重取 tab.list（防 create 并发漂移）→ tab.move 到锚后一位
+    （insert_index 为「移动前前插索引」：新 tab 在末尾、source 恒在 insert
+    右侧，最终位置=insert_index）。锚已在末尾时新 tab 天然就位、不调 move。
+    """
+    agents = herdr_agents()
+    entry = next((a for a in agents if a.get("name") == args.near), None)
+    if entry is None:
+        raise DispatchError(f"目标 agent 不在本机 herdr agent list：{args.near}", 1)
+    anchor_tab = str(entry.get("tab_id") or "").strip()
+    workspace = str(entry.get("workspace_id") or "").strip()
+    if not anchor_tab or not workspace:
+        raise DispatchError(
+            f"目标 {args.near} 缺 tab_id/workspace_id（herdr agent list 字段缺失，"
+            "无法定位锚 tab）", 3)
+    if args.workspace and args.workspace != workspace:
+        raise DispatchError(
+            f"--workspace {args.workspace} 与目标 {args.near} 所在 workspace "
+            f"{workspace} 不一致；--near 以目标所在 workspace 为准", 1)
+    tabs = tab_list(workspace)
+    try:
+        anchor_idx = next(i for i, t in enumerate(tabs)
+                          if t.get("tab_id") == anchor_tab)
+    except StopIteration:
+        raise DispatchError(
+            f"锚 tab {anchor_tab} 不在 workspace {workspace} 的 tab list", 3) from None
+
+    argv = ["herdr", "tab", "create", "--workspace", workspace]
+    if args.cwd:
+        argv.extend(["--cwd", args.cwd])
+    if args.label:
+        argv.extend(["--label", args.label])
+    if args.no_focus:
+        argv.append("--no-focus")
+    output = run_herdr(argv)
+    data = json.loads(output)
+    pane_id = extract_pane_id(data)
+    new_tab = extract_tab_id(data) or lookup_tab_id(pane_id)
+    if not new_tab:
+        raise DispatchError(
+            "herdr tab create 未返回 tab_id，无法定位新 tab 执行 move", 3)
+
+    tabs_after = tab_list(workspace)
+    # S-3（4b⑥ 同批）：锚下标按 create 后快照重取——create 与 move 之间第三
+    # 方建/关 tab 会让 create 前快照的锚位漂移一位；锚消失时保持旧值（不放大
+    # 失败面）。
+    anchor_idx = next(
+        (i for i, t in enumerate(tabs_after) if t.get("tab_id") == anchor_tab),
+        anchor_idx)
+    try:
+        new_idx = next(i for i, t in enumerate(tabs_after)
+                       if t.get("tab_id") == new_tab)
+    except StopIteration:
+        raise DispatchError(
+            f"新 tab {new_tab} 不在 workspace {workspace} 的 tab list", 3) from None
+    target_final = anchor_idx + 1
+    insert_index: int | None = None
+    if new_idx != target_final:
+        # 新 tab 从末尾左移：source(new_idx) ≥ target_final 恒成立，
+        # 最终位置 = insert_index（报告 §2.5 语义）。
+        insert_index = target_final
+        try:
+            resp = socket_call("tab.move",
+                               {"tab_id": new_tab, "insert_index": insert_index})
+        except DispatchError as exc:
+            # 4b⑥：move 失败消息附 new_tab id——新 tab 残留在末尾，便于清理。
+            raise DispatchError(
+                f"tab.move 失败：新 tab {new_tab} 未移动（残留在 workspace "
+                f"{workspace} 末尾，可 `dispatch.py tab close --tab {new_tab}` "
+                f"清理）：{exc}", 3) from exc
+        result = resp.get("result") if isinstance(resp, dict) else None
+        tabs_final = result.get("tabs") if isinstance(result, dict) else []
+    else:
+        tabs_final = tabs_after
+    final_idx = next((i for i, t in enumerate(tabs_final)
+                      if t.get("tab_id") == new_tab), new_idx)
+    append_log(root, {
+        "ts": utc_now(), "action": "tab", "op": "create",
+        "tab": new_tab, "pane": pane_id, "label": args.label,
+        "near": args.near, "anchorTab": anchor_tab,
+        "insertIndex": insert_index, "finalIndex": final_idx,
+        "result": "ok",
+    })
+    print_json({
+        "tab": new_tab, "pane": pane_id, "near": args.near,
+        "anchorTab": anchor_tab, "insertIndex": insert_index,
+        "finalIndex": final_idx,
+    })
+    return 0
+
+
 def cmd_tab(args: argparse.Namespace, root: Path) -> int:
     if args.tab_command == "create":
-        argv = ["herdr", "tab", "create"]
+        # S9：--cwd 缺省补 <root>（herdr tab create 不传 cwd 时 pane 初始
+        # cwd 落 home——2026-11-14 Captain 报障实证）；显式值优先。
+        cwd = args.cwd or str(root)
+        if getattr(args, "near", None):
+            args.cwd = cwd
+            return create_tab_near(args, root)
+        argv = ["herdr", "tab", "create", "--cwd", cwd]
         if args.workspace:
             argv.extend(["--workspace", args.workspace])
-        if args.cwd:
-            argv.extend(["--cwd", args.cwd])
         if args.label:
             argv.extend(["--label", args.label])
         if args.no_focus:
@@ -2079,9 +2406,10 @@ def cmd_tab(args: argparse.Namespace, root: Path) -> int:
             )
         append_log(root, {
             "ts": utc_now(), "action": "tab", "op": "create",
-            "tab": tab_id, "pane": pane_id, "label": args.label, "result": result,
+            "tab": tab_id, "pane": pane_id, "label": args.label,
+            "cwd": cwd, "result": result,
         })
-        print_json({"tab": tab_id, "pane": pane_id})
+        print_json({"tab": tab_id, "pane": pane_id, "cwd": cwd})
         return 0
     run_herdr(["herdr", "tab", "close", args.tab])
     append_log(root, {"ts": utc_now(), "action": "tab", "op": "close", "tab": args.tab, "result": "ok"})
@@ -2091,11 +2419,12 @@ def cmd_tab(args: argparse.Namespace, root: Path) -> int:
 
 def cmd_pane(args: argparse.Namespace, root: Path) -> int:
     if args.pane_command == "split":
+        # S9：--cwd 缺省补 <root>（与 cmd_tab 同根因：不传时新 pane 落 home）。
+        cwd = args.cwd or str(root)
         argv = ["herdr", "pane", "split", args.pane]
         if args.direction:
             argv.extend(["--direction", args.direction])
-        if args.cwd:
-            argv.extend(["--cwd", args.cwd])
+        argv.extend(["--cwd", cwd])
         if args.no_focus:
             argv.append("--no-focus")
         for item in args.env or []:
@@ -2103,13 +2432,14 @@ def cmd_pane(args: argparse.Namespace, root: Path) -> int:
         output = run_herdr(argv)
         new_pane = parse_pane_id(output, "herdr pane split")
         panes = load_panes(root)
-        panes[new_pane] = {"env": list(args.env or []), "createdAt": utc_now()}
+        panes[new_pane] = {"env": list(args.env or []),
+                           "cwd": cwd, "createdAt": utc_now()}
         save_panes(root, panes)
         append_log(root, {
             "ts": utc_now(), "action": "pane", "op": "split",
-            "pane": new_pane, "source": args.pane, "result": "ok",
+            "pane": new_pane, "source": args.pane, "cwd": cwd, "result": "ok",
         })
-        print_json({"pane": new_pane})
+        print_json({"pane": new_pane, "cwd": cwd})
         return 0
     run_herdr(["herdr", "pane", "close", args.pane])
     panes = load_panes(root)
@@ -2160,6 +2490,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="向 dispatch 托管的 agent 发提示（目标 pane 聚焦/无法判定时拒绝注入，rc=2）")
     prompt_p.add_argument("--agent", required=True)
     prompt_p.add_argument("--message", required=True)
+    prompt_p.add_argument("--task", help="任务/工单标识（agent-log 归因用）")
+    prompt_p.add_argument(
+        "--allow-unknown-ctx", action="store_true",
+        help="ctx 解析不出时显式放行（默认 fail-closed 拒派，T69①）")
+    prompt_p.add_argument("--no-require-receipt", action="store_true",
+                          help="不自动追加回执要求行（与 notify 同名参数）")
     prompt_p.add_argument("--json", action="store_true")
     prompt_p.set_defaults(func=cmd_prompt)
 
@@ -2201,6 +2537,11 @@ def build_parser() -> argparse.ArgumentParser:
     tab_create.add_argument("--cwd")
     tab_create.add_argument("--label")
     tab_create.add_argument("--no-focus", action="store_true")
+    tab_create.add_argument(
+        "--near", metavar="AGENT",
+        help="就近建 tab：以目标 agent 所在 tab 为锚，新 tab 建在其后一位"
+             "（socket tab.move；锚在末尾时不移动）")
+    tab_create.add_argument("--json", action="store_true")
     tab_create.set_defaults(func=cmd_tab)
     tab_close = tab_sub.add_parser("close")
     tab_close.add_argument("--tab", required=True)

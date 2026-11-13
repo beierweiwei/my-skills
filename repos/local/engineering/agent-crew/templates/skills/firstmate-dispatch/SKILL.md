@@ -87,7 +87,7 @@ python3 scripts/dispatch.py start --role builder --runtime opencode --pane <root
 ### 3.3 发任务
 
 ```bash
-python3 scripts/dispatch.py prompt --agent <task>-builder --message "目标：<一句话>；读 <{{doc_req}}/工单路径>；只改 <文件>；验收：<命令/口径>；完成写 <报告路径>；ctx≥30% 停止接新切片。"
+python3 scripts/dispatch.py prompt --agent <task>-builder --message "目标：<一句话>；读 <{{doc_req}}/工单路径>；只改 <文件>；验收：<命令/口径>；完成写 <报告路径>；ctx>40% 停止接新切片（先 `/compact`），≥60% 关闭重建（dispatch prompt 已内置 ctx 硬门，超阈自动拒派）。"
 ```
 
 - 任何任务都不在前台 `--wait` 等结果；派活后立即返回，用后台 `agent-watch.py` 或 Monitor 监听，收到完成通知再读结果。
@@ -163,7 +163,7 @@ python3 scripts/agent-watch.py --interval 15
 ## 7. 上下文与会话
 
 - 一个 ticket 一个会话；换 ticket 在下一轮开始前 `/compact`、`/clear` 或重建 tab。
-- worker `ctx` ≥ 30% 不再接新切片，完成当前切片后停止；≥ 60% 立即停止。
+- worker `ctx` >40% 不再接新切片（先 `/compact`，compact 前按保真清单写全 plan/progress/findings），完成当前切片后停止；≥60% 立即停止（关闭重建）。
 - 主控 `ctx` ≥ 60% 停止接新任务；运行中不压缩。
 - 恢复顺序：`python3 scripts/plan-status.py --brief` 一屏 → `python3 scripts/plan-status.py --handover` 摘要 → 活跃流 plan 的 Next Step/Status（grep）→ 工单/当前需求章节；`{{doc_context}}`/AGENTS.md 仍必读（小文件）；禁整读 看板/progress/task_plan/feedback/历史流 plan/共识；单文件 >20KB 不整读；看板仅按关键词 grep、不整读。
 - opencode 的配置、agent、skill 不热重载；改完必须重启会话。
@@ -226,7 +226,7 @@ python3 scripts/agent-watch.py --interval 15
 2. `{{doc_context}}`（术语）；涉及具体需求时读该需求 `{{doc_req}}` 的结论段与工单
 
 ### 上下文纪律
-- `ctx` ≥30%：完成当前切片即停，不再接新活；≥60% 立即停
+- `ctx` >40%：完成当前切片即停并 `/compact`（保真清单写全 plan/progress/findings），不再接新活；≥60% 立即停（关闭重建）
 - 运行中不压缩；由副舵在下一轮开工前 `/compact` 或**关闭重建**（优先关旧开新，不硬撑）
 - 只接「当前切片」：不自行扩范围、不顺手重构、不新增未要求的功能
 

@@ -283,7 +283,12 @@ class GuardClaudeRunsTest(unittest.TestCase):
         self.assertEqual([], self.prompt_calls)
         self.assertFalse(any("claude 运行注册" in line for line in self.logs), self.logs)
 
-    def test_live_registry_suppresses_fast_wake_after_herdr_workers_go_idle(self):
+    def test_herdr_worker_completion_wakes_even_with_claude_run_alive(self):
+        """FB-057① 差集边沿：herdr worker 完成即叫醒，claude run 存活不再抑制。
+
+        旧总数边沿语义（claude 存活=未全部完成=不叫醒）废除：w 完成是真实
+        边沿，claude run 不算完成项、不进完成名单。
+        """
         child = self.spawn_marked_claude()
         agents = [{"name": "w", "agent_status": "working", "pane_id": "p1"}]
         guard = self.make_guard()
@@ -294,8 +299,11 @@ class GuardClaudeRunsTest(unittest.TestCase):
             "pid": child.pid, "role": "adversary",
             "started_at": "2026-11-12T00:00:00Z"})
         result = guard.run_once()
-        self.assertFalse(result["woke"], "claude run 存活时不得快速叫醒")
-        self.assertEqual(1, guard.prev_working)  # herdr 0 + claude 1
+        self.assertTrue(result["woke"], "herdr worker 完成边沿必须叫醒")
+        self.assertIn("worker 完成待核收：w", self.prompt_calls[0][1])
+        # 4c⑤：claude runs key 带 role，总舵可对应工位；名单不含 claude 项
+        self.assertNotIn(f"claude:adversary:{child.pid}", self.prompt_calls[0][1])
+        self.assertEqual({f"claude:adversary:{child.pid}"}, guard.prev_working)
 
     def test_dead_pid_registry_ignored_logged_and_wake_still_fires(self):
         dead = self.dead_pid()

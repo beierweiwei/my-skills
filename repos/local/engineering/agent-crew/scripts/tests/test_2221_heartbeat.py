@@ -127,7 +127,7 @@ class HeartbeatTest(GuardHarness):
         self.agents = [{"name": "worker-1", "agent_status": "idle"}]
         self.assertTrue(guard2.run_once()["woke"])
         self.assertEqual(1, len(self.prompt_calls))
-        self.assertIn("上一轮 1 个 working 已转 idle", self.prompt_calls[0][1])
+        self.assertIn("worker 完成待核收：worker-1", self.prompt_calls[0][1])
 
     def test_fast_wake_not_suppressed_by_heartbeat_interval(self):
         self.write_fixture(pending=True)
@@ -147,7 +147,7 @@ class HeartbeatTest(GuardHarness):
         self.agents = [{"name": "worker-1", "agent_status": "idle"}]
         self.assertTrue(guard.run_once()["woke"])
         self.assertEqual(2, len(self.prompt_calls))
-        self.assertIn("上一轮 1 个 working 已转 idle", self.prompt_calls[-1][1])
+        self.assertIn("worker 完成待核收：worker-1", self.prompt_calls[-1][1])
 
     def test_pending_heartbeat_config_clamps(self):
         defaults = cg.load_config(self.root)["guard"]

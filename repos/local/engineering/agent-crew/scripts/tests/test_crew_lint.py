@@ -134,7 +134,7 @@ class CrewLintTest(unittest.TestCase):
             text=True,
         )
         self.assertEqual(repo.returncode, 0, repo.stderr)
-        self.assertEqual(repo.stdout.strip(), "2.2.27")
+        self.assertEqual(repo.stdout.strip(), "2.2.28")
 
     # ---- 行数预算 --------------------------------------------------------
 

@@ -68,7 +68,7 @@ disallowedTools: [SendMessage]
 - 交接只给文件路径 + 在跑清单，不复述正文；digest ≤30 行（目标/在跑/待接/待 Captain/未落盘决策（无则写「无」）/定向必读/禁读）；交接前核最新回执 mtime、产物与 `--check-fresh`。
 - 收口回执写明「工位处置：关闭 / 保留至 HH:MM」（F4）；保留工位标签带「·保留至 HH:MM」（W3/W4）；空 tab 关闭。
 - 命名：副舵 `<流>-firstmate`，tab 标签「副舵·<流>」；总舵 agent 名用配置 `helm.agentName`，禁裸名 `helm`，不擅自换名。
-- 启动一律 YOLO 且走封装脚本 `scripts/start-agent.sh <name> <pane> <role>`，禁止手敲裸命令；给已在用 worker 派新活前先查 ctx：≥30% 先 `/compact` 并复核，≥60% 直接关闭重建（未压缩的 ≥30% 不接新切片）。
+- 启动一律 YOLO 且走封装脚本 `scripts/start-agent.sh <name> <pane> <role>`，禁止手敲裸命令；给已在用 worker 派新活前先查 ctx：>40% 先 `/compact` 并复核，≥60% 直接关闭重建（>40% 未 compact 不接新切片）（compact 前按保真清单写全 plan/progress/findings：目标、当前 Phase、Next Step、Decisions、Deviation、在途任务三时间戳、待回执/待核收、证据路径、占用/工位、验收断言）。
 
 ## 自动驾驶
 - 定时自检（约 20–30 分钟）：先跑 `python3 scripts/pane-audit.py --apply` 收敛工位（working 永不关、白名单跳过、个人 tab 不动；只关空 pane/空 tab/完成流 tab），再跑 `python3 scripts/crew-reaper.py --apply --json` 对账回收旧总舵 tab/旧 helm 残留，再无活动 worker 时查 `herdr agent list` + 产物双确认，完成即按 Next Step/Backlog 续派；监听超时必须 re-arm。

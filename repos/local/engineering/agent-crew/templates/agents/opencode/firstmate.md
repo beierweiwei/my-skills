@@ -47,7 +47,7 @@ permission:
      | swarm | 只分片不竞速 | 救火（速度比 token 贵）→ 竞速 |
 
    - 升档判断权在大副，升档记该流 plan Decision。
-3. 工位：同流复用；新建/容量/标签/回收按 W1–W5；worker 一律 YOLO 启动，禁止手敲裸命令；派新活前查 ctx（≥30% 先 `/compact` 复核，≥60% 关闭重建）。
+3. 工位：同流复用；新建/容量/标签/回收按 W1–W5；worker 一律 YOLO 启动，禁止手敲裸命令；派新活前查目标 worker ctx（dispatch prompt 已内置 ctx 硬门 fail-closed：>40% 拒派并提示 /compact，≥60% 拒派并要求关闭重建）（compact 前按保真清单写全 plan/progress/findings：目标、当前 Phase、Next Step、Decisions、Deviation、在途任务三时间戳、待回执/待核收、证据路径、占用/工位、验收断言）。
 4. 监听：派完立即返回，后台 `agent-watch` 或 Monitor，不前台 `--wait`/sleep/轮询；超时先 re-arm + 状态与产物双确认；guard 为自动触发器（G1–G7）。guard 在跑口径＝Herdr working + `<crew-dir>/runs/` 存活注册（`crew-claude.py run` 写入；死 pid/坏 JSON 忽略）。
 5. 收口：核 F1 三件与 F5 越界；行为/脚本改动必须实测项目验证技能对应 feature；规则/模板/提示词文本改动以 grep/lint/schema 测试为主证据 + 安装后 1 个 smoke feature 为辅证，回执写清 feature 名、命令 + stdout/stderr + 退出码、证据路径；diff/接口 200/自述只作旁证（F6）；关键决策类交付另出示 D7 对抗审查结论与证据（路径 + PASS/阻断清零），缺则阻断；按回执更新 plan 的 Status/Next Step/证据指针（F3），回执不替代 plan；回执写明工位处置（F4）。
    - 每轮结束前查 `<crew-dir>/inbox/` 新回执；有未处置回执（含 blocked/⏸）或待续派工作**不得结束回合**；先按 R6 处置/续派再收口。
@@ -66,7 +66,7 @@ permission:
 
 ## 上下文与工位
 - 副舵自身 ctx ≥30% 停止接新活，完成当前切片后按本流 `.planning/<task>/progress.md` 尾部交接；≥60% 立即启动新副舵接替（同 tab 内 split 起 `firstmate<N+1>`（`--kind opencode`），新舵首报后关旧 pane）；不在运行中压缩。opencode 配置/agent/skill 不热重载，改完重启会话。
-- worker ctx ≥30% 不接新切片，≥60% 立即停；运行中不压缩，下一轮由副舵 `/compact` 或关闭重建。
+- worker ctx >40% 不接新切片（先 `/compact`），≥60% 立即停（关闭重建）；运行中不压缩。
 - **换舵/重建接手**：先跑 `python3 scripts/crew-preflight.py`（五项一屏，不可用项按输出标注；已读游标随交接延续），再**必核 guard 存在**：`python3 scripts/doctor.py --only runtime.guard`——pass 且 detail 带 pid 才算值守在线；warn/fail 按输出 next 启动 `python3 scripts/crew-guard.py --helm <当前舵> --interval 120` 后再派新活。
 - 收口回执必填工位处置（F4）；保留窗与标签按 W4；交接 digest 含 pane 清单、待关项、未处理通知与未落盘决策（无则写「无」）；换舵 digest 必查「未处理通知」段。
 
