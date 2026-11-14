@@ -28,6 +28,7 @@ sys.dont_write_bytecode = True  # 不在项目 scripts/ 留 __pycache__
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from crew_paths import CrewPathsError, crew_dir  # noqa: E402
 import dispatch as dispatch_lib  # noqa: E402
+import crew_capacity  # noqa: E402  # 工单 08 建议 2：运行时容量检查同口径计数
 
 try:  # T33 覆盖集与 upgrade 同口径（init 顶层无副作用）；init 缺失时按不可判定跳过
     import init as init_lib  # noqa: E402
@@ -2072,6 +2073,63 @@ class Doctor:
         return (f"python3 scripts/crew-guard.py --helm {text or '<当前舵>'} "
                 "--interval 120")
 
+    def check_runtime_capacity(self) -> Result:
+        """运行时工位容量（2.2.31 工单 08 建议 2）：>warn=warn、>hard=fail。
+
+        与 dispatch capacity / crew-preflight / crew-guard 同口径计数
+        （crew_capacity.count_crew_agents，含总舵/白名单/外部项目排除）；
+        herdr 不可用为 env（不影响其余项）；next 给必须关闭清单与出路。
+        """
+        try:
+            proc = subprocess.run(
+                ["herdr", "agent", "list"], text=True, capture_output=True,
+                check=False, timeout=15,
+                env={**os.environ, "HERDR_ENV": "1"})
+        except (OSError, subprocess.SubprocessError) as exc:
+            return Result("runtime.capacity", "env", f"herdr 不可用：{exc}",
+                          next="确认 herdr 已安装且可用（HERDR_ENV=1）；"
+                               "本项跳过不影响其余检查")
+        if proc.returncode != 0:
+            return Result("runtime.capacity", "env",
+                          f"herdr agent list 退出码 {proc.returncode}",
+                          next="确认 herdr 运行时可用；本项跳过不影响其余检查")
+        try:
+            payload = json.loads(proc.stdout)
+        except ValueError:
+            return Result("runtime.capacity", "env", "herdr agent list 输出非 JSON",
+                          next="确认 herdr 版本与输出；本项跳过不影响其余检查")
+        result = payload.get("result") if isinstance(payload, dict) else None
+        agents = (result.get("agents") if isinstance(result, dict)
+                  else payload.get("agents") if isinstance(payload, dict) else payload)
+        config = self.config() or {}
+        helm = config.get("helm") if isinstance(config, dict) else None
+        helm_name = str((helm or {}).get("agentName") or "").strip()
+        cap = crew_capacity.count_crew_agents(
+            agents if isinstance(agents, list) else [], self.root, helm_name)
+        cfg = crew_capacity.load_capacity_config(self.root)
+        total = cap["total"]
+        names = ", ".join(cap["names"]) or "（无）"
+        listing = "\n".join(f"- {name}" for name in cap["names"][:20])
+        if total > cfg["hard"]:
+            return Result(
+                "runtime.capacity", "fail",
+                f"crew 工位 {total} > hard={cfg['hard']}（warn={cfg['warn']}）：{names}",
+                evidence={"total": total, "names": cap["names"]},
+                next="必须关闭清单（working/blocked 先人工处置）：\n" + listing
+                     + "\n逐个 `python3 scripts/dispatch.py close <agent>`；"
+                       "人工评估后可 `dispatch start --force`（留痕）；"
+                       "单项复查 `doctor --only runtime.capacity`")
+        if total > cfg["warn"]:
+            return Result(
+                "runtime.capacity", "warn",
+                f"crew 工位 {total} 超 warn={cfg['warn']}（hard={cfg['hard']}）：{names}",
+                evidence={"total": total, "names": cap["names"]},
+                next="建议关闭空闲工位：`python3 scripts/dispatch.py close <agent>`"
+                     "（working/blocked 先人工处置；guard 会对 >hard 强制回收）")
+        return Result("runtime.capacity", "pass",
+                      f"crew 工位 {total}（warn={cfg['warn']} hard={cfg['hard']}）",
+                      evidence={"total": total})
+
     def check_runtime_worktree(self) -> Result:
         rc, stdout, _ = self._run_cli(["git", "-C", str(self.root), "status", "--porcelain"])
         if rc != 0:
@@ -2467,7 +2525,7 @@ CHECKS = [
     "role.runtime-direct",
     "role.orphan",
     "runtime.dir", "runtime.state", "runtime.names", "runtime.lock", "runtime.guard",
-    "runtime.worktree", "runtime.legacy-registry",
+    "runtime.capacity", "runtime.worktree", "runtime.legacy-registry",
     "hooks.schema", "hooks.gates", "hooks.scripts",
     "install.log", "install.version", "install.scripts_source", "upgrade.scripts",
     "skill.purity", "skill.lint",
@@ -2515,6 +2573,7 @@ METHODS = {
     "runtime.names": "check_runtime_names",
     "runtime.lock": "check_runtime_lock",
     "runtime.guard": "check_runtime_guard",
+    "runtime.capacity": "check_runtime_capacity",
     "runtime.worktree": "check_runtime_worktree",
     "runtime.legacy-registry": "check_runtime_legacy_registry",
     "hooks.schema": "check_hooks_schema",

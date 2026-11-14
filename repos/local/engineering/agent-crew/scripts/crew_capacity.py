@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """工位容量计数与配置（2.2.31 工单 07B，D7 快审 PASS 后实现）。
 
-计数口径（dispatch capacity / crew-preflight / crew-guard / pane-audit 共用同一
-函数，四处数字可对账）——本仓 crew 工位 = herdr agent 满足：
+计数口径（dispatch capacity / crew-preflight / crew-guard 调用同一函数，三处
+数字可对账；pane-audit 复用白名单常量做排除判定、无计数出口——工单 08 建议 7：
+表述与实际接线一致）——本仓 crew 工位 = herdr agent 满足：
 ①cwd 在本仓或 linked worktree 内（cwd 缺失/不可解析沿用包含，同 guard 口径；
   跨 workspace 项目不误计）；②agent name 非空（个人 TUI 无 name 自然排除）；
 ③非总舵（name == helm 或 Captain 前缀）；④非白名单工位（Captain·/流程优化·
@@ -107,11 +108,13 @@ def count_crew_agents(
         if not _cwd_in_project(agent, roots):
             excluded_external += 1
             continue
-        if (helm_name and name == helm_name) or name.startswith("Captain"):
-            excluded_helm.append(name)
-            continue
+        # 工单 08 建议 6：白名单前缀先于 Captain 总舵前缀——「Captain·」开头的
+        # 是白名单工位而非总舵代（计数不变、归类准确：excludedWhitelist）。
         if any(name.startswith(prefix) for prefix in whitelist_prefixes):
             excluded_whitelist.append(name)
+            continue
+        if (helm_name and name == helm_name) or name.startswith("Captain"):
+            excluded_helm.append(name)
             continue
         names.append(name)
     return {

@@ -968,13 +968,18 @@ HERDR_LOCKED_TIMEOUT = 15
 
 
 def herdr_agents_locked() -> list[dict]:
-    """持 registry.lock 期间的 herdr agent list（带上界 timeout，建议 9）。"""
+    """持 registry.lock 期间的 herdr agent list（带上界 timeout，建议 9）。
+
+    工单 08 B-3：剥 herdr `{"result":{"agents":[...]}}` 包装——与 herdr_agents
+    同解析（真实输出带包装，漏剥会使拒建门恒数 0、从不拒建）。"""
     output = run_herdr(["herdr", "agent", "list"], timeout=HERDR_LOCKED_TIMEOUT)
     try:
         payload = json.loads(output)
     except ValueError as exc:
         raise DispatchError(f"herdr agent list 输出非 JSON：{exc}", 3) from exc
-    agents = payload.get("agents") if isinstance(payload, dict) else payload
+    result = payload.get("result") if isinstance(payload, dict) else None
+    agents = (result.get("agents") if isinstance(result, dict)
+              else payload.get("agents") if isinstance(payload, dict) else payload)
     return [item for item in agents or [] if isinstance(item, dict)]
 
 
@@ -1641,7 +1646,9 @@ def deliver_qoder(outcome: ComposeOutcome, name: str, pane: str,
         argv.extend(["--permission-mode", permission_mode])
     # Qoder 会话名对齐 Herdr/dispatch 启动名，保证 SendMessage/peer 可互认
     argv.extend(["--name", name])
-    run_herdr(argv)
+    # 工单 08 建议 4：deliver 在 cmd_start 的 registry.lock 临界区内执行，
+    # herdr 调用必须带上界（防持锁卡死；超时按 rc=3 报出，不静默）。
+    run_herdr(argv, timeout=HERDR_LOCKED_TIMEOUT)
     return {
         "delivery": "composed-agent",
         "composePath": str(run_dir),
@@ -1668,7 +1675,7 @@ def deliver_opencode(outcome: ComposeOutcome, name: str, pane: str, run_dir: Pat
         "--",
         "--agent", f"crew-{outcome.role_id}",
         *(["-m", model] if model else []),
-    ])
+    ], timeout=HERDR_LOCKED_TIMEOUT)  # 工单 08 建议 4：持锁上界
     return {
         "delivery": "composed-agent",
         "composePath": str(run_dir),
@@ -1725,11 +1732,12 @@ def deliver_claude(outcome: ComposeOutcome, name: str, pane: str,
         tail.extend(["--model", model])
     if tail:
         argv.extend(["--"] + tail)
-    run_herdr(argv)
+    run_herdr(argv, timeout=HERDR_LOCKED_TIMEOUT)  # 工单 08 建议 4：持锁上界
     first_message = CLAUDE_FIRST_INJECT_TEMPLATE.format(
         name=name, role=outcome.role_id, agent_rel=agent_rel.as_posix())
     try:
-        run_herdr(["herdr", "agent", "prompt", name, first_message])
+        run_herdr(["herdr", "agent", "prompt", name, first_message],
+                  timeout=HERDR_LOCKED_TIMEOUT)
     except DispatchError:
         raise DispatchError(
             f"{name} 已启动但角色装配未注入（herdr prompt 失败）；人工补注入："
@@ -2292,7 +2300,8 @@ def _render_status_lines(detail: list[dict], registry: dict,
 def cmd_capacity(args: argparse.Namespace, root: Path) -> int:
     """本仓 crew 工位计数（2.2.31 工单 07B）。
 
-    口径（与 crew-preflight/crew-guard/pane-audit 同函数同数字，可对账）：
+    口径（与 crew-preflight/crew-guard 调用同一函数、数字可对账；pane-audit
+    复用白名单常量做排除判定、无计数出口——工单 08 建议 7 对齐表述）：
     herdr agent 满足——cwd 在本仓或 linked worktree（跨项目不误计；cwd 缺失
     沿用包含）、name 非空（个人 TUI 自然排除）、非总舵（helm 名/Captain 前缀）、
     非白名单工位（Captain·/流程优化· 按名前缀；tab label 不作为判定——可伪造）。
@@ -2573,10 +2582,15 @@ def cmd_tab(args: argparse.Namespace, root: Path) -> int:
         })
         print_json({"tab": tab_id, "pane": pane_id, "cwd": cwd})
         return 0
-    run_herdr(["herdr", "tab", "close", args.tab])
+    # 工单 08 建议 5：close 与 start 同一 registry.lock 临界区（herdr 调用
+    # 上界 + agent-log 原子），与 cmd_close 同口径。
     caller, caller_source = resolve_caller(getattr(args, "caller", None))
-    append_log(root, {"ts": utc_now(), "action": "tab", "op": "close", "tab": args.tab,
-                      "caller": caller, "callerSource": caller_source, "result": "ok"})
+    with registry_lock(root):
+        run_herdr(["herdr", "tab", "close", args.tab],
+                  timeout=HERDR_LOCKED_TIMEOUT)
+        append_log(root, {"ts": utc_now(), "action": "tab", "op": "close",
+                          "tab": args.tab, "caller": caller,
+                          "callerSource": caller_source, "result": "ok"})
     print(f"已关闭 tab：{args.tab}")
     return 0
 
@@ -2605,16 +2619,20 @@ def cmd_pane(args: argparse.Namespace, root: Path) -> int:
         })
         print_json({"pane": new_pane, "cwd": cwd})
         return 0
-    run_herdr(["herdr", "pane", "close", args.pane])
+    # 工单 08 建议 5：panes.json 读改写纳入 registry.lock 临界区（防并发
+    # close/split 丢条目；herdr 调用上界，与 cmd_close 同口径）。
     caller, caller_source = resolve_caller(getattr(args, "caller", None))
-    panes = load_panes(root)
-    panes.pop(args.pane, None)
-    save_panes(root, panes)
-    append_log(root, {
-        "ts": utc_now(), "action": "pane", "op": "close",
-        "pane": args.pane, "caller": caller, "callerSource": caller_source,
-        "result": "ok",
-    })
+    with registry_lock(root):
+        run_herdr(["herdr", "pane", "close", args.pane],
+                  timeout=HERDR_LOCKED_TIMEOUT)
+        panes = load_panes(root)
+        panes.pop(args.pane, None)
+        save_panes(root, panes)
+        append_log(root, {
+            "ts": utc_now(), "action": "pane", "op": "close",
+            "pane": args.pane, "caller": caller, "callerSource": caller_source,
+            "result": "ok",
+        })
     print(f"已关闭 pane：{args.pane}")
     return 0
 

@@ -82,9 +82,9 @@ from pathlib import Path
 sys.dont_write_bytecode = True  # 不在项目 scripts/ 留 __pycache__
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from crew_paths import crew_dir as resolve_crew_dir  # noqa: E402
+from crew_capacity import DEFAULT_WHITELIST_PREFIXES  # noqa: E402  # 工单 08 建议 7：白名单常量单源（crew_capacity 为唯一来源）
 
 MAX_PANES_PER_TAB = 6
-DEFAULT_WHITELIST_PREFIXES = ("Captain·", "流程优化·")
 HELM_TAB_PREFIX = "总舵"
 HELM_AGENT_PREFIX = "helm"
 DEFAULT_BLOCKED_GRACE_MINUTES = 30
@@ -1364,14 +1364,19 @@ def close_tab(tab_id: str) -> bool:
     return herdr_run(["tab", "close", tab_id]).returncode == 0
 
 
-def make_dispatch_runner(root: str | Path) -> Callable[[str, str], bool]:
-    """总舵/旧 helm 回收统一走 `dispatch.py pane|tab close`（禁止直写 herdr 生命周期）。"""
+def make_dispatch_runner(root: str | Path,
+                         caller: str = "") -> Callable[[str, str], bool]:
+    """总舵/旧 helm 回收统一走 `dispatch.py pane|tab close`（禁止直写 herdr 生命周期）。
+
+    caller：close 归因（FB-061）；缺省 pane-audit，guard 等调用方经
+    `--caller` 传入自身名（工单 08 B-1：归因链穿透到最终 dispatch 记录）。"""
     script = Path(__file__).resolve().parent / "dispatch.py"
+    caller = caller.strip() or "pane-audit"
 
     def runner(kind: str, target: str) -> bool:
         args = (["pane", "close", "--pane", target] if kind == "pane"
                 else ["tab", "close", "--tab", target])
-        args += ["--caller", "pane-audit"]  # FB-061：close 归因
+        args += ["--caller", caller]  # FB-061：close 归因（可由调用方覆盖）
         try:
             proc = subprocess.run(
                 [sys.executable, str(script), "--root", str(root), *args],
@@ -1524,6 +1529,11 @@ def add_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
              "working 永不关闭，白名单跳过）",
     )
     parser.add_argument(
+        "--caller",
+        default="",
+        help="close 归因 caller（默认 pane-audit；guard 等调用方传入自身名，工单 08 B-1）",
+    )
+    parser.add_argument(
         "--whitelist-prefix",
         action="append",
         default=[],
@@ -1626,7 +1636,7 @@ def main(argv: list[str] | None = None) -> int:
     closed_panes, closed_tabs, failed = apply_findings(
         findings,
         probe=probe_empty_pane,
-        dispatch_runner=make_dispatch_runner(args.root),
+        dispatch_runner=make_dispatch_runner(args.root, getattr(args, "caller", "")),
     )
     reported = len(findings) - len(closed_panes) - len(closed_tabs) - len(failed)
     print(

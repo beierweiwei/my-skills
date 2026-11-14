@@ -562,7 +562,7 @@ class PaneAuditHelmReclaimTest(unittest.TestCase):
         extra = list(extra or [])
         recorded = {"calls": []}
 
-        def fake_dispatch_runner(root: Path):
+        def fake_dispatch_runner(root: Path, caller: str = ""):  # caller：工单 08 B-1
             def runner(kind: str, target: str) -> bool:
                 recorded["calls"].append((str(root), kind, target))
                 return True

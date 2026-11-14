@@ -1098,9 +1098,11 @@ class Guard:
     handoff_wait_rounds: int = field(default=0, init=False)
     handoff_close_rounds: int = field(default=0, init=False)
     reaper_rounds: int = field(default=0, init=False)
-    # 2.2.31 工单 07B：容量叫醒签名（清单不变不重复叫醒）+ >hard 首见时间戳
+    # 2.2.31 工单 07B：容量叫醒签名（清单不变不重复叫醒）+ >hard 首见时间戳；
+    # 工单 08 B-2：升级通知按签名一次性（同 episode 不重发，签名变化复位）。
     capacity_wake_signature: str = field(default="", init=False)
     capacity_first_hard_at: float | None = field(default=None, init=False)
+    capacity_escalated_signature: str = field(default="", init=False)
     rework_logged: set[str] = field(default_factory=set, init=False)
     rework_skipped: set[str] = field(default_factory=set, init=False)
     project_roots: set[Path] | None = None
@@ -2547,11 +2549,13 @@ class Guard:
             pass
 
     def _capacity_check(self, now: float, agents: list[dict]) -> None:
-        """每轮容量检查：>warn 记 guard.log；>hard 先调 pane-audit --apply 强制
-        回收（复用既有安全判定与 caller 留痕，禁新写目标选择器/直调裸 herdr）→
-        重取 live 计数 → 仍 >hard → _wake 叫醒「必须关闭清单」（受全局冷却 +
-        签名去重，清单不变不重复）；拒建持续 60 分钟升级 herdr_notify 通知
-        Captain。全在跑（无可安全回收）只告警+拒建，不杀在跑任务。"""
+        """每轮容量检查：>warn 记 guard.log；>hard（工单 08 建议 1：严格大于，
+        满编 hard 是合法稳态，不空跑回收）先调 pane-audit --apply 强制回收
+        （复用既有安全判定与 caller 留痕，禁新写目标选择器/直调裸 herdr）→
+        重取 live 计数 → 仍 >hard → _wake 叫醒「必须关闭清单」（签名去重，
+        清单不变不重复）；拒建持续 60 分钟升级 herdr_notify 通知 Captain——
+        同一签名 episode 只升级一次，签名变化＝新 episode 重新计时（工单 08
+        B-2）。全在跑（无可安全回收）只告警+拒建，不杀在跑任务。"""
         try:
             import crew_capacity
         except ImportError:
@@ -2559,36 +2563,53 @@ class Guard:
         cap = crew_capacity.count_crew_agents(agents, self.root, self.helm)
         cfg = crew_capacity.load_capacity_config(self.root)
         total = cap["total"]
-        if total <= cfg["warn"]:
+        names = ", ".join(cap["names"])
+        if total <= cfg["hard"]:
+            # 合法稳态（含满编 hard，工单 08 建议 1）：清 >hard 计时与升级标记
             if self.capacity_first_hard_at is not None:
                 self.capacity_first_hard_at = None
                 self._capacity_persist(None)
-            return
-        names = ", ".join(cap["names"])
-        if total < cfg["hard"]:
-            if self.capacity_wake_signature != f"warn:{names}":
-                self.log(f"容量警告：crew 工位 {total} 超 warn={cfg['warn']}"
-                         f"（hard={cfg['hard']}）：{names}")
-                self.capacity_wake_signature = f"warn:{names}"
+            self.capacity_escalated_signature = ""
+            if total > cfg["warn"]:
+                if self.capacity_wake_signature != f"warn:{names}":
+                    self.log(f"容量警告：crew 工位 {total} 超 warn={cfg['warn']}"
+                             f"（hard={cfg['hard']}）：{names}")
+                    self.capacity_wake_signature = f"warn:{names}"
+            elif self.capacity_wake_signature:
+                self.capacity_wake_signature = ""  # 回落 ok：签名复位
             return
         # >hard：先按既有安全规则回收（pane-audit --apply；working/blocked/
         # unknown 永不关、非白名单、非聚焦、idle/done、完成流）
         audit_script = Path(__file__).resolve().parent / "pane-audit.py"
+        proc = None
         try:
-            subprocess.run(
+            proc = subprocess.run(
                 [sys.executable, str(audit_script), "--root", str(self.root),
                  "--apply", "--caller", "guard"],
                 capture_output=True, text=True, check=False, timeout=120)
         except (OSError, subprocess.SubprocessError) as exc:
             self.log(f"容量强制回收调用 pane-audit 失败：{exc}")
+        if proc is not None and proc.returncode != 0:
+            # 工单 08 B-1：rc≠0 不得静默——记 guard.log 后继续告警链路
+            lines = (proc.stderr or proc.stdout or "").strip().splitlines()
+            self.log(f"容量强制回收 pane-audit 退出码 {proc.returncode}："
+                     f"{lines[-1][:200] if lines else '无输出'}")
         live = self.list_agents()
         cap2 = crew_capacity.count_crew_agents(live, self.root, self.helm)
         total2 = cap2["total"]
         if total2 <= cfg["hard"]:
             self.log(f"容量强制回收完成：{total} → {total2}（hard={cfg['hard']}）")
             self.capacity_wake_signature = ""
+            self.capacity_first_hard_at = None
+            self.capacity_escalated_signature = ""
+            self._capacity_persist(None)
             return
         signature = f"hard:{sorted(cap2['names'])}"
+        if self.capacity_wake_signature and signature != self.capacity_wake_signature:
+            # 状态变化＝新 episode：60 分钟重新计时、升级标记复位（工单 08 B-2）
+            self.capacity_first_hard_at = now
+            self.capacity_escalated_signature = ""
+            self._capacity_persist(now)
         if self.capacity_first_hard_at is None:
             self.capacity_first_hard_at = now
             try:
@@ -2602,7 +2623,9 @@ class Guard:
         escalate = (self.capacity_first_hard_at is not None
                     and now - self.capacity_first_hard_at
                     >= self.CAPACITY_HARD_ESCALATE_MINUTES * 60)
-        if signature != self.capacity_wake_signature or escalate:
+        should_wake = signature != self.capacity_wake_signature
+        should_escalate = escalate and self.capacity_escalated_signature != signature
+        if should_wake or should_escalate:
             listing = "\n".join(f"- {name}" for name in cap2["names"][:20])
             message = (
                 f"guard 容量超限：crew 工位 {total2} > hard={cfg['hard']}，"
@@ -2610,12 +2633,13 @@ class Guard:
                 f"{listing}\n"
                 "处置：逐个 `python3 scripts/dispatch.py close <agent>`（working/"
                 "blocked 先人工处置），或人工评估后 `dispatch start --force`。")
-            if escalate:
+            if should_escalate:
                 message += ("\n超限已持续 ≥60 分钟，升级通知 Captain。")
                 try:
                     self.notify("guard 容量超限升级", message)
                 except Exception as exc:  # noqa: BLE001
                     self.log(f"容量升级通知失败：{exc}")
+                self.capacity_escalated_signature = signature
             try:
                 self._wake(message, agents, now)
             except Exception as exc:  # noqa: BLE001

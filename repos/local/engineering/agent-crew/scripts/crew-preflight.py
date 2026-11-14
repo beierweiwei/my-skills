@@ -307,8 +307,18 @@ def _git_worktree_roots(root: Path) -> list[Path]:
 
 def check_capacity(root: Path, herdr_bin: str = "herdr") -> dict:
     """容量检查（2.2.31 工单 07B）：与 dispatch capacity/guard 同口径计数；
-    ok ≤warn / warn >warn / hard >hard；仅展示，不改变五项结构与退出码语义。"""
+    ok ≤warn / warn >warn / hard ≥hard（满编，dispatch 拒新增口径）；仅展示，
+    不改变五项结构与退出码语义。工单 08 B-3：读 config 传 helm_name（总舵排除）
+    并剥 herdr result 包装——四处同数字。"""
     import crew_capacity
+    helm_name = ""
+    try:
+        data = json.loads((root / ".planning" / "orchestration.json")
+                          .read_text(encoding="utf-8"))
+        helm = data.get("helm") if isinstance(data, dict) else None
+        helm_name = str((helm or {}).get("agentName") or "").strip()
+    except (OSError, ValueError):
+        pass
     try:
         proc = subprocess.run(
             [herdr_bin, "agent", "list"],
@@ -316,8 +326,10 @@ def check_capacity(root: Path, herdr_bin: str = "herdr") -> dict:
             env={**os.environ, "HERDR_ENV": "1"},
         )
         payload = json.loads(proc.stdout) if proc.returncode == 0 else {}
-        agents = payload.get("agents") if isinstance(payload, dict) else payload
-        cap = crew_capacity.count_crew_agents(agents or [], root)
+        result = payload.get("result") if isinstance(payload, dict) else None
+        agents = (result.get("agents") if isinstance(result, dict)
+                  else payload.get("agents") if isinstance(payload, dict) else payload)
+        cap = crew_capacity.count_crew_agents(agents or [], root, helm_name)
         cfg = crew_capacity.load_capacity_config(root)
         total = cap["total"]
         level = ("ok" if total <= cfg["warn"]
