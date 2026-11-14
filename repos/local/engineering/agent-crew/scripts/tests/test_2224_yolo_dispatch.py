@@ -36,13 +36,15 @@ class YoloDocsStaticTest(unittest.TestCase):
     def test_rules_have_d8(self):
         rules = read("references/crew-rules.md")
         self.assertIn("**D8 YOLO 派单**", rules)
-        self.assertIn("bypass_permissions", rules)
+        self.assertIn("agents.permissionMode", rules)  # 2.2.33/B：配置解析口径
         self.assertIn("yolo-missing", rules)
+        self.assertIn("不手传", rules)
 
     def test_firstmate_qoder_template_has_yolo(self):
         text = read("templates/agents/qoder/firstmate.md")
         self.assertIn("D8 YOLO 派单", text)
-        self.assertIn("--permission-mode bypass_permissions", text)
+        self.assertIn("不手传", text)  # 2.2.33/B：不教手传，配置 agents.permissionMode 解析
+        self.assertIn("agents.permissionMode", text)
         self.assertIn("scout/runner/planner", text)
 
     def test_firstmate_opencode_template_has_yolo(self):

@@ -57,11 +57,14 @@ class TemplatePointerTest(unittest.TestCase):
         self.assertIn("`templates/playbooks/real-action-verification.md`", text)
 
     def test_x4_reproduction_lists_repo_evidence_dialog(self):
+        """2.2.33/T51：模板不复述 X4 落点清单（X4 唯一正文），断言指针存在。"""
         for rel in X4_TEMPLATES:
             text = read(rel)
-            for zone in ("仓库、证据、对话", "沙箱", "平台", "共享目录", "线程工作区"):
+            with self.subTest(rel=rel):
+                self.assertIn("按 X4 执行", text, f"{rel} 缺少 X4 指针")
+            for zone in ("沙箱", "共享目录", "线程工作区"):
                 with self.subTest(rel=rel, zone=zone):
-                    self.assertIn(zone, text, f"{rel} 缺少 X4 落点：{zone}")
+                    self.assertNotIn(zone, text, f"{rel} 残留 X4 落点复述：{zone}")
 
 
 if __name__ == "__main__":
