@@ -3172,6 +3172,13 @@ class Guard:
         self._consume_stale_wake(now)
         self._periodic_write(now)
         self._maybe_run_reaper()
+        # 2.2.33/A4/FB-063：破坏性 git 操作观测（S3 主 + S1 兜底；只观测不阻断，
+        # 不 wake/不进 reason_parts；import 失败静默降级，BLK-3；D7 快审 PASS）。
+        try:
+            import crew_gitops
+            crew_gitops.observe_once(self)
+        except Exception as exc:  # noqa: BLE001 - 观测失败不影响值守
+            self.log(f"gitops 观测异常：{type(exc).__name__}: {exc}")
 
         try:
             agents = self.list_agents()

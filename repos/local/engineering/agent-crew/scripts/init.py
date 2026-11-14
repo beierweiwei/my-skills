@@ -125,6 +125,7 @@ SCRIPT_MANIFEST = [
     "release-check.py",
     "crew-model.py",   # 2.2.32 补 2.2.30 缺口：受管清单漏登，项目 upgrade 漏装
     "plan-archive.py",  # 2.2.32 补 2.2.30 缺口：同上
+    "crew_gitops.py",  # 2.2.33/A4：guard 破坏性 git 操作观测（guard import 依赖）
 ]
 COPY_BASENAMES = ("crew-rules.md", "crew-acceptance.md",
                   "orchestration-guide.md", "plan-discipline.md",
