@@ -6,10 +6,10 @@
 ② 不含 CASE 特有词（3000 / QQ / req2. / SempClaw / FDE / thread workspace / UI 100%）；
 ③ 凭据正文唯一在 X4：VR4 不含 X4 原句（0600 / install -m 600 / 平台 env）；
    X4 含句级 pattern「仓库、证据与对话」与「平台（含平台数据目录）」消歧；
-④ A3.4 三分法措辞与 plan 一致；A3.1–A3.3 文案不变；
+④ A3.4 三分法措辞与 plan 一致；A3.1–A3.3 文案不变（T53/2.2.33 起为全行/整段快照锁定）；
 ⑤ A4/A5 只新增指针行，六维表与 A5 模板不动；
 ⑥ F6 只加指针、G6/R5 无改动、VR 不复述 A3/F6 全文、VR5 末句与 A3.4 一致；
-⑦ SKILL.md 第 11 行「读哪里」含 verification-redlines.md；
+⑦ SKILL.md「读哪里」行含 verification-redlines.md（T55/2.2.33 去行号耦合，结构定位）；
 ⑧ crew-lint 与 --purity 全绿。
 
 grep 断言只落在生产目录 references/ 与 SKILL.md，不扫 scripts/tests/ 反向断言。
@@ -36,6 +36,26 @@ X4_LOCATIONS = "仓库、证据与对话"
 X4_PLATFORM = "平台（含平台数据目录）"
 MAPPING_RE = re.compile(r"^映射：(?P<refs>.+)$", re.MULTILINE)
 AFX_REF_RE = re.compile(r"(?<![A-Za-z0-9])(?:A\d+(?:\.\d+)?|F\d+(?:\.\d+)?|X\d+(?:\.\d+)?)(?![A-Za-z0-9])")
+
+# T53（2.2.33）：A3.1–A3.3 全行/整段快照（逐字节锁定；改动任何一词即红）
+A31_SNAPSHOT = (
+    "- **A3.1 四要素**：声明「已完成 / 可验收」必须同时具备：\n"
+    "  1. **目标入口可访问**：交给 Captain 的入口现场可打开或可执行；只有本机旁路能通不算；\n"
+    "  2. **版本一致**：入口实际运行的版本与声明交付的版本一致（安装版 = 源版："
+    "`SKILL.md` 版本、配置 `skillVersion` 与 manifest 一致，由 `doctor.py` 的 "
+    "`install.version`/`skill.source` 复核；预览 = 交付）；预览/快照在提交后刷新并核对内容指纹，不用旧快照冒充；\n"
+    "  3. **证据齐备**：A1 抽验表、A2 自验结果、A4 六维映射齐全且可打开；\n"
+    "  4. **未竟项列出**：未做、未验、待 Captain 的逐条列；没有写「无」。\n"
+)
+A32_SNAPSHOT = (
+    "- **A3.2 验收门**：呈报包 = 四要素 + 抽验表 + doctor 结果；缺一不得声明完成，"
+    "也不得请 Captain 签验收门。验收文档与人工签认仍按项目门禁执行。"
+)
+A33_SNAPSHOT = (
+    "- **A3.3 关键决策证据**：涉主数据/架构口径/验收口径/数据安全/范围变更的关键决策交付，"
+    "完成声明与验收门须附独立对抗审查报告路径与 PASS（或阻断清零）记录；"
+    "缺失按 crew-rules D7 阻断，不得声明完成。"
+)
 
 
 def read(rel: str) -> str:
@@ -120,16 +140,22 @@ class AcceptanceWiringTest(unittest.TestCase):
             self.assertIn(phrase, a34, f"A3.4 缺少：{phrase}")
 
     def test_a31_to_a33_unchanged(self):
+        """T53（2.2.33）：A3.1–A3.3 全行/整段快照断言（对齐 A3.3 已有锁定强度）。
+
+        快照=当前生产文本逐字节拷贝；任何一词改动（含局部改写）都会红。
+        变异验证：改 A3.1 任一字 → 本测试红；还原 → 绿。
+        """
         acceptance = read(ACCEPTANCE)
-        a31 = section(acceptance, "- **A3.1 ", "- **A3.2 ")
-        for phrase in ("四要素", "目标入口可访问", "版本一致", "证据齐备", "未竟项列出"):
-            self.assertIn(phrase, a31, f"A3.1 文案被改动，缺少：{phrase}")
+        begin = acceptance.find("- **A3.1 ")
+        end = acceptance.find("- **A3.2 ")
+        self.assertGreaterEqual(begin, 0, "缺少 A3.1 条目")
+        self.assertGreater(end, begin, "缺少 A3.2 条目")
+        self.assertEqual(A31_SNAPSHOT, acceptance[begin:end],
+                         "A3.1 文案被改动（全段快照不符）")
         a32 = line_with(acceptance, "- **A3.2 ")
-        for phrase in ("四要素", "抽验表", "doctor 结果", "验收门"):
-            self.assertIn(phrase, a32, f"A3.2 文案被改动，缺少：{phrase}")
+        self.assertEqual(A32_SNAPSHOT, a32, "A3.2 文案被改动（全行快照不符）")
         a33 = line_with(acceptance, "- **A3.3 ")
-        for phrase in ("关键决策", "对抗审查", "PASS", "D7"):
-            self.assertIn(phrase, a33, f"A3.3 文案被改动，缺少：{phrase}")
+        self.assertEqual(A33_SNAPSHOT, a33, "A3.3 文案被改动（全行快照不符）")
 
     def test_no_internal_review_numbering_in_production_references(self):
         offenders = []
@@ -188,14 +214,16 @@ class RulesWiringTest(unittest.TestCase):
 
 
 class SkillEntryTest(unittest.TestCase):
-    """断言 7：SKILL.md 第 11 行「读哪里」含 VR 指针。"""
+    """断言 7（T55/2.2.33 去行号耦合）：「读哪里」行含 VR 指针，不锁行号。"""
 
     def test_read_where_line_points_to_vr(self):
         lines = read(SKILL).splitlines()
-        self.assertGreaterEqual(len(lines), 11)
-        self.assertIn("verification-redlines.md", lines[10], "SKILL.md 第 11 行缺少 VR 指针")
-        read_where = next(ln for ln in lines if ln.startswith("**读哪里**"))
-        self.assertIn("verification-redlines.md", read_where)
+        read_where_lines = [ln for ln in lines if ln.startswith("**读哪里**")]
+        self.assertEqual(
+            1, len(read_where_lines),
+            f"SKILL.md 应恰有一行「**读哪里**」开头，实际 {len(read_where_lines)} 行")
+        self.assertIn("verification-redlines.md", read_where_lines[0],
+                      "「读哪里」行缺少 VR 指针")
 
 
 class LintGreenTest(unittest.TestCase):
