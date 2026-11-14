@@ -1482,7 +1482,8 @@ class Guard:
                          f"未关闭（请人工核查 tab {new_tab}）")
                 continue
             code, output, error = self.dispatch(
-                self.root, ["pane", "close", "--pane"]
+                self.root, ["pane", "close", "--pane", pane_id,
+                "--caller", "guard"]
             )
             if code == 0:
                 self.log(f"交接 tab 多余 pane 已关闭：{pane_id}（tab {new_tab}）")
@@ -1659,7 +1660,8 @@ class Guard:
             self.log(f"残留收敛：{close_note}")
         elif old_pane and old_status in ("", "idle", "done", "unknown"):
             code, output, error = self.dispatch(
-                self.root, ["pane", "close", "--pane"]
+                self.root, ["pane", "close", "--pane", old_pane,
+                    "--caller", "guard"]
             )
             if code != 0:
                 return self._handoff_fail("pane close", error or output, base)
@@ -1703,7 +1705,8 @@ class Guard:
                 )
             else:
                 code, output, error = self.dispatch(
-                    self.root, ["tab", "close", "--tab"]
+                    self.root, ["tab", "close", "--tab", old_tab,
+                    "--caller", "guard"]
                 )
                 if code != 0:
                     detail = (error or output).strip()
@@ -1856,7 +1859,8 @@ class Guard:
             return "skipped"
 
         code, output, error = self.dispatch(
-            self.root, ["pane", "close", "--pane"]
+            self.root, ["pane", "close", "--pane", pane_id,
+                "--caller", "guard"]
         )
         if code != 0:
             detail = (error or output).strip().splitlines()
@@ -1876,7 +1880,8 @@ class Guard:
             note += f"；旧 tab {tab_id} 仍有 {len(remaining)} 个 pane，未关闭"
         else:
             tcode, tout, terr = self.dispatch(
-                self.root, ["tab", "close", "--tab"]
+                self.root, ["tab", "close", "--tab", tab_id,
+                    "--caller", "guard"]
             )
             if tcode == 0:
                 note += f"；旧 tab {tab_id} 已关闭"

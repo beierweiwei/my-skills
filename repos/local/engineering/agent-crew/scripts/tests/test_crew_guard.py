@@ -1497,8 +1497,8 @@ class HandoffTest(GuardTestBase):
         closes = [c for c in self.dispatch_calls
                   if c[:2] in (["pane", "close"], ["tab", "close"])]
         self.assertEqual(
-            [["pane", "close", "--pane", self.OLD_PANE],
-             ["tab", "close", "--tab", "wX:tOLD"]],
+            [["pane", "close", "--pane", self.OLD_PANE, "--caller", "guard"],
+             ["tab", "close", "--tab", "wX:tOLD", "--caller", "guard"]],
             closes,
         )
         fields = self.handoff_fields()
@@ -1533,7 +1533,7 @@ class HandoffTest(GuardTestBase):
         guard.run_once()
         closes = [c for c in self.dispatch_calls
                   if c[:2] in (["pane", "close"], ["tab", "close"])]
-        self.assertEqual([["pane", "close", "--pane", self.OLD_PANE]], closes)
+        self.assertEqual([["pane", "close", "--pane", self.OLD_PANE, "--caller", "guard"]], closes)
         fields = self.handoff_fields()
         self.assertEqual("done", fields["phase"])
         self.assertEqual("ok", fields["result"])
@@ -1587,7 +1587,7 @@ class HandoffTest(GuardTestBase):
         guard.run_once()
         closes = [c for c in self.dispatch_calls
                   if c[:2] in (["pane", "close"], ["tab", "close"])]
-        self.assertEqual([["pane", "close", "--pane", self.OLD_PANE]], closes)
+        self.assertEqual([["pane", "close", "--pane", self.OLD_PANE, "--caller", "guard"]], closes)
         fields = self.handoff_fields()
         self.assertEqual("done", fields["phase"])
         self.assertEqual("ok", fields["result"])
@@ -1615,7 +1615,7 @@ class HandoffTest(GuardTestBase):
         guard.run_once()
         closes = [c for c in self.dispatch_calls
                   if c[:2] in (["pane", "close"], ["tab", "close"])]
-        self.assertEqual([["pane", "close", "--pane", self.OLD_PANE]], closes)
+        self.assertEqual([["pane", "close", "--pane", self.OLD_PANE, "--caller", "guard"]], closes)
         fields = self.handoff_fields()
         self.assertEqual("done", fields["phase"])
         self.assertEqual("ok", fields["result"])
@@ -1744,9 +1744,9 @@ class HandoffPaneCountTest(GuardTestBase):
         self.make_guard().run_once()
 
         close_calls = [c for c in self.dispatch_calls if c[:2] == ["pane", "close"]]
-        self.assertEqual([["pane", "close", "--pane", "wX:pEXTRA"]], close_calls)
+        self.assertEqual([["pane", "close", "--pane", "wX:pEXTRA", "--caller", "guard"]], close_calls)
         close_index = self.dispatch_calls.index(
-            ["pane", "close", "--pane", "wX:pEXTRA"])
+            ["pane", "close", "--pane", "wX:pEXTRA", "--caller", "guard"])
         start_index = next(
             index for index, call in enumerate(self.dispatch_calls)
             if call[:1] == ["start"]
@@ -1798,7 +1798,8 @@ class HandoffPaneCountTest(GuardTestBase):
         self.dispatch_override = override
         self.make_guard().run_once()
 
-        self.assertIn(["pane", "close", "--pane", "wX:pEXTRA"], self.dispatch_calls)
+        self.assertIn(["pane", "close", "--pane", "wX:pEXTRA", "--caller", "guard"],
+                      self.dispatch_calls)
         self.assertIn("start", [c[0] for c in self.dispatch_calls])
         fields = self.handoff_fields()
         self.assertEqual("started", fields["phase"])
@@ -2159,8 +2160,8 @@ class Fb008HandoffEdgeCaseTest(GuardTestBase):
         done = guard.run_once()
         self.assertEqual("done", done["handoff"]["action"])
         self.assertEqual(
-            [["pane", "close", "--pane", self.OLD_PANE],
-             ["tab", "close", "--tab", "wX:tOLD"]],
+            [["pane", "close", "--pane", self.OLD_PANE, "--caller", "guard"],
+             ["tab", "close", "--tab", "wX:tOLD", "--caller", "guard"]],
             self.closes(),
         )
         self.assertEqual("done", self.handoff_fields()["phase"])

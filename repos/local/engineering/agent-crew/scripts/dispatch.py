@@ -273,6 +273,21 @@ def load_json(path: Path) -> object:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def resolve_caller(explicit: str | None) -> tuple[str, str]:
+    """close 动作调用方归因（FB-061，2.2.31 工单 06）：--caller > 环境变量
+    CREW_CALLER > 缺省 `dispatch`（CLI 直调）。值原样透传（未知值不拒绝）；
+    推断任何一步失败都不报错，返回 (caller, caller_source)。"""
+    if explicit and str(explicit).strip():
+        return str(explicit).strip(), "flag"
+    try:
+        env = os.environ.get("CREW_CALLER", "").strip()
+    except Exception:  # noqa: BLE001 - 环境读取异常按缺省处理
+        env = ""
+    if env:
+        return env, "env"
+    return "dispatch", "default"
+
+
 def append_log(root: Path, row: dict) -> None:
     path = crew_dir(root) / "agent-log.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2439,7 +2454,9 @@ def cmd_tab(args: argparse.Namespace, root: Path) -> int:
         print_json({"tab": tab_id, "pane": pane_id, "cwd": cwd})
         return 0
     run_herdr(["herdr", "tab", "close", args.tab])
-    append_log(root, {"ts": utc_now(), "action": "tab", "op": "close", "tab": args.tab, "result": "ok"})
+    caller, caller_source = resolve_caller(getattr(args, "caller", None))
+    append_log(root, {"ts": utc_now(), "action": "tab", "op": "close", "tab": args.tab,
+                      "caller": caller, "callerSource": caller_source, "result": "ok"})
     print(f"已关闭 tab：{args.tab}")
     return 0
 
@@ -2469,12 +2486,14 @@ def cmd_pane(args: argparse.Namespace, root: Path) -> int:
         print_json({"pane": new_pane, "cwd": cwd})
         return 0
     run_herdr(["herdr", "pane", "close", args.pane])
+    caller, caller_source = resolve_caller(getattr(args, "caller", None))
     panes = load_panes(root)
     panes.pop(args.pane, None)
     save_panes(root, panes)
     append_log(root, {
         "ts": utc_now(), "action": "pane", "op": "close",
-        "pane": args.pane, "result": "ok",
+        "pane": args.pane, "caller": caller, "callerSource": caller_source,
+        "result": "ok",
     })
     print(f"已关闭 pane：{args.pane}")
     return 0
@@ -2577,6 +2596,10 @@ def build_parser() -> argparse.ArgumentParser:
     tab_create.set_defaults(func=cmd_tab)
     tab_close = tab_sub.add_parser("close")
     tab_close.add_argument("--tab", required=True)
+    tab_close.add_argument(
+        "--caller",
+        help="关闭方归因（FB-061）：dispatch|pane-audit|crew-reaper|guard 等，"
+             "原样透传进 agent-log；缺省按环境变量 CREW_CALLER，再缺省记 dispatch")
     tab_close.set_defaults(func=cmd_tab)
 
     pane_p = sub.add_parser("pane", help="split/close pane")
@@ -2590,6 +2613,10 @@ def build_parser() -> argparse.ArgumentParser:
     pane_split.set_defaults(func=cmd_pane)
     pane_close = pane_sub.add_parser("close")
     pane_close.add_argument("--pane", required=True)
+    pane_close.add_argument(
+        "--caller",
+        help="关闭方归因（FB-061）：dispatch|pane-audit|crew-reaper|guard 等，"
+             "原样透传进 agent-log；缺省按环境变量 CREW_CALLER，再缺省记 dispatch")
     pane_close.set_defaults(func=cmd_pane)
 
     return parser
