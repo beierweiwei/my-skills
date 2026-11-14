@@ -95,10 +95,11 @@ class HandoffStartArgsTest(unittest.TestCase):
 
 
 class IdleWakeDefaultTest(unittest.TestCase):
-    """T64：idle 兜底默认 10 分钟 → 60 分钟。"""
+    """T64 口径沿革：2.2.26 默认 30（≈60 分钟报平安）；2.2.31（guard-noise 流）
+    默认 0＝状态变化驱动接管（无变化零叫醒），>0 显式恢复旧兜底口径。"""
 
-    def test_default_idle_wake_rounds_is_30(self):
-        self.assertEqual(30, cg.DEFAULT_IDLE_WAKE_ROUNDS)
+    def test_default_idle_wake_rounds_is_zero(self):
+        self.assertEqual(0, cg.DEFAULT_IDLE_WAKE_ROUNDS)
 
     def test_max_clamp_still_240(self):
         self.assertEqual(240, cg.IDLE_WAKE_ROUNDS_MAX)

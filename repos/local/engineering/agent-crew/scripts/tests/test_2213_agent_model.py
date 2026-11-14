@@ -140,8 +140,10 @@ class DeliverModelTest(unittest.TestCase):
     def _deliver(self, runtime: str, model: str | None) -> list[str]:
         root = self._root(runtime)
         calls: list[list[str]] = []
-        with mock.patch.object(dispatch_mod, "run_herdr",
-                               side_effect=lambda argv: calls.append(argv) or ""):
+        # timeout 关键字：工单 08 建议 4 给 deliver 链路 run_herdr 加持锁上界
+        with mock.patch.object(
+                dispatch_mod, "run_herdr",
+                side_effect=lambda argv, timeout=None: calls.append(argv) or ""):
             if runtime == "qoder":
                 dispatch_mod.deliver_qoder(
                     fake_outcome(root), "proj-builder", "wX:p1",

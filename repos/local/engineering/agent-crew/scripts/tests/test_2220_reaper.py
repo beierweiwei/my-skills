@@ -220,7 +220,7 @@ class CaseResidualTest(ReaperCliBase):
         self.assertEqual(rc, 0, err)
         self.assertEqual([True], self.live_snapshot_calls)
         self.assertEqual(
-            [["pane", "close", "--pane", "w12:p1"], ["tab", "close", "--tab", "tGS"]],
+            [["pane", "close", "--pane", "w12:p1", "--caller", "crew-reaper"], ["tab", "close", "--tab", "tGS", "--caller", "crew-reaper"]],
             calls,
         )
         self.assertTrue(all(call[:2] in (["pane", "close"], ["tab", "close"])
@@ -254,7 +254,7 @@ class CaseResidualTest(ReaperCliBase):
             handoff=CASE_HANDOFF, registry=CASE_REGISTRY, extra=["--apply"],
         )
         self.assertEqual(rc, 0, err)
-        self.assertEqual([["tab", "close", "--tab", "tEmpty"]], calls)
+        self.assertEqual([["tab", "close", "--tab", "tEmpty", "--caller", "crew-reaper"]], calls)
         finding = next(f for f in payload["findings"]
                        if f["kind"] == "helm-tab" and f["target"] == "tEmpty")
         self.assertEqual("close", finding["decision"])
@@ -482,8 +482,8 @@ class UnknownCurrentHelmTest(ReaperCliBase):
         )
         self.assertEqual(rc, 0, err)
         self.assertEqual("registry:helm-new", payload["source"])
-        self.assertIn(["pane", "close", "--pane", "w12:p1"], calls)
-        self.assertIn(["tab", "close", "--tab", "tGS"], calls)
+        self.assertIn(["pane", "close", "--pane", "w12:p1", "--caller", "crew-reaper"], calls)
+        self.assertIn(["tab", "close", "--tab", "tGS", "--caller", "crew-reaper"], calls)
 
 
 class IdempotencyTest(ReaperCliBase):
@@ -518,8 +518,8 @@ class OldHelmResidualTest(ReaperCliBase):
             handoff=CASE_HANDOFF, registry=CASE_REGISTRY, extra=["--apply"],
         )
         self.assertEqual(rc, 0, err)
-        self.assertEqual([["pane", "close", "--pane", "w12:p1"],
-                          ["tab", "close", "--tab", "tX"]], calls)
+        self.assertEqual([["pane", "close", "--pane", "w12:p1", "--caller", "crew-reaper"],
+                          ["tab", "close", "--tab", "tX", "--caller", "crew-reaper"]], calls)
         finding = next(f for f in payload["findings"] if f["kind"] == "old-helm")
         self.assertEqual("close", finding["decision"])
 
@@ -533,7 +533,7 @@ class OldHelmResidualTest(ReaperCliBase):
             handoff=CASE_HANDOFF, registry=CASE_REGISTRY, extra=["--apply"],
         )
         self.assertEqual(rc, 0, err)
-        self.assertIn(["pane", "close", "--pane", "w12:p1"], calls)
+        self.assertIn(["pane", "close", "--pane", "w12:p1", "--caller", "crew-reaper"], calls)
 
     def test_working_old_helm_not_reclaimed(self):
         tabs = [tab("tGY", "总舵"), tab("tX", "旧舵工作区")]
@@ -572,13 +572,13 @@ class DispatchContractTest(ReaperCliBase):
         rc, _out, err, calls, payload = self.run_cli(
             snapshot(tabs, panes, agents),
             handoff=handoff, registry=registry, extra=["--apply"],
-            dispatch_fail=lambda argv: argv[-1] == "p1",
+            dispatch_fail=lambda argv: "p1" in argv,  # caller 追加在 argv 尾部（FB-061）
         )
         self.assertEqual(rc, 0, err)
         self.assertEqual(
-            [["pane", "close", "--pane", "p1"],
-             ["pane", "close", "--pane", "p2"],
-             ["tab", "close", "--tab", "tGS2"]],
+            [["pane", "close", "--pane", "p1", "--caller", "crew-reaper"],
+             ["pane", "close", "--pane", "p2", "--caller", "crew-reaper"],
+             ["tab", "close", "--tab", "tGS2", "--caller", "crew-reaper"]],
             calls,
         )
         statuses = {(a["action"], a["target"]): a["status"]

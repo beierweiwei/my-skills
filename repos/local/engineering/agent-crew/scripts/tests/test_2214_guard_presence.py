@@ -183,7 +183,7 @@ class ChangelogVersionSectionTest(unittest.TestCase):
         text = read("CHANGELOG.md")
         top = re.search(r"^## (2\.2\.\d+)(?:\s|$)", text, flags=re.MULTILINE)
         self.assertIsNotNone(top, "CHANGELOG 缺少发布段")
-        self.assertEqual("2.2.30", top.group(1), "CHANGELOG 顶部发布段应为 2.2.30")
+        self.assertEqual("2.2.31", top.group(1), "CHANGELOG 顶部发布段应为 2.2.31")
         self.assertIsNotNone(
             re.search(r"^## 2\.2\.24(?:\s|$)", text, flags=re.MULTILINE),
             "CHANGELOG 缺少 2.2.24 段",

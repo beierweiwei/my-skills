@@ -55,7 +55,7 @@ backlog.captainBlocks（T→C 阻塞映射）。
 剧本库校验（--playbooks）复用同一 Phase/Status 解析：Phase 必须位于 `## Phases`
 节内且每剧本至少 1 个合法 `### Phase N:`；每 Phase 恰一行
 `**Status:** pending|in_progress|complete`；Phase 条目只允许 `- [ ]` / `- [x]` /
-`- owner:` / `- plan:`；错误按 `rel:line: [rule] message` 输出（rc 1），路径不存在 rc 3。
+`- owner:` / `- plan:` / `- 依赖:` / `- 在途:`；错误按 `rel:line: [rule] message` 输出（rc 1），路径不存在 rc 3。
 
 看板布局（2.2.19 B「人类速读」）：现在状态一句（活跃流数/待立项数（无 plan、Backlog
 承载，不计入活跃）/最差健康/待 Captain/今日变化）+ 健康图例一行（🟢 完成/🟡 进行中/
@@ -205,7 +205,12 @@ BRIEF_TODAY_SCAN = 20  # 今日变化最多回看的 progress 条目数（顶部
 BRIEF_NEXT_STEP_CELL_MAX = 60  # 表内「下一步」单元格字符上限
 BRIEF_CAPTAIN_CELL_MAX = 120   # 待 Captain 摘要单行字符上限
 BRIEF_TODAY_CELL_MAX = 120     # 今日变化单行字符上限
-BRIEF_TABLE_HEADER = "| 流 | 阶段 | 阶段完成数/健康 | 下一步 | 待 Captain |"
+BRIEF_TABLE_HEADER = "| 流 | 阶段 | 阶段完成数/健康 | 下一步 | 待 Captain | 依赖 | 预计结束 |"
+# 2.2.31 board-align：Phase 结构化字段——`- 依赖:` 整行文本 + `- 在途:` 行的
+# 「预计结束 MM-DD」（容忍 `MM-DD HH:MM`）；lint 白名单与流表解析同口径。
+STRUCT_DEPS_RE = re.compile(r"^-\s*依赖:\s*(.*)$")
+STRUCT_ONGOING_RE = re.compile(r"^-\s*在途:\s*(.*)$")
+ETA_FIELD_RE = re.compile(r"预计结束\s*(\d{2}-\d{2})(?:\s+\d{1,2}:\d{2})?")
 
 # 2.2.26 T62-b：plan section 标题尾部括注归一——`## 最近完成（最近 5 条）` → 最近完成。
 SECTION_PAREN_RE = re.compile(r"[（(][^）)]*[）)]\s*$")
@@ -1062,18 +1067,64 @@ def _today_changes(root: Path, cfg: dict, today: str) -> list[str]:
     return lines
 
 
-def _stream_table_row(name: str, target: Plan | None, fallback_health: str = "") -> str:
+def _phase_struct_fields(plan: Plan, phase_name: str) -> tuple[str, str]:
+    """活跃 Phase 块的结构化字段（2.2.31 board-align）：（依赖, 预计结束 MM-DD）。
+
+    - 依赖：`- 依赖:` 行文本；无该行 → 「—」。
+    - 预计结束：`- 在途:` 行中「预计结束 MM-DD」（容忍 `MM-DD HH:MM`）；无该行/
+      无该字段/格式异常 → 「—」（格式异常由 --lint 卫生提醒提示，看板不猜）。
+    phase_name 不存在（如收口态别名）时返回双「—」。
+    """
+    deps, eta = "—", "—"
+    try:
+        lines = plan.path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return deps, eta
+    in_block = False
+    for line in lines:
+        head = PHASE_RE.match(line)
+        if head:
+            in_block = head.group(1) == phase_name
+            continue
+        if not in_block:
+            continue
+        if line.startswith("## "):
+            break
+        stripped = line.strip()
+        m = STRUCT_DEPS_RE.match(stripped)
+        if m:
+            deps = m.group(1).strip() or "—"
+            continue
+        m = STRUCT_ONGOING_RE.match(stripped)
+        if m:
+            eta_m = ETA_FIELD_RE.search(m.group(1))
+            if eta_m:
+                eta = eta_m.group(1)
+    return deps, eta
+
+
+def _stream_table_row(name: str, target: Plan | None, fallback_health: str = "",
+                      portfolio: Plan | None = None) -> str:
     """流表一行（看板与 --brief 同口径）：流/阶段/阶段完成数+健康/下一步一句话 ≤60 字符/
-    待 Captain 数；无 plan 的流按「Backlog 承载」占位。"""
+    待 Captain 数/依赖/预计结束（2.2.31 board-align 两列）；无 plan 的流按「Backlog 承载」占位。
+
+    依赖/预计结束读 portfolio 同名 Phase 块的 `- 依赖:`/`- 在途:` 行（单一来源；
+    name 即 portfolio Phase 名）；portfolio 缺省时回落 target plan 同名 Phase 块。"""
+    deps, eta = "—", "—"
+    fields_plan = portfolio if portfolio is not None else target
+    if fields_plan is not None:
+        deps, eta = _phase_struct_fields(fields_plan, name)
     if target is None:
-        return f"| {_clip(cell(name), BOARD_CELL_CLIP)} | — | —（Backlog 承载） | — | 0 |"
+        return f"| {_clip(cell(name), BOARD_CELL_CLIP)} | — | —（Backlog 承载） | — | 0 | {deps} | {eta} |"
     next_step = _next_step_pick(target)
     return (
         f"| {_clip(cell(name), BOARD_CELL_CLIP)} "
         f"| {_clip(cell(current_phase(target)), BOARD_CELL_CLIP)} "
         f"| {target.complete}/{target.total} {target.health or fallback_health} "
         f"| {cell(_clip(_todo_body(next_step), BRIEF_NEXT_STEP_CELL_MAX))} "
-        f"| {_stream_captain_count(target)} |"
+        f"| {_stream_captain_count(target)} "
+        f"| {cell(_clip(deps, BRIEF_NEXT_STEP_CELL_MAX))} "
+        f"| {eta} |"
     )
 
 
@@ -1127,9 +1178,9 @@ def _render_brief(root: Path, cfg: dict, plans: list[Plan]) -> tuple[list[str], 
                 streams.append((name, target))
         name_by_rel.setdefault(portfolio.rel, "portfolio")  # portfolio 自身条目标注简名
         captain = _captain_lines(plans, portfolio, cfg["backlog"]["captainPrefix"], name_by_rel)
-        out += [BRIEF_TABLE_HEADER, "|---|---|---|---|---|"]
+        out += [BRIEF_TABLE_HEADER, "|---|---|---|---|---|---|---|"]
         for name, target in streams[:BRIEF_MAX_STREAMS]:
-            out.append(_stream_table_row(name, target))
+            out.append(_stream_table_row(name, target, portfolio=portfolio))
         if len(streams) > BRIEF_MAX_STREAMS:
             out.append(f"- …另有 {len(streams) - BRIEF_MAX_STREAMS} 个活跃流"
                        "（见看板流表 / --handover）")
@@ -1469,12 +1520,15 @@ def _lint_file(path: Path, root: Path, playbook: bool = False) -> list[LintIssue
                 if BARE_ID_RE.match(body):
                     add(line_no, "裸编号", f"编号后必须跟任务描述：{body}")
                 continue
-            if re.match(r"^-\s*(?:plan|owner):\s*\S", stripped):
+            if re.match(r"^-\s*(?:plan|owner|依赖|在途):\s*\S", stripped):
                 continue
-            add(line_no, "Phase 项格式", f"Phase 项须为「- [ ]」/「- [x]」形式，实际：{stripped}")
+            add(line_no, "Phase 项格式",
+                f"Phase 项须为「- [ ]」/「- [x]」/「- owner:」/「- plan:」/"
+                f"「- 依赖:」/「- 在途:」形式，实际：{stripped}")
         elif playbook:
             add(line_no, "Phase 项格式",
-                f"Phase 项须为「- [ ]」/「- [x]」/「- owner:」/「- plan:」形式，实际：{stripped}")
+                f"Phase 项须为「- [ ]」/「- [x]」/「- owner:」/「- plan:」/"
+                f"「- 依赖:」/「- 在途:」形式，实际：{stripped}")
     close_phase()
     if playbook:
         if phases_section_line == 0:
@@ -1545,6 +1599,8 @@ def run_lint(plans: list[Plan], strict: bool = False) -> int:
 #   ③ 🟡 无 owner：未完成 Phase（pending/in_progress）含 `- [ ]` 项，整段无 `- owner:` 行。
 #   ④ 样板残留：Phase 标题 / Phase 项 / Next Step 以「示例|样例|占位|待填|TODO|TBD」开头，
 #      或整体为 `<...>` 占位（≤40 字符），且未标 ⏸。
+#   ⑤ 在途预计结束格式（2.2.31 board-align）：`- 在途:` 行含「预计结束」但不是
+#      `MM-DD`（容忍 `MM-DD HH:MM`）；异常时看板「预计结束」列显示「—」。
 # 完成流（有 Phase 且全部 complete）整体豁免：收口型 Next Step 与历史残留不再提醒（防误报）。
 # HTML 注释与 ``` fenced code 整段跳过；结构错误仍 rc=1（既有契约不变）。
 HYGIENE_NEXT_STEP_MAX = 200
@@ -1632,6 +1688,15 @@ def _hygiene_file(path: Path, root: Path) -> list[LintIssue]:
             continue
         if OWNER_LINE_RE.match(stripped):
             phase["owner"] = True
+            continue
+        if STRUCT_ONGOING_RE.match(stripped):
+            # 2.2.31 board-align 规则⑤：`- 在途:` 行带「预计结束」但不是
+            # MM-DD（容忍 MM-DD HH:MM）→ 卫生提醒（默认不阻断，--strict 才 rc=1）。
+            body = STRUCT_ONGOING_RE.match(stripped).group(1)
+            if "预计结束" in body and not ETA_FIELD_RE.search(body):
+                add(line_no, "在途预计结束格式",
+                    "「- 在途:」行的预计结束应为 `预计结束 MM-DD`"
+                    "（容忍 `MM-DD HH:MM`）；异常时看板列显示「—」")
             continue
         box = CHECKBOX_RE.match(stripped)
         if box:
@@ -1846,9 +1911,10 @@ def render(plans: list[Plan], cfg: dict, archive: str | None = None) -> str:
     done = [(name, target) for name, target, _ in streams
             if target is not None and target.complete >= target.total]
     visible = active + pending
-    out += ["", "## 流表", "", BRIEF_TABLE_HEADER, "|---|---|---|---|---|"]
+    out += ["", "## 流表", "", BRIEF_TABLE_HEADER, "|---|---|---|---|---|---|---|"]
     for name, target in visible:
-        out.append(_stream_table_row(name, target, fallback_health))
+        out.append(_stream_table_row(name, target, fallback_health,
+                                     portfolio=portfolio))
     if done:
         out.append(f"> …已完成 {len(done)} 条（见各流 plan / --handover）")
     elif not visible:
@@ -2001,7 +2067,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--brief",
         action="store_true",
-        help=f"一屏摘要（≤{BRIEF_MAX_LINES} 行）：活跃流表（流/阶段/阶段完成数+健康/下一步/待 Captain）"
+        help=f"一屏摘要（≤{BRIEF_MAX_LINES} 行）：活跃流表（流/阶段/阶段完成数+健康/下一步/待 Captain/依赖/预计结束）"
              "+ 待 Captain 摘要 + 今日变化（progress 今日条目 ≤3 行）；只读 .planning，不写文件",
     )
     parser.add_argument(
@@ -2010,7 +2076,7 @@ def main(argv: list[str] | None = None) -> int:
         help="剧本库结构校验：PATH 为文件或目录（目录取 *.md、跳过 README.md）；"
              "Phase 必须位于 `## Phases` 节内且每剧本至少 1 个「### Phase N:」，"
              "每 Phase 恰一行 **Status:** pending|in_progress|complete，"
-             "Phase 条目只用 - [ ]/- [x]/- owner:/- plan:"
+             "Phase 条目只用 - [ ]/- [x]/- owner:/- plan:/- 依赖:/- 在途:"
              "（失败按 文件:行号 列出并非零退出；路径不存在 rc=3）",
     )
     parser.add_argument("--root", help="目标仓根目录（默认：cwd 向上找 .planning）")

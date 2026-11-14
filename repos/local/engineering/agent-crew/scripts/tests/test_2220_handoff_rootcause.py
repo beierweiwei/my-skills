@@ -254,8 +254,8 @@ class HandoffContinueReverseLookupTest(GuardFixture):
         second = guard.run_once()
         self.assertEqual("done", second["handoff"]["action"])
         self.assertEqual(
-            [["pane", "close", "--pane", "wQ:pRQ"],
-             ["tab", "close", "--tab", "wQ:tGS"]],
+            [["pane", "close", "--pane", "wQ:pRQ", "--caller", "guard"],
+             ["tab", "close", "--tab", "wQ:tGS", "--caller", "guard"]],
             self.close_calls(),
         )
         fields = self.handoff_fields()
@@ -272,8 +272,8 @@ class HandoffContinueReverseLookupTest(GuardFixture):
         self.agents[1]["agent_status"] = "idle"
         guard.run_once()
         self.assertEqual(
-            [["pane", "close", "--pane", "wQ:pRQ"],
-             ["tab", "close", "--tab", "wQ:tGS"]],
+            [["pane", "close", "--pane", "wQ:pRQ", "--caller", "guard"],
+             ["tab", "close", "--tab", "wQ:tGS", "--caller", "guard"]],
             self.close_calls(),
         )
         fields = self.handoff_fields()
@@ -313,7 +313,7 @@ class HandoffContinueReverseLookupTest(GuardFixture):
         guard.run_once()
         self.agents[1]["agent_status"] = "idle"
         guard.run_once()
-        self.assertEqual([["pane", "close", "--pane", "wQ:pRQ"]], self.close_calls())
+        self.assertEqual([["pane", "close", "--pane", "wQ:pRQ", "--caller", "guard"]], self.close_calls())
         fields = self.handoff_fields()
         self.assertEqual("done", fields["phase"])
         self.assertEqual("ok", fields["result"])
@@ -351,8 +351,8 @@ class DoneReclaimTest(GuardFixture):
         guard = self.make_guard()
         guard.run_once()
         self.assertEqual(
-            [["pane", "close", "--pane", "wQ:pRQ"],
-             ["tab", "close", "--tab", "wQ:tGS"]],
+            [["pane", "close", "--pane", "wQ:pRQ", "--caller", "guard"],
+             ["tab", "close", "--tab", "wQ:tGS", "--caller", "guard"]],
             self.close_calls(),
         )
         fields = self.handoff_fields()
@@ -562,7 +562,7 @@ class PaneAuditHelmReclaimTest(unittest.TestCase):
         extra = list(extra or [])
         recorded = {"calls": []}
 
-        def fake_dispatch_runner(root: Path):
+        def fake_dispatch_runner(root: Path, caller: str = ""):  # caller：工单 08 B-1
             def runner(kind: str, target: str) -> bool:
                 recorded["calls"].append((str(root), kind, target))
                 return True

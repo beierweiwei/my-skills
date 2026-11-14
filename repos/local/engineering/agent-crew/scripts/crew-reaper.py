@@ -842,7 +842,8 @@ def execute_actions(report: Report, dispatch) -> None:
     for action in report.actions:
         if action.action == "pane close":
             code, output, error = _safe_dispatch(
-                dispatch, ["pane", "close", "--pane", action.target],
+                dispatch, ["pane", "close", "--pane", action.target,
+                "--caller", "crew-reaper"],
             )
             if code == 0:
                 action.status = "closed"
@@ -858,7 +859,8 @@ def execute_actions(report: Report, dispatch) -> None:
             action.reason += "；同 tab pane 关闭失败，跳过 tab 关闭"
             continue
         code, output, error = _safe_dispatch(
-            dispatch, ["tab", "close", "--tab", action.target],
+            dispatch, ["tab", "close", "--tab", action.target,
+                "--caller", "crew-reaper"],
         )
         if code == 0:
             action.status = "closed"

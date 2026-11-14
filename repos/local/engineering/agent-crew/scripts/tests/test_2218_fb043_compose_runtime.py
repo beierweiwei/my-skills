@@ -279,7 +279,8 @@ class ComposeRuntimeTest(unittest.TestCase):
         start_errors = "\n".join(json.loads(proc.stdout)["errors"])
         self.assertIn("注册表不可读/损坏", start_errors)
         self.assertIn("--runtime qoder", start_errors)
-        self.assertEqual([], self.herdr_calls())
+        self.assertEqual([], [c for c in self.herdr_calls() if c != ["agent", "list"]],
+                    "除容量门只读 agent list（07B）外不得有 herdr 调用")
 
     def test_unreadable_registry_rejects_with_guidance(self):
         self.write_role("opencode", "builder")
@@ -370,7 +371,8 @@ class ComposeRuntimeTest(unittest.TestCase):
         payload = json.loads(proc.stdout)
         self.assertTrue(payload["errors"], payload)
         self.assertIn("--runtime", "\n".join(payload["errors"]))
-        self.assertEqual([], self.herdr_calls())
+        self.assertEqual([], [c for c in self.herdr_calls() if c != ["agent", "list"]],
+                    "除容量门只读 agent list（07B）外不得有 herdr 调用")
 
 
 if __name__ == "__main__":

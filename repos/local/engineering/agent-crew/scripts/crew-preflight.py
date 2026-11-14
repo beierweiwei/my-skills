@@ -305,6 +305,42 @@ def _git_worktree_roots(root: Path) -> list[Path]:
     return roots
 
 
+def check_capacity(root: Path, herdr_bin: str = "herdr") -> dict:
+    """容量检查（2.2.31 工单 07B）：与 dispatch capacity/guard 同口径计数；
+    ok ≤warn / warn >warn / hard ≥hard（满编，dispatch 拒新增口径）；仅展示，
+    不改变五项结构与退出码语义。工单 08 B-3：读 config 传 helm_name（总舵排除）
+    并剥 herdr result 包装——四处同数字。"""
+    import crew_capacity
+    helm_name = ""
+    try:
+        data = json.loads((root / ".planning" / "orchestration.json")
+                          .read_text(encoding="utf-8"))
+        helm = data.get("helm") if isinstance(data, dict) else None
+        helm_name = str((helm or {}).get("agentName") or "").strip()
+    except (OSError, ValueError):
+        pass
+    try:
+        proc = subprocess.run(
+            [herdr_bin, "agent", "list"],
+            text=True, capture_output=True, check=False, timeout=HERDR_TIMEOUT,
+            env={**os.environ, "HERDR_ENV": "1"},
+        )
+        payload = json.loads(proc.stdout) if proc.returncode == 0 else {}
+        result = payload.get("result") if isinstance(payload, dict) else None
+        agents = (result.get("agents") if isinstance(result, dict)
+                  else payload.get("agents") if isinstance(payload, dict) else payload)
+        cap = crew_capacity.count_crew_agents(agents or [], root, helm_name)
+        cfg = crew_capacity.load_capacity_config(root)
+        total = cap["total"]
+        level = ("ok" if total <= cfg["warn"]
+                 else "warn" if total < cfg["hard"] else "hard")
+        return {"capacity": f"{total} 工位（warn={cfg['warn']} hard={cfg['hard']}）",
+                "level": level, "names": cap["names"]}
+    except Exception as exc:  # noqa: BLE001 - 容量检查失败不影响其余五项
+        return {"capacity": f"不可用：{type(exc).__name__}: {exc}", "level": "unknown",
+                "names": []}
+
+
 def check_agents(root: Path, herdr_bin: str = "herdr") -> dict:
     source = f"{herdr_bin} agent list + pane read"
     try:
@@ -472,13 +508,23 @@ def collect_checks(root: Path, wake_ttl: int,
         crew_error = ""
     except CrewPathsError as exc:
         crew, crew_error = None, str(exc)
-    return [
+    checks = [
         check_wake(crew, wake_ttl, crew_error),
         check_inbox(crew, crew_error, full=full),
         check_agents(root),
         check_board(root),
         check_guard(crew, crew_error),
-    ], crew, crew_error
+    ]
+    # 2.2.31 工单 07B：容量附项（同口径计数；展示不阻断——healthy 仍按既有五项）
+    capacity = check_capacity(root)
+    capacity_check = {
+        "id": "capacity",
+        "label": "工位容量（附项）",
+        "available": capacity["level"] != "unknown",
+        "ok": capacity["level"] in ("ok", "warn"),
+        "detail": f"{capacity['capacity']} level={capacity['level']}",
+    }
+    return [*checks, capacity_check], crew, crew_error
 
 
 def render_text(root: Path, crew: Path | None, crew_error: str,
@@ -524,7 +570,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     root = Path(args.root).expanduser().resolve() if args.root else SCRIPT_ROOT
     checks, crew, crew_error = collect_checks(root, args.wake_ttl, full=args.full)
-    healthy = all(item["available"] and item["ok"] for item in checks)
+    healthy = all(item["available"] and item["ok"] for item in checks
+                 if item.get("id") != "capacity")  # 07B：附项不改变退出码语义
     if args.json:
         print(json.dumps({
             "generated_at": utc_now(),

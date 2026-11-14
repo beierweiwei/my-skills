@@ -732,7 +732,7 @@ class BlockedSlaTest(GuardTestBase):
              "approvalWaitMinutes": 15, "approvalRepeatMinutes": 30,
              "approvalGraceMinutes": 60, "approvalMaxAgeMinutes": 240,
              "wakeCooldownMinutes": 10, "pendingHeartbeatMinutes": 15,
-             "idleWakeRounds": 30},
+             "idleWakeRounds": 0},
             cg.load_config(self.root)["guard"],
         )
         cases = (
@@ -1497,8 +1497,8 @@ class HandoffTest(GuardTestBase):
         closes = [c for c in self.dispatch_calls
                   if c[:2] in (["pane", "close"], ["tab", "close"])]
         self.assertEqual(
-            [["pane", "close", "--pane", self.OLD_PANE],
-             ["tab", "close", "--tab", "wX:tOLD"]],
+            [["pane", "close", "--pane", self.OLD_PANE, "--caller", "guard"],
+             ["tab", "close", "--tab", "wX:tOLD", "--caller", "guard"]],
             closes,
         )
         fields = self.handoff_fields()
@@ -1533,7 +1533,7 @@ class HandoffTest(GuardTestBase):
         guard.run_once()
         closes = [c for c in self.dispatch_calls
                   if c[:2] in (["pane", "close"], ["tab", "close"])]
-        self.assertEqual([["pane", "close", "--pane", self.OLD_PANE]], closes)
+        self.assertEqual([["pane", "close", "--pane", self.OLD_PANE, "--caller", "guard"]], closes)
         fields = self.handoff_fields()
         self.assertEqual("done", fields["phase"])
         self.assertEqual("ok", fields["result"])
@@ -1587,7 +1587,7 @@ class HandoffTest(GuardTestBase):
         guard.run_once()
         closes = [c for c in self.dispatch_calls
                   if c[:2] in (["pane", "close"], ["tab", "close"])]
-        self.assertEqual([["pane", "close", "--pane", self.OLD_PANE]], closes)
+        self.assertEqual([["pane", "close", "--pane", self.OLD_PANE, "--caller", "guard"]], closes)
         fields = self.handoff_fields()
         self.assertEqual("done", fields["phase"])
         self.assertEqual("ok", fields["result"])
@@ -1615,7 +1615,7 @@ class HandoffTest(GuardTestBase):
         guard.run_once()
         closes = [c for c in self.dispatch_calls
                   if c[:2] in (["pane", "close"], ["tab", "close"])]
-        self.assertEqual([["pane", "close", "--pane", self.OLD_PANE]], closes)
+        self.assertEqual([["pane", "close", "--pane", self.OLD_PANE, "--caller", "guard"]], closes)
         fields = self.handoff_fields()
         self.assertEqual("done", fields["phase"])
         self.assertEqual("ok", fields["result"])
@@ -1744,9 +1744,9 @@ class HandoffPaneCountTest(GuardTestBase):
         self.make_guard().run_once()
 
         close_calls = [c for c in self.dispatch_calls if c[:2] == ["pane", "close"]]
-        self.assertEqual([["pane", "close", "--pane", "wX:pEXTRA"]], close_calls)
+        self.assertEqual([["pane", "close", "--pane", "wX:pEXTRA", "--caller", "guard"]], close_calls)
         close_index = self.dispatch_calls.index(
-            ["pane", "close", "--pane", "wX:pEXTRA"])
+            ["pane", "close", "--pane", "wX:pEXTRA", "--caller", "guard"])
         start_index = next(
             index for index, call in enumerate(self.dispatch_calls)
             if call[:1] == ["start"]
@@ -1798,7 +1798,8 @@ class HandoffPaneCountTest(GuardTestBase):
         self.dispatch_override = override
         self.make_guard().run_once()
 
-        self.assertIn(["pane", "close", "--pane", "wX:pEXTRA"], self.dispatch_calls)
+        self.assertIn(["pane", "close", "--pane", "wX:pEXTRA", "--caller", "guard"],
+                      self.dispatch_calls)
         self.assertIn("start", [c[0] for c in self.dispatch_calls])
         fields = self.handoff_fields()
         self.assertEqual("started", fields["phase"])
@@ -2159,8 +2160,8 @@ class Fb008HandoffEdgeCaseTest(GuardTestBase):
         done = guard.run_once()
         self.assertEqual("done", done["handoff"]["action"])
         self.assertEqual(
-            [["pane", "close", "--pane", self.OLD_PANE],
-             ["tab", "close", "--tab", "wX:tOLD"]],
+            [["pane", "close", "--pane", self.OLD_PANE, "--caller", "guard"],
+             ["tab", "close", "--tab", "wX:tOLD", "--caller", "guard"]],
             self.closes(),
         )
         self.assertEqual("done", self.handoff_fields()["phase"])
@@ -2900,6 +2901,23 @@ BACKLOG_PAUSED_MIXED_PORTFOLIO = """# Task Plan: 总览
 | T3 | 待拍板事项 | P1 | - | ⏸ 待 Captain |
 """
 
+# —— 2.2.31：已完成判定先于 ⏸/外部标记匹配（guard-noise 流根因 1）——
+# 真实形态（本仓 portfolio T40–T49）：「✅ 已完成（…发布…；待 Captain 签认）」。
+# 已完成行带「待 Captain 签认」「⏸」后缀时不得误入暂停桶；「✅」单独出现也算完成。
+BACKLOG_DONE_VARIANTS_PORTFOLIO = """# Task Plan: 总览
+
+## Backlog
+
+| # | 目标 | P | 依赖 | 阻塞 |
+|---|---|---|---|---|
+| T1 | 完成带签认 | P1 | - | ✅ 已完成（2.2.16 本地发布；待 Captain 签认） |
+| T2 | 完成带暂停 | P1 | - | 已完成 ⏸ |
+| T3 | 完成勾号 | P1 | - | ✅ |
+| T4 | 完成英文 | P1 | - | done（待 Captain 签认） |
+| T5 | 未完成待Captain | P1 | - | 待 Captain |
+| T6 | 未完成暂停 | P1 | - | ⏸ 下批 |
+"""
+
 HELM_IDLE = {"name": "helm-1", "agent_status": "idle"}
 
 
@@ -2964,6 +2982,21 @@ class BacklogPausedScanTest(GuardTestBase):
         second = guard.run_once()
         self.assertFalse(second["woke"], "排队 ⏸ 不触发两轮 debounce 即时叫醒")
         self.assertEqual(self.prompt_calls, [])
+
+    def test_done_rows_with_pause_suffix_never_enter_any_bucket(self):
+        """2.2.31 根因 1：已完成判定先于 ⏸/外部标记匹配——已完成行不进任何桶。"""
+        self.write_fixture(stream=EMPTY_STREAM,
+                           portfolio=BACKLOG_DONE_VARIANTS_PORTFOLIO)
+        pending, residual, paused = cg.scan_todos(self.root)
+        # T1「✅ 已完成（…；待 Captain 签认）」/ T2「已完成 ⏸」/ T3「✅」/
+        # T4「done（待 Captain 签认）」：不进 pending、不进 ⏸ 待外部/排队、不进 ⛔。
+        self.assertEqual(pending, [], "已完成行不得进 pending")
+        self.assertEqual(residual, [])
+        # 对照：未完成行不受影响——「待 Captain」仍归 ⏸ 待外部、「⏸ 下批」仍归排队。
+        self.assertEqual([todo.text for todo in paused],
+                         ["⏸ 待外部：T5 未完成待Captain",
+                          "⏸ 排队：T6 未完成暂停（⏸ 下批）"],
+                         "暂停桶只含未完成对照行，已完成行不得混入")
 
 
 class IdleBackoffWakeTest(GuardTestBase):
@@ -3090,6 +3123,186 @@ class IdleBackoffWakeTest(GuardTestBase):
         self.assertIn("⏸ 排队", message)
         self.assertIn("⏸ 待外部", message)
         self.assertIn("T3 待拍板事项", message)
+
+
+# —— 2.2.31：idleWakeRounds=0 状态变化驱动兜底（guard-noise 流要件 1–7）——
+# 首次基线不叫醒；变化（任一桶集合 diff）→ 下一轮叫醒一次只含增量；无变化完全
+# 静默（guard.log 每 30 轮心跳行）；被冷却吞掉的增量持久化、冷却期满补发一次；
+# ⏸ 排队条目「今天 ≥ 文本中 YYYY-MM-DD」视为到期变化；基线落盘跨重启可比较。
+QUEUE_WITH_DATE_PORTFOLIO = """# Task Plan: 总览
+
+## Backlog
+
+| # | 目标 | P | 依赖 | 阻塞 |
+|---|---|---|---|---|
+| T1 | 下批技能小修 | P1 | - | ⏸ 下批 |
+| T9 | 到期复盘 | P2 | - | ⏸ 复盘 2026-11-20 或第 5 次先到者 |
+"""
+
+QUEUE_ADDED_ROW_PORTFOLIO = """# Task Plan: 总览
+
+## Backlog
+
+| # | 目标 | P | 依赖 | 阻塞 |
+|---|---|---|---|---|
+| T1 | 下批技能小修 | P1 | - | ⏸ 下批 |
+| T2 | 等评估收尾 | P2 | - | ⏸ 评估中 |
+| T7 | 新排队项 | P2 | - | ⏸ 下批 2026-12-01 |
+"""
+
+
+class IdleChangeWakeTest(GuardTestBase):
+    """2.2.31 状态变化驱动：idleWakeRounds=0 新口径，行为断言（F8 真驱动 run_once）。"""
+
+    def quiet0(self, portfolio: str = BACKLOG_PAUSED_QUEUE_PORTFOLIO) -> None:
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=portfolio,
+                           config={"guard": {"idleWakeRounds": 0}})
+
+    def settle(self, guard: "cg.Guard", rounds: int) -> None:
+        """推进 N 轮安静期（每轮推进时钟避开冷却纠缠），断言全程零叫醒。"""
+        for _ in range(rounds):
+            self.now[0] += 700
+            result = guard.run_once()
+            self.assertFalse(result["woke"], "安静无变化轮不得叫醒")
+        self.assertEqual(self.prompt_calls, [])
+
+    def test_first_run_builds_baseline_silently_and_state_file_exists(self):
+        self.quiet0()
+        self.agents = [HELM_IDLE]
+        guard = self.make_guard()
+        result = guard.run_once()
+        self.assertFalse(result["woke"], "首轮建基线不叫醒（防升级即叫）")
+        self.assertEqual(self.prompt_calls, [])
+        state = json.loads((self.crew / "guard.state.json").read_text(encoding="utf-8"))
+        self.assertTrue(state["buckets"]["paused"], "基线含 paused 桶")
+        self.assertIn("digest", state)
+
+    def test_quiet_rounds_stay_silent_and_log_heartbeat_every_30(self):
+        self.quiet0()
+        self.agents = [HELM_IDLE]
+        guard = self.make_guard()
+        self.settle(guard, 31)
+        heartbeats = [line for line in self.logs if "存活心跳" in line]
+        self.assertEqual(len(heartbeats), 1, "每 30 轮写一行存活心跳（第 30 轮）")
+
+    def test_paused_addition_wakes_once_with_delta_only(self):
+        self.quiet0()
+        self.agents = [HELM_IDLE]
+        guard = self.make_guard()
+        self.settle(guard, 2)
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=QUEUE_ADDED_ROW_PORTFOLIO,
+                           config={"guard": {"idleWakeRounds": 0}})
+        self.now[0] += 700
+        result = guard.run_once()
+        self.assertTrue(result["woke"], "Backlog 排队新增 → 下一轮即叫醒")
+        self.assertTrue(result.get("idleChangeWake"))
+        message = self.prompt_calls[0][1]
+        self.assertIn("T7 新排队项", message, "消息含变化增量")
+        self.assertNotIn("报平安", message, "新口径不再发报平安全量格式")
+        # 同一状态连续多轮不重复叫醒（含冷却过期后）
+        for _ in range(3):
+            self.now[0] += 700
+            result = guard.run_once()
+            self.assertFalse(result["woke"], "同状态不重复叫醒")
+        self.assertEqual(len(self.prompt_calls), 1)
+
+    def test_swallowed_change_replayed_after_cooldown(self):
+        # 要件 7：变化只受全局冷却；冷却内再次变化被吞 → 持久化，冷却期满补发一次。
+        # （桶收窄后 workers 进出不进指纹、非安静期兜底不介入——既有通道行为不变。）
+        self.quiet0()
+        self.agents = [HELM_IDLE]
+        guard = self.make_guard()
+        self.settle(guard, 2)
+        # 安静期 paused 新增 → 兜底叫醒（last_wake_at 计时起点）
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=QUEUE_ADDED_ROW_PORTFOLIO,
+                           config={"guard": {"idleWakeRounds": 0}})
+        self.now[0] += 700
+        result = guard.run_once()
+        self.assertTrue(result["woke"] and result.get("idleChangeWake"), "paused 新增叫醒")
+        # 冷却（默认 10 分钟）内 paused 再变（T7 移除）→ 被吞、持久化
+        self.write_fixture(stream=EMPTY_STREAM,
+                           portfolio=BACKLOG_PAUSED_QUEUE_PORTFOLIO,
+                           config={"guard": {"idleWakeRounds": 0}})
+        self.now[0] += 60
+        result = guard.run_once()
+        self.assertFalse(result["woke"], "冷却中被吞")
+        state = json.loads((self.crew / "guard.state.json").read_text(encoding="utf-8"))
+        self.assertTrue(state.get("pendingNotify"), "被吞增量持久化在 state")
+        self.assertTrue(any("留待补发" in line for line in self.logs), "被吞记日志")
+        # 冷却期满：补发一次（含移除增量）
+        self.now[0] += 700
+        result = guard.run_once()
+        self.assertTrue(result["woke"], "冷却期满补发一次")
+        message = self.prompt_calls[-1][1]
+        self.assertIn("T7 新排队项", message, "补发消息含移除增量")
+        self.now[0] += 700
+        self.assertFalse(guard.run_once()["woke"], "补发后不重复")
+
+    def test_worker_change_leaves_wake_to_existing_channels(self):
+        # 桶收窄（实现取舍）：pending/worker 变化打断安静期，由既有通道承载
+        # （fast_wake/pending 主叫醒），新兜底不介入——2.2.30 已验收行为不改变。
+        self.quiet0()
+        self.agents = [HELM_IDLE]
+        guard = self.make_guard()
+        self.settle(guard, 2)
+        self.agents = [HELM_IDLE, {"name": "worker-1", "agent_status": "working"}]
+        self.now[0] += 700
+        result = guard.run_once()
+        self.assertFalse(result["woke"], "worker 进入不触发状态变化兜底")
+        self.assertFalse(result.get("idleChangeWake"))
+        self.assertEqual(self.prompt_calls, [])
+        state = json.loads((self.crew / "guard.state.json").read_text(encoding="utf-8"))
+        self.assertNotIn("workers", state["buckets"], "指纹只含盲区两桶")
+        self.agents = [HELM_IDLE]
+        self.now[0] += 700
+        result = guard.run_once()
+        self.assertTrue(result["woke"], "worker 消失仍走完成边沿叫醒")
+        self.assertFalse(result.get("idleChangeWake"), "该叫醒来自 fast_wake 通道")
+        self.assertIn("worker 完成待核收", self.prompt_calls[-1][1])
+
+    def test_due_queue_entry_wakes_once_on_date(self):
+        # 要件 5：⏸ 排队条目「今天 ≥ 文本到期日」视为状态变化，一次性叫醒。
+        self.quiet0(portfolio=QUEUE_WITH_DATE_PORTFOLIO)
+        self.agents = [HELM_IDLE]
+        self.now[0] = datetime(2026, 11, 13, 12, 0, 0).timestamp()
+        guard = self.make_guard()
+        self.settle(guard, 2)  # 到期前安静
+        self.now[0] = datetime(2026, 11, 21, 12, 0, 0).timestamp()
+        result = guard.run_once()
+        self.assertTrue(result["woke"], "到期日已过 → 当轮叫醒")
+        self.assertTrue(result.get("idleChangeWake"))
+        message = self.prompt_calls[0][1]
+        self.assertIn("T9 到期复盘", message)
+        self.assertIn("到期", message)
+        self.now[0] += 700
+        self.assertFalse(guard.run_once()["woke"], "到期只触发一次")
+
+    def test_restart_same_state_does_not_rewake(self):
+        # 断言：基线在盘不在内存——重启后同状态不重复叫醒。
+        self.quiet0()
+        self.agents = [HELM_IDLE]
+        guard = self.make_guard()
+        self.settle(guard, 2)
+        successor = self.make_guard()  # 模拟重启：全新实例，内存态为空
+        result = successor.run_once()
+        self.assertFalse(result["woke"], "重启后同状态不重复叫醒")
+        self.assertEqual(self.prompt_calls, [])
+
+    def test_legacy_rounds_keep_report_ping_behavior(self):
+        # 兼容口径：idleWakeRounds>0 保留旧兜底（报平安全量清单），新机制不介入。
+        self.write_fixture(stream=EMPTY_STREAM,
+                           portfolio=BACKLOG_PAUSED_QUEUE_PORTFOLIO,
+                           config={"guard": {"idleWakeRounds": 3}})
+        self.agents = [HELM_IDLE]
+        guard = self.make_guard()
+        for _ in range(3):
+            result = guard.run_once()
+        self.assertTrue(result["woke"])
+        self.assertTrue(result.get("idleWake"), "旧口径仍走 idleWake 兜底")
+        self.assertFalse(result.get("idleChangeWake"))
+        self.assertIn("报平安", self.prompt_calls[0][1])
+        state = json.loads((self.crew / "guard.state.json").read_text(encoding="utf-8"))
+        self.assertIsNone(state.get("pendingNotify"), "旧口径不维护补发队列")
 
 
 if __name__ == "__main__":

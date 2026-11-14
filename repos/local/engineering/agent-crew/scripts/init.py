@@ -51,7 +51,7 @@ TEMPLATES = SKILL_DIR / "templates"
 MARK_START = "<!-- agent-crew:orchestration:start -->"
 MARK_END = "<!-- agent-crew:orchestration:end -->"
 MARK_PREFIX = "<!-- agent-crew:orchestration:"
-SKILL_VERSION_FALLBACK = "2.2.30"
+SKILL_VERSION_FALLBACK = "2.2.31"
 
 CONFIG_REL = Path(".planning/orchestration.json")
 MANIFEST_REL = Path("docs/crew/manifest.json")
@@ -95,6 +95,7 @@ SCRIPT_MANIFEST = [
     "upgrade.py",
     "crew_paths.py",
     "crew_approvals.py",
+    "crew_capacity.py",  # 2.2.31 工单 07B：容量计数/配置共用（dispatch 依赖）
     "start-agent.sh",
     "start-helm.sh",
     "helm_agent_name.py",
@@ -171,6 +172,9 @@ DEFAULT_CONFIG: dict = {
     "aopReference": "",
     "helm": {"tabLabel": "总舵", "expectedModel": "", "agentName": ""},
     "retro": {"enabled": True, "periodDays": 7},
+    # 工位容量硬检查（2.2.31 工单 07B，Captain 直令 7/10）：warn 警告、
+    # hard 强制回收+拒建；夹取 warn≥1、hard≥warn；doctor >warn=warn >hard=fail
+    "capacity": {"warn": 7, "hard": 10},
     "roles": DEFAULT_ROLES,
     "agents": DEFAULT_AGENTS,
     "hooks": DEFAULT_HOOKS,

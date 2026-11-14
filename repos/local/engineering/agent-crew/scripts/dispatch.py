@@ -33,6 +33,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -45,6 +46,9 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # spec 加载时保 crew_capacity 可导入
+import crew_capacity  # noqa: E402  # 2.2.31 工单 07B：容量计数/配置共用
 
 sys.dont_write_bytecode = True  # 不在项目 scripts/ 留 __pycache__
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -271,6 +275,21 @@ def write_json_atomic(path: Path, data: object) -> None:
 
 def load_json(path: Path) -> object:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def resolve_caller(explicit: str | None) -> tuple[str, str]:
+    """close 动作调用方归因（FB-061，2.2.31 工单 06）：--caller > 环境变量
+    CREW_CALLER > 缺省 `dispatch`（CLI 直调）。值原样透传（未知值不拒绝）；
+    推断任何一步失败都不报错，返回 (caller, caller_source)。"""
+    if explicit and str(explicit).strip():
+        return str(explicit).strip(), "flag"
+    try:
+        env = os.environ.get("CREW_CALLER", "").strip()
+    except Exception:  # noqa: BLE001 - 环境读取异常按缺省处理
+        env = ""
+    if env:
+        return env, "env"
+    return "dispatch", "default"
 
 
 def append_log(root: Path, row: dict) -> None:
@@ -926,17 +945,64 @@ def require_herdr() -> str:
     return path
 
 
-def run_herdr(argv: list[str]) -> str:
+def run_herdr(argv: list[str], timeout: int | None = None) -> str:
+    """timeout：herdr 调用上界秒数（2.2.31 工单 07B 建议 9——持 registry.lock
+    的调用必须带上界，防持锁卡死；None=不限，仅非持锁路径使用）。"""
     require_herdr()
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, check=False)
+        proc = subprocess.run(argv, capture_output=True, text=True, check=False,
+                              timeout=timeout)
     except OSError as exc:
         raise DispatchError(f"herdr 调用失败：{exc}", 3) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise DispatchError(
+            f"herdr 调用超时（>{exc.timeout}s）：{' '.join(argv)}", 3) from exc
     if proc.returncode != 0:
         raise DispatchError(
             f"herdr 命令失败（rc={proc.returncode}）：{' '.join(argv)}\n{proc.stderr.strip()}"
         )
     return proc.stdout
+
+
+HERDR_LOCKED_TIMEOUT = 15
+
+
+def herdr_agents_locked() -> list[dict]:
+    """持 registry.lock 期间的 herdr agent list（带上界 timeout，建议 9）。
+
+    工单 08 B-3：剥 herdr `{"result":{"agents":[...]}}` 包装——与 herdr_agents
+    同解析（真实输出带包装，漏剥会使拒建门恒数 0、从不拒建）。"""
+    output = run_herdr(["herdr", "agent", "list"], timeout=HERDR_LOCKED_TIMEOUT)
+    try:
+        payload = json.loads(output)
+    except ValueError as exc:
+        raise DispatchError(f"herdr agent list 输出非 JSON：{exc}", 3) from exc
+    result = payload.get("result") if isinstance(payload, dict) else None
+    agents = (result.get("agents") if isinstance(result, dict)
+              else payload.get("agents") if isinstance(payload, dict) else payload)
+    return [item for item in agents or [] if isinstance(item, dict)]
+
+
+@contextlib.contextmanager
+def registry_lock(root: Path):
+    """工位容量临界区锁（2.2.31 工单 07B B2）：`<crew-dir>/registry.lock`
+    独立锁文件——禁止复用 guard.lock（guard 单实例锁）或 crew-state 锁；
+    第三方持 guard.lock 不影响本锁。LOCK_NB 快速失败，锁忙错误与容量拒建
+    可区分（rc=3 + 「锁忙」文案）。flock 随进程退出自动释放仅作兜底。"""
+    import fcntl
+    path = crew_dir(root) / "registry.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("w")
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise DispatchError(
+                "工位注册表锁忙（registry.lock 被其它 dispatch start/close 持有），"
+                "请稍后重试；该错误与容量拒建无关", 3) from exc
+        yield
+    finally:
+        handle.close()
 
 
 def herdr_agents_detail() -> list[dict]:
@@ -1580,7 +1646,9 @@ def deliver_qoder(outcome: ComposeOutcome, name: str, pane: str,
         argv.extend(["--permission-mode", permission_mode])
     # Qoder 会话名对齐 Herdr/dispatch 启动名，保证 SendMessage/peer 可互认
     argv.extend(["--name", name])
-    run_herdr(argv)
+    # 工单 08 建议 4：deliver 在 cmd_start 的 registry.lock 临界区内执行，
+    # herdr 调用必须带上界（防持锁卡死；超时按 rc=3 报出，不静默）。
+    run_herdr(argv, timeout=HERDR_LOCKED_TIMEOUT)
     return {
         "delivery": "composed-agent",
         "composePath": str(run_dir),
@@ -1607,7 +1675,7 @@ def deliver_opencode(outcome: ComposeOutcome, name: str, pane: str, run_dir: Pat
         "--",
         "--agent", f"crew-{outcome.role_id}",
         *(["-m", model] if model else []),
-    ])
+    ], timeout=HERDR_LOCKED_TIMEOUT)  # 工单 08 建议 4：持锁上界
     return {
         "delivery": "composed-agent",
         "composePath": str(run_dir),
@@ -1664,11 +1732,12 @@ def deliver_claude(outcome: ComposeOutcome, name: str, pane: str,
         tail.extend(["--model", model])
     if tail:
         argv.extend(["--"] + tail)
-    run_herdr(argv)
+    run_herdr(argv, timeout=HERDR_LOCKED_TIMEOUT)  # 工单 08 建议 4：持锁上界
     first_message = CLAUDE_FIRST_INJECT_TEMPLATE.format(
         name=name, role=outcome.role_id, agent_rel=agent_rel.as_posix())
     try:
-        run_herdr(["herdr", "agent", "prompt", name, first_message])
+        run_herdr(["herdr", "agent", "prompt", name, first_message],
+                  timeout=HERDR_LOCKED_TIMEOUT)
     except DispatchError:
         raise DispatchError(
             f"{name} 已启动但角色装配未注入（herdr prompt 失败）；人工补注入："
@@ -1714,6 +1783,44 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
         for error in preflight:
             print(f"[拒绝] {error}", file=sys.stderr)
         return 1
+
+    # —— 2.2.31 工单 07B：工位容量硬检查（B1/B2）——registry.lock 临界区内取
+    # live herdr 计数（timeout 上界）：>hard 拒建（rc=1，文案列计数+清单+
+    # --force 用法+勿先 tab create）；role=helm 豁免（换舵是替换、净工位不增，
+    # D7 B1）；--force 人工覆盖放行；锁忙（rc=3）与容量拒建（rc=1）可区分。
+    # 拒建发生在组合之前（省组合开销）；capacity_row 经 agent-log start 行留痕。
+    helm_name = str((config.get("helm") or {}).get("agentName") or "").strip()
+    with registry_lock(root):
+        live_agents = herdr_agents_locked()
+        cap = crew_capacity.count_crew_agents(live_agents, root, helm_name)
+        capacity_cfg = crew_capacity.load_capacity_config(root)
+        capacity_before = cap["total"]
+        is_helm_role = str(args.role).strip().lower() == "helm"
+        capacity_row: dict = {}
+        if capacity_before >= capacity_cfg["hard"] and not is_helm_role:
+            if not args.force:
+                listing = "\n".join(f"  - {item}" for item in cap["names"][:20])
+                message = (
+                    f"容量拒建：本仓 crew 工位 {capacity_before} 个已超硬上限 "
+                    f"{capacity_cfg['hard']}（warn={capacity_cfg['warn']}）。"
+                    "\n必须关闭清单（按 pane-audit 安全规则回收，working/blocked "
+                    "永不关）：\n" + listing
+                    + "\n人工确认后可 --force 强制创建（留痕）："
+                    "python3 scripts/dispatch.py start --role <role> --pane <pane> "
+                    "--force\n提示：勿先 tab create（tab create 不在拒建范围，"
+                    "空 tab 只会加重容量）。")
+                if args.json:
+                    print_json({"errors": [message], "capacity": cap})
+                print(f"[拒绝] {message}", file=sys.stderr)
+                return 1
+            capacity_row = {"capacityOverride": "force",
+                            "capacityBefore": capacity_before,
+                            "capacityHard": capacity_cfg["hard"]}
+        elif is_helm_role and capacity_before >= capacity_cfg["hard"]:
+            capacity_row = {"capacityOverride": "helm-handoff",
+                            "capacityBefore": capacity_before,
+                            "capacityHard": capacity_cfg["hard"]}
+
     outcome = build_compose(root, args.role, args.runtime)
     if not outcome.ok:
         if args.json:
@@ -1778,9 +1885,6 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
     else:
         delivery = deliver_opencode(outcome, name, args.pane, run_dir, model)
 
-    skill_root = outcome.skill_root
-    base_rel = outcome.base_path.relative_to(skill_root).as_posix() if outcome.base_path else ""
-    skill_version = str(config.get("skillVersion") or "")
     registry = load_registry(root)
     registry[name] = {
         "role": args.role,
@@ -1795,6 +1899,10 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
         "startedAt": utc_now(),
     }
     save_registry(root, registry)
+
+    skill_root = outcome.skill_root
+    base_rel = outcome.base_path.relative_to(skill_root).as_posix() if outcome.base_path else ""
+    skill_version = str(config.get("skillVersion") or "")
     row = {
         "ts": utc_now(),
         "action": "start",
@@ -1820,6 +1928,7 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
         "gates": outcome.gates,
         "result": "ok",
     }
+    row.update(capacity_row)  # 2.2.31 工单 07B：helm 豁免/--force 覆盖留痕
     # S9：启动后校验工位 cwd==项目根（herdr agent list 的 cwd 字段）。
     # 不符不阻断（工位已起），stderr 告警 + log 标 cwdMismatch 供值班处置。
     cwd_expected = str(root)
@@ -2144,25 +2253,28 @@ def cmd_notify(args: argparse.Namespace, root: Path) -> int:
 
 
 def cmd_close(args: argparse.Namespace, root: Path) -> int:
-    registry = load_registry(root)
-    info = registry.get(args.agent)
-    if not isinstance(info, dict):
-        raise DispatchError(f"{args.agent} 不是 dispatch 托管的 agent；不能用 close 直关")
-    pane = info.get("pane")
-    if not pane:
-        raise DispatchError(f"注册表缺 pane：{args.agent}；先核对 herdr agent list")
-    run_herdr(["herdr", "pane", "close", str(pane)])
-    registry.pop(args.agent, None)
-    save_registry(root, registry)
-    append_log(root, {
-        "ts": utc_now(),
-        "action": "close",
-        "agent": args.agent,
-        "role": info.get("role"),
-        "runtime": info.get("runtime"),
-        "pane": pane,
-        "result": "ok",
-    })
+    # 2.2.31 工单 07B B2：close 与 start 同一 registry.lock 临界区（registry
+    # 读改写 + herdr close 上界 timeout），防并发丢条目。
+    with registry_lock(root):
+        registry = load_registry(root)
+        info = registry.get(args.agent)
+        if not isinstance(info, dict):
+            raise DispatchError(f"{args.agent} 不是 dispatch 托管的 agent；不能用 close 直关")
+        pane = info.get("pane")
+        if not pane:
+            raise DispatchError(f"注册表缺 pane：{args.agent}；先核对 herdr agent list")
+        run_herdr(["herdr", "pane", "close", str(pane)], timeout=HERDR_LOCKED_TIMEOUT)
+        registry.pop(args.agent, None)
+        save_registry(root, registry)
+        append_log(root, {
+            "ts": utc_now(),
+            "action": "close",
+            "agent": args.agent,
+            "role": info.get("role"),
+            "runtime": info.get("runtime"),
+            "pane": pane,
+            "result": "ok",
+        })
     print(f"已关闭：{args.agent}（pane {pane}）")
     return 0
 
@@ -2183,6 +2295,38 @@ def _render_status_lines(detail: list[dict], registry: dict,
         lines.append(f"历史/done {len(retired)} 个（--all 展开）")
     lines.append(f"dispatch 托管：{', '.join(sorted(registry)) or '（无）'}")
     return lines
+
+
+def cmd_capacity(args: argparse.Namespace, root: Path) -> int:
+    """本仓 crew 工位计数（2.2.31 工单 07B）。
+
+    口径（与 crew-preflight/crew-guard 调用同一函数、数字可对账；pane-audit
+    复用白名单常量做排除判定、无计数出口——工单 08 建议 7 对齐表述）：
+    herdr agent 满足——cwd 在本仓或 linked worktree（跨项目不误计；cwd 缺失
+    沿用包含）、name 非空（个人 TUI 自然排除）、非总舵（helm 名/Captain 前缀）、
+    非白名单工位（Captain·/流程优化· 按名前缀；tab label 不作为判定——可伪造）。
+    headless crew-claude.py run 不占 pane 不计入。
+    """
+    config = load_config(root)
+    helm_name = str((config.get("helm") or {}).get("agentName") or "").strip()
+    agents = herdr_agents()
+    cap = crew_capacity.count_crew_agents(agents, root, helm_name)
+    cfg = crew_capacity.load_capacity_config(root)
+    level = ("ok" if cap["total"] <= cfg["warn"]
+             else "warn" if cap["total"] < cfg["hard"] else "hard")
+    if args.json:
+        print_json({"capacity": cap, "config": cfg, "level": level})
+    else:
+        print(f"crew 工位 {cap['total']}（warn={cfg['warn']} hard={cfg['hard']} "
+              f"level={level}）")
+        print(f"工位清单：{', '.join(cap['names']) or '（无）'}")
+        if cap["excludedHelm"]:
+            print(f"排除总舵：{', '.join(cap['excludedHelm'])}")
+        if cap["excludedWhitelist"]:
+            print(f"排除白名单：{', '.join(cap['excludedWhitelist'])}")
+        if cap["excludedExternal"]:
+            print(f"排除外部项目 agent：{cap['excludedExternal']} 个")
+    return 0
 
 
 def cmd_status(args: argparse.Namespace, root: Path) -> int:
@@ -2438,8 +2582,15 @@ def cmd_tab(args: argparse.Namespace, root: Path) -> int:
         })
         print_json({"tab": tab_id, "pane": pane_id, "cwd": cwd})
         return 0
-    run_herdr(["herdr", "tab", "close", args.tab])
-    append_log(root, {"ts": utc_now(), "action": "tab", "op": "close", "tab": args.tab, "result": "ok"})
+    # 工单 08 建议 5：close 与 start 同一 registry.lock 临界区（herdr 调用
+    # 上界 + agent-log 原子），与 cmd_close 同口径。
+    caller, caller_source = resolve_caller(getattr(args, "caller", None))
+    with registry_lock(root):
+        run_herdr(["herdr", "tab", "close", args.tab],
+                  timeout=HERDR_LOCKED_TIMEOUT)
+        append_log(root, {"ts": utc_now(), "action": "tab", "op": "close",
+                          "tab": args.tab, "caller": caller,
+                          "callerSource": caller_source, "result": "ok"})
     print(f"已关闭 tab：{args.tab}")
     return 0
 
@@ -2468,14 +2619,20 @@ def cmd_pane(args: argparse.Namespace, root: Path) -> int:
         })
         print_json({"pane": new_pane, "cwd": cwd})
         return 0
-    run_herdr(["herdr", "pane", "close", args.pane])
-    panes = load_panes(root)
-    panes.pop(args.pane, None)
-    save_panes(root, panes)
-    append_log(root, {
-        "ts": utc_now(), "action": "pane", "op": "close",
-        "pane": args.pane, "result": "ok",
-    })
+    # 工单 08 建议 5：panes.json 读改写纳入 registry.lock 临界区（防并发
+    # close/split 丢条目；herdr 调用上界，与 cmd_close 同口径）。
+    caller, caller_source = resolve_caller(getattr(args, "caller", None))
+    with registry_lock(root):
+        run_herdr(["herdr", "pane", "close", args.pane],
+                  timeout=HERDR_LOCKED_TIMEOUT)
+        panes = load_panes(root)
+        panes.pop(args.pane, None)
+        save_panes(root, panes)
+        append_log(root, {
+            "ts": utc_now(), "action": "pane", "op": "close",
+            "pane": args.pane, "caller": caller, "callerSource": caller_source,
+            "result": "ok",
+        })
     print(f"已关闭 pane：{args.pane}")
     return 0
 
@@ -2509,6 +2666,10 @@ def build_parser() -> argparse.ArgumentParser:
                               "bypassPermissions 等形态）；缺省取配置 agents.permissionMode；"
                               "opencode 由角色模板承担（传即拒绝 rc=2）")
     start_p.add_argument("--model", help="透传运行时模型（qoder/opencode：-m <model>；claude：--model <model>；空不传）")
+    start_p.add_argument(
+        "--force", action="store_true",
+        help="容量超限人工覆盖（07B）：>hard 拒建时显式放行，agent-log 记 "
+             "capacityOverride=force 与前后计数；helm 角色天然豁免（换舵净工位不增）")
     start_p.add_argument("--json", action="store_true")
     start_p.set_defaults(func=cmd_start)
 
@@ -2558,6 +2719,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     status_p.set_defaults(func=cmd_status)
 
+    cap_p = sub.add_parser(
+        "capacity",
+        help="本仓 crew 工位计数（07B）：含 firstmate/worker pane；排除总舵、"
+             "Captain·/流程优化· 白名单工位、无 name 个人 TUI；跨 workspace 不误计；"
+             "headless crew-claude.py run 不占 pane 不计入；与 preflight/guard/"
+             "pane-audit 同口径")
+    cap_p.add_argument("--json", action="store_true")
+    cap_p.set_defaults(func=cmd_capacity)
+
     list_p = sub.add_parser("list", help="列出角色文件与可发现性")
     list_p.add_argument("--json", action="store_true")
     list_p.set_defaults(func=cmd_list)
@@ -2577,6 +2747,10 @@ def build_parser() -> argparse.ArgumentParser:
     tab_create.set_defaults(func=cmd_tab)
     tab_close = tab_sub.add_parser("close")
     tab_close.add_argument("--tab", required=True)
+    tab_close.add_argument(
+        "--caller",
+        help="关闭方归因（FB-061）：dispatch|pane-audit|crew-reaper|guard 等，"
+             "原样透传进 agent-log；缺省按环境变量 CREW_CALLER，再缺省记 dispatch")
     tab_close.set_defaults(func=cmd_tab)
 
     pane_p = sub.add_parser("pane", help="split/close pane")
@@ -2590,6 +2764,10 @@ def build_parser() -> argparse.ArgumentParser:
     pane_split.set_defaults(func=cmd_pane)
     pane_close = pane_sub.add_parser("close")
     pane_close.add_argument("--pane", required=True)
+    pane_close.add_argument(
+        "--caller",
+        help="关闭方归因（FB-061）：dispatch|pane-audit|crew-reaper|guard 等，"
+             "原样透传进 agent-log；缺省按环境变量 CREW_CALLER，再缺省记 dispatch")
     pane_close.set_defaults(func=cmd_pane)
 
     return parser

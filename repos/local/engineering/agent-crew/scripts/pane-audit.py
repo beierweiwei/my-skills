@@ -82,9 +82,9 @@ from pathlib import Path
 sys.dont_write_bytecode = True  # 不在项目 scripts/ 留 __pycache__
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from crew_paths import crew_dir as resolve_crew_dir  # noqa: E402
+from crew_capacity import DEFAULT_WHITELIST_PREFIXES  # noqa: E402  # 工单 08 建议 7：白名单常量单源（crew_capacity 为唯一来源）
 
 MAX_PANES_PER_TAB = 6
-DEFAULT_WHITELIST_PREFIXES = ("Captain·", "流程优化·")
 HELM_TAB_PREFIX = "总舵"
 HELM_AGENT_PREFIX = "helm"
 DEFAULT_BLOCKED_GRACE_MINUTES = 30
@@ -104,6 +104,7 @@ KIND_TEXT = {
     "residual-old-helm": "旧 helm 残留",
     "empty-pane": "多余空 pane",
     "flow-complete-tab": "完成流回收 tab",
+    "flow-active-tab": "活跃流 tab（只报告不关）",
     "orphan-pane": "pane 无 registry",
     "orphan-registry": "registry 无 pane",
     "empty-tab": "空 tab",
@@ -538,6 +539,68 @@ def load_flow_plans(root: str | Path = ".") -> dict[str, bool]:
             and all(status == "complete" for status in statuses)
         )
     return flows
+
+
+def load_flow_incomplete(root: str | Path = ".") -> dict[str, int]:
+    """流名 → 未完成 Phase 数（2.2.31 工单 06 活跃流保护）。
+
+    复用 parse_flow_statuses 口径：Status 缺失/非法该 Phase 按 pending 计；
+    无 `### Phase` 的目录不属流 plan、不进返回；读取失败按 1（宁可不关）。
+    """
+    try:
+        planning = Path(root).expanduser() / ".planning"
+        directories = sorted(path for path in planning.iterdir() if path.is_dir())
+    except (OSError, RuntimeError):
+        return {}
+    result: dict[str, int] = {}
+    for directory in directories:
+        plan = directory / "task_plan.md"
+        if not plan.is_file():
+            continue
+        try:
+            text = plan.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            result[directory.name] = 1
+            continue
+        statuses, _invalid = parse_flow_statuses(text)
+        if statuses:
+            result[directory.name] = sum(1 for s in statuses if s != "complete")
+    return result
+
+
+def flow_active_finding(
+    tab: dict,
+    tab_id: str,
+    tab_agents: list[dict],
+    incomplete: dict[str, int],
+) -> Finding | None:
+    """活跃流保护（2.2.31 工单 06 / FB-061）：tab 归属未完成流 → 只报告不自动关闭。
+
+    归属：tab label 与 tab 内 agent 名按最长前缀归属流（match_flow 同口径）；
+    任一候选归属的流未完成 Phase 数 > 0 即命中——无论 agent idle/done、pane 是否
+    为空，阻断 empty-tab / 完成流回收等全部自动关闭路径。完成流（未完成数 0）与
+    无归属 tab → None（走既有口径）。
+    """
+    if not incomplete:
+        return None
+    candidates = [_label(tab)]
+    candidates.extend(str(agent.get("name") or "") for agent in tab_agents)
+    matched: dict[str, int] = {}
+    for name in candidates:
+        flow = match_flow(name, incomplete)
+        if flow and incomplete[flow] > 0:
+            matched[flow] = incomplete[flow]
+    if not matched:
+        return None
+    detail = "、".join(
+        f"{flow}（未完成 {count} Phase）" for flow, count in sorted(matched.items()))
+    return Finding(
+        "flow-active-tab", tab_id, _label(tab),
+        f"归属活跃流：{detail}；只报告不自动关闭（FB-061）", None,
+        "流收口（全部 Phase complete）后由 pane-audit 自动回收，"
+        "或人工确认后关闭："
+        f"`python3 scripts/dispatch.py tab close --tab {tab_id}`",
+    )
 
 
 def _argv_of(process: dict) -> list[str] | None:
@@ -1069,6 +1132,7 @@ def audit(
     helm_labels: tuple[str, ...] = (HELM_TAB_PREFIX,),
     *,
     flows: dict[str, bool] | None = None,
+    incomplete: dict[str, int] | None = None,
     empty_probe: Callable[[str], bool | None] | None = None,
     blocked_receipts: list[dict] | None = None,
     now: datetime | None = None,
@@ -1137,6 +1201,10 @@ def audit(
                 ))
             continue
         if is_whitelisted_tab(tab, whitelist_prefixes, helm_labels):
+            continue
+        active = flow_active_finding(tab, tab_id, tab_agents, incomplete or {})
+        if active is not None:
+            findings.append(active)
             continue
         if not child_panes:
             findings.append(Finding(
@@ -1296,13 +1364,19 @@ def close_tab(tab_id: str) -> bool:
     return herdr_run(["tab", "close", tab_id]).returncode == 0
 
 
-def make_dispatch_runner(root: str | Path) -> Callable[[str, str], bool]:
-    """总舵/旧 helm 回收统一走 `dispatch.py pane|tab close`（禁止直写 herdr 生命周期）。"""
+def make_dispatch_runner(root: str | Path,
+                         caller: str = "") -> Callable[[str, str], bool]:
+    """总舵/旧 helm 回收统一走 `dispatch.py pane|tab close`（禁止直写 herdr 生命周期）。
+
+    caller：close 归因（FB-061）；缺省 pane-audit，guard 等调用方经
+    `--caller` 传入自身名（工单 08 B-1：归因链穿透到最终 dispatch 记录）。"""
     script = Path(__file__).resolve().parent / "dispatch.py"
+    caller = caller.strip() or "pane-audit"
 
     def runner(kind: str, target: str) -> bool:
         args = (["pane", "close", "--pane", target] if kind == "pane"
                 else ["tab", "close", "--tab", target])
+        args += ["--caller", caller]  # FB-061：close 归因（可由调用方覆盖）
         try:
             proc = subprocess.run(
                 [sys.executable, str(script), "--root", str(root), *args],
@@ -1455,6 +1529,11 @@ def add_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
              "working 永不关闭，白名单跳过）",
     )
     parser.add_argument(
+        "--caller",
+        default="",
+        help="close 归因 caller（默认 pane-audit；guard 等调用方传入自身名，工单 08 B-1）",
+    )
+    parser.add_argument(
         "--whitelist-prefix",
         action="append",
         default=[],
@@ -1516,6 +1595,7 @@ def main(argv: list[str] | None = None) -> int:
     prefixes = tuple(DEFAULT_WHITELIST_PREFIXES) + tuple(args.whitelist_prefix)
     helm_labels = load_helm_labels(args.root)
     flows = load_flow_plans(args.root)
+    incomplete = load_flow_incomplete(args.root)
     crew_dir = resolve_crew_dir_arg(args.root, args.crew_dir)
     blocked_receipts = load_receipts(crew_dir)
     helm_context = resolve_helm_context(args.root, crew_dir)
@@ -1523,6 +1603,7 @@ def main(argv: list[str] | None = None) -> int:
     findings = audit(
         snapshot, prefixes, frozenset(args.helm_pane), helm_labels,
         flows=flows,
+        incomplete=incomplete,
         empty_probe=probe_empty_pane,
         blocked_receipts=blocked_receipts,
         blocked_grace_minutes=args.blocked_grace,
@@ -1555,7 +1636,7 @@ def main(argv: list[str] | None = None) -> int:
     closed_panes, closed_tabs, failed = apply_findings(
         findings,
         probe=probe_empty_pane,
-        dispatch_runner=make_dispatch_runner(args.root),
+        dispatch_runner=make_dispatch_runner(args.root, getattr(args, "caller", "")),
     )
     reported = len(findings) - len(closed_panes) - len(closed_tabs) - len(failed)
     print(
