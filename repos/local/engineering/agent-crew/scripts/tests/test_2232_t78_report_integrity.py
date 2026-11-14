@@ -138,7 +138,7 @@ class ReportIntegrityTest(unittest.TestCase):
         ok, lines, problems = cc.check_report(
             b"", min_lines=5, min_bytes=200)
         self.assertFalse(ok)
-        self.assertEqual((0, lines), (0, lines))
+        self.assertEqual(0, lines)
         self.assertEqual(problems, ["报告为空（stdout 0 字节）"])
         # 阈值 0=关闭该项：只剩关键段判定
         ok, lines, problems = cc.check_report("甲\n".encode("utf-8") * 1,

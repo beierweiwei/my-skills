@@ -40,9 +40,13 @@ EXPECTED_ROLES = ["builder", "planner", "reviewer", "adversary", "scout", "runne
 
 
 def valid_agents() -> dict:
+    # 2.2.32/T76/S5：编排角色补条目（helm/firstmate 缺失→doctor warn）
+    roles = {role: {"backend": "qoder", "model": ""} for role in EXPECTED_ROLES}
+    roles["helm"] = {"backend": "qoder", "model": ""}
+    roles["firstmate"] = {"backend": "qoder", "model": ""}
     return {
         "default": {"backend": "qoder", "model": ""},
-        "roles": {role: {"backend": "qoder", "model": ""} for role in EXPECTED_ROLES},
+        "roles": roles,
         "playbooks": {},
     }
 
@@ -200,11 +204,16 @@ class StartModelRecordTest(unittest.TestCase):
             return {"delivery": "composed-agent", "composePath": "cp",
                     "promptPath": "pp", "composedPath": "cp2", "agentFile": "af"}
 
+        # 2.2.32/T76/C2：模型不再手传——由 agents.roles.<role> 解析并记 modelSource
         args = argparse.Namespace(
             role="builder", runtime="qoder", pane="wX:p1", name="proj-builder",
-            instance=None, permission_mode=None, model=" gpt-x ", json=True)
+            instance=None, permission_mode=None, model="", json=True)
         patches = {
-            "load_config": mock.Mock(return_value={"skillVersion": "2.1.0"}),
+            "load_config": mock.Mock(return_value={
+                "skillVersion": "2.1.0",
+                "agents": {"default": {"backend": "qoder", "model": ""},
+                           "roles": {"builder": {"backend": "qoder",
+                                                 "model": "gpt-x"}}}}),
             "config_preflight_errors": mock.Mock(return_value=[]),
             "build_compose": mock.Mock(return_value=outcome),
             "ensure_role_enabled": mock.Mock(return_value=[]),
@@ -223,8 +232,13 @@ class StartModelRecordTest(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertEqual("gpt-x", captured["model"])
         self.assertEqual("gpt-x", registry_saved["proj-builder"]["model"])
+        self.assertEqual("roles.builder",
+                         registry_saved["proj-builder"]["modelSource"])
         self.assertEqual("gpt-x", rows[-1]["model"])
-        self.assertEqual("gpt-x", json.loads(out.getvalue())["model"])
+        self.assertEqual("roles.builder", rows[-1]["modelSource"])
+        payload = json.loads(out.getvalue())
+        self.assertEqual("gpt-x", payload["model"])
+        self.assertEqual("roles.builder", payload["modelSource"])
 
 
 class DoctorAgentsConfigTest(unittest.TestCase):

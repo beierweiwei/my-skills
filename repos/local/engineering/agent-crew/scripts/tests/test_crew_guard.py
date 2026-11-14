@@ -1268,9 +1268,8 @@ class HandoffTest(GuardTestBase):
             [["tab", "create", "--workspace", "wX", "--cwd", str(self.root),
               "--label", "总舵", "--no-focus"],
              ["start", "--role", "helm", "--pane", "wX:pNEW",
-              "--permission-mode", "bypass_permissions",
               "--name", "helm-1-2", "--json"],
-             ["prompt", "--agent", "helm-1-2", "--message"]],
+             ["prompt", "--agent", "helm-1-2", "--message-file"]],
             [call[:4] if call[:1] == ["prompt"] else call
              for call in self.dispatch_calls],
         )
@@ -1354,7 +1353,9 @@ class HandoffTest(GuardTestBase):
         self.make_guard().run_once()
         prompts = [c for c in self.dispatch_calls if c[:1] == ["prompt"]]
         self.assertEqual(1, len(prompts))
-        message = prompts[0][-1]
+        # 2.2.32/T76/B3：交接消息落 <crew>/handoff-message-*.md，prompt 传文件路径
+        self.assertIn("--message-file", prompts[0])
+        message = Path(prompts[0][-1]).read_text(encoding="utf-8")
         for token in ("--brief", "--handover", "feedback.md", "Next Step/Status",
                       "guard.handoff", "禁整读 看板", "32KB", "20KB",
                       "看板仅按关键词 grep", "写明只读段", "首报"):

@@ -38,14 +38,21 @@ cleanup_tab() {
 }
 trap cleanup_tab EXIT
 
-"${DISPATCH[@]}" start --role helm --runtime qoder --permission-mode bypass_permissions --pane "$PANE_ID" >/dev/null \
-  || die "启动总舵失败（dispatch.py start）。检查 herdr server、qodercli 与命名冲突后重试。"
+"${DISPATCH[@]}" start --role helm --runtime qoder --pane "$PANE_ID" >/dev/null \
+  || die "启动总舵失败（dispatch.py start）。检查 herdr server、qodercli 与命名冲突后重试。（2.2.32/T76：模型/权限模式由 orchestration.json agents 解析，不再手传）"
 
 trap - EXIT
 CREATED_PANE=""
 
-"${DISPATCH[@]}" prompt --agent "$AGENT_NAME" --message "接手总舵。按角色文件必读清单只读加载：根 AGENTS.md、${PORTFOLIO_DIR}/ 的 task_plan.md/findings.md/progress.md、各流 plan 的 Next Step/Current Phase/Status、${DOC_CONTEXT}。只读查询用 Read/Grep，非必要不跑 Bash。先给首条汇报：状态 3 行（做了什么/证据路径/变化）+ 待决策 ≤3（问题/为什么/选项与影响/推荐）。" >/dev/null \
+# 2.2.32/T76/B3：接手指令先落临时文件（dispatch --message 只收文件路径）
+HANDOFF_MSG="$(mktemp /tmp/helm-handoff-msg-XXXXXX.md)"
+cat > "$HANDOFF_MSG" <<HANDOFF_EOF
+接手总舵。按角色文件必读清单只读加载：根 AGENTS.md、${PORTFOLIO_DIR}/ 的 task_plan.md/findings.md/progress.md、各流 plan 的 Next Step/Current Phase/Status、${DOC_CONTEXT}。只读查询用 Read/Grep，非必要不跑 Bash。先给首条汇报：状态 3 行（做了什么/证据路径/变化）+ 待决策 ≤3（问题/为什么/选项与影响/推荐）。
+HANDOFF_EOF
+
+"${DISPATCH[@]}" prompt --agent "$AGENT_NAME" --message-file "$HANDOFF_MSG" >/dev/null \
   || die "接手指令发送失败（dispatch.py prompt）。到 tab「$TAB_LABEL」手动输入。"
+rm -f "$HANDOFF_MSG"
 
 echo "总舵已启动：tab「$TAB_LABEL」，agent $AGENT_NAME，pane $PANE_ID"
 echo "切过去：herdr agent focus $AGENT_NAME"

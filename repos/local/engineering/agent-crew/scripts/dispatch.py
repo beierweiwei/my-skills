@@ -1753,7 +1753,10 @@ def deliver_claude(outcome: ComposeOutcome, name: str, pane: str,
 
 
 def resolve_permission_mode(config: dict, explicit: str | None) -> tuple[str, str]:
-    """qoder/claude 权限模式解析：显式 > 配置 agents.permissionMode > 空（通道默认）。"""
+    """qoder/claude 权限模式解析：显式 > 配置 agents.permissionMode > 空（通道默认）。
+
+    2.2.32/T76/C2 起 dispatch start 拒绝手传 --permission-mode（cmd_start 入口
+    rc=2），explicit 实参恒为 None——保留参数仅供既有调用方/测试直调。"""
     explicit = (explicit or "").strip()
     if explicit:
         return explicit, "explicit"
@@ -1763,18 +1766,49 @@ def resolve_permission_mode(config: dict, explicit: str | None) -> tuple[str, st
         if isinstance(configured, str) and configured.strip():
             return configured.strip(), "config-default"
     return "", ""
-    explicit = (explicit or "").strip()
-    if explicit:
-        return explicit, "explicit"
+
+
+def resolve_model_from_config(config: dict, role: str) -> tuple[str, str]:
+    """模型按 agents 配置级联解析（2.2.32/T76/C2；级联范式复用 crew-claude）：
+    `agents.roles.<role>` > `agents.default`，三栈 backend 通用（backend 校验归
+    compose/角色模板，此处不硬校验 backend==claude）。返回 (model, source)；
+    model 空串合法（通道默认，不传 --model/-m）；无 agents 配置回落空串。"""
     agents = config.get("agents")
-    if isinstance(agents, dict):
-        configured = agents.get("permissionMode")
-        if isinstance(configured, str) and configured.strip():
-            return configured.strip(), "config-default"
-    return "", ""
+    if not isinstance(agents, dict):
+        return "", "default"
+    roles = agents.get("roles")
+    entry = roles.get(role) if isinstance(roles, dict) else None
+    if isinstance(entry, dict) and isinstance(entry.get("model"), str):
+        model = entry["model"].strip()
+        if model:
+            return model, f"roles.{role}"
+    default = agents.get("default")
+    if isinstance(default, dict) and isinstance(default.get("model"), str):
+        return default["model"].strip(), "default"
+    return "", "default"
 
 
 def cmd_start(args: argparse.Namespace, root: Path) -> int:
+    # —— 2.2.32/T76/C2：生命周期参数只从配置解析，手传一律拒绝（防漂移与
+    # BUG-010 同型事故；改 orchestration.json 后重启工位生效）。参数校验先于
+    # load_config/预检/compose/容量——配置缺失或损坏时也先给参数指引。 ——
+    if (args.model or "").strip():
+        message = ("dispatch start 不再接受手传 --model：模型由配置解析"
+                   "（orchestration.json agents.roles.<role> > agents.default）；"
+                   "请改配置后重试。")
+        if args.json:
+            print_json({"errors": [message]})
+        print(f"[拒绝] {message}", file=sys.stderr)
+        return 2
+    if (args.permission_mode or "").strip():
+        message = (
+            "dispatch start 不再接受手传 --permission-mode：权限模式由配置/模板解析"
+            "（qoder/claude：orchestration.json agents.permissionMode；opencode：角色"
+            "模板 frontmatter）；请改配置后重试。")
+        if args.json:
+            print_json({"errors": [message]})
+        print(f"[拒绝] {message}", file=sys.stderr)
+        return 2
     config = load_config(root)
     preflight = config_preflight_errors(root, config)
     if preflight:
@@ -1841,20 +1875,10 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
         for error in errors:
             print(f"[拒绝] {error}", file=sys.stderr)
         return 1
-    explicit_mode = (args.permission_mode or "").strip()
     if runtime == "opencode":
-        if explicit_mode:
-            message = (
-                "opencode 权限由角色模板 frontmatter permission 块承担，"
-                "不接受 --permission-mode（CLI 旗标不会生效；去掉该参数重试）")
-            if args.json:
-                print_json({"errors": [message]})
-            print(f"[拒绝] {message}", file=sys.stderr)
-            return 2
         permission_mode, permission_source = "template", "template"
     else:
-        permission_mode, permission_source = resolve_permission_mode(
-            config, explicit_mode)
+        permission_mode, permission_source = resolve_permission_mode(config, None)
     if not args.pane:
         if runtime == "opencode":
             hint = "split 源 pane（dispatch 负责创建带 OPENCODE_CONFIG_DIR 的 pane）"
@@ -1875,7 +1899,9 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
         )
 
     run_dir = crew_dir(root) / "compose" / run_id()
-    model = (args.model or "").strip()
+    # 2.2.32/T76/C2：模型按配置级联解析（roles.<role> > default；三栈通用），
+    # registry/agent-log 记 modelSource 保审计链（手传已在上方拒绝）。
+    model, model_source = resolve_model_from_config(config, args.role)
     if runtime == "qoder":
         delivery = deliver_qoder(outcome, name, args.pane, run_dir,
                                  permission_mode, model)
@@ -1894,6 +1920,7 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
         "composePath": delivery["composePath"],
         "composedSha256": outcome.report["composedSha256"],
         "model": model,
+        "modelSource": model_source,
         "permissionMode": permission_mode,
         "permissionModeSource": permission_source,
         "startedAt": utc_now(),
@@ -1910,6 +1937,7 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
         "runtime": runtime,
         "agent": name,
         "model": model,
+        "modelSource": model_source,
         "permissionMode": permission_mode,
         "permissionModeSource": permission_source,
         "delivery": delivery["delivery"],
@@ -1965,6 +1993,7 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
         "runtime": runtime,
         "runtimeResolvedFrom": outcome.report.get("runtimeResolvedFrom"),
         "model": model,
+        "modelSource": model_source,
         "delivery": delivery["delivery"],
         "composedSha256": outcome.report["composedSha256"],
         "composePath": delivery["composePath"],
@@ -1977,6 +2006,25 @@ def cmd_start(args: argparse.Namespace, root: Path) -> int:
         print_runtime_resolution_human(outcome.report)
         print(f"组合产物：{delivery['composePath']}")
     return 0
+
+
+def read_message_argument(args: argparse.Namespace) -> str:
+    """--message-file / --message 统一读取（2.2.32/T76/B3，BUG-010 收口）：
+    只接受已存在文件路径；内联文本拒绝并给指引；读失败 rc=1 未注入（失败侧安全）。"""
+    raw = getattr(args, "message_file", None) or getattr(args, "message", None)
+    flag = "--message-file" if getattr(args, "message_file", None) else "--message"
+    if not raw:
+        raise DispatchError("缺少 --message-file <文件路径>（内联文本不再接受）", 1)
+    path = Path(raw).expanduser()
+    if not path.is_file():
+        raise DispatchError(
+            f"{flag} 只接受已存在的文件路径（收到: {raw!r}；内联文本不再接受）。"
+            "请先把消息写入临时文件再传路径，例如：printf '%s\\n' '...' > /tmp/msg.md"
+            " && dispatch.py prompt --message-file /tmp/msg.md", 1)
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise DispatchError(f"消息文件不可读（{path}）：{exc}", 1) from exc
 
 
 def cmd_prompt(args: argparse.Namespace, root: Path) -> int:
@@ -2009,8 +2057,10 @@ def cmd_prompt(args: argparse.Namespace, root: Path) -> int:
         raise
     # FB-057②：prompt 是派单主通道，默认追加回执要求行（与 notify 的 RECEIPT_LINE
     # 同源），防止工单/提示漏写回执要求导致 worker 完成后静默。
+    # 2.2.32/T76/B3：消息体只从文件读（--message-file / --message 路径形态），
+    # 内联文本拒绝（BUG-010 收口：$(cat) 经 shell 展开仍是内联，模板已同步）。
     receipt_required = not args.no_require_receipt
-    message = args.message
+    message = read_message_argument(args)
     if receipt_required and not message.rstrip("\n").endswith(RECEIPT_LINE):
         message = message.rstrip("\n") + "\n" + RECEIPT_LINE
     focused, focus_reason, _present = pane_focus_state(args.agent)
@@ -2094,13 +2144,14 @@ def cmd_notify(args: argparse.Namespace, root: Path) -> int:
     目标 done 时不注入、只落 inbox 兜底（FB-052）；保留 inbox 并推送 Herdr
     通知；收件方 inbox 解析失败时显式告知。"""
     if args.ack:
-        if args.message or args.agent or args.workspace or args.role:
+        if (args.message or getattr(args, "message_file", None)
+                or args.agent or args.workspace or args.role):
             raise DispatchError("--ack 只能单独使用（不发送、不解析目标）", 1)
         return cmd_notify_ack(args.ack, root)
-    if not args.message:
-        raise DispatchError("缺少 --message（或使用 --ack <通知 id>）", 1)
+    # 2.2.32/T76/B3：notify 同批收窄——--message 只接受文件路径（--ack 除外），
+    # 不保留内联通道（否则 BUG-010 残留一条口子，与 Captain「不再手拼参数」矛盾）。
     receipt_required = not args.no_require_receipt
-    message = args.message
+    message = read_message_argument(args)
     if receipt_required and not message.rstrip("\n").endswith(RECEIPT_LINE):
         message = message.rstrip("\n") + "\n" + RECEIPT_LINE
     if args.agent:
@@ -2255,6 +2306,10 @@ def cmd_notify(args: argparse.Namespace, root: Path) -> int:
 def cmd_close(args: argparse.Namespace, root: Path) -> int:
     # 2.2.31 工单 07B B2：close 与 start 同一 registry.lock 临界区（registry
     # 读改写 + herdr close 上界 timeout），防并发丢条目。
+    # 2.2.32/T76/C2：关闭前对账在跑状态（真源=herdr agent list；缺失按注册表
+    # 放行）——working/blocked 拒关（--force --reason 人工留痕放行）、
+    # awaiting_approval 恒拒；agent-log close 行补 sender/reason/status；最后
+    # prompt 后无 close/无回执给提示级警告（不阻断）。
     with registry_lock(root):
         registry = load_registry(root)
         info = registry.get(args.agent)
@@ -2263,6 +2318,45 @@ def cmd_close(args: argparse.Namespace, root: Path) -> int:
         pane = info.get("pane")
         if not pane:
             raise DispatchError(f"注册表缺 pane：{args.agent}；先核对 herdr agent list")
+        agent_status = ""
+        try:
+            agents = herdr_agents_locked()
+        except Exception:  # noqa: BLE001 - agent list 不可用不阻断 close（注册表口径）
+            agents = []
+        entry = next((a for a in agents
+                      if isinstance(a, dict)
+                      and str(a.get("name") or "") == args.agent), None)
+        if entry is not None:
+            agent_status = str(entry.get("agent_status") or "").strip()
+        if agent_status == "awaiting_approval":
+            message = (
+                f"拒绝关闭：{args.agent} 正在等待权限审批（awaiting_approval）。"
+                "注入可能被审批对话框消费为「批准」；请先人工处置对话框再关闭。")
+            print(f"[拒绝] {message}", file=sys.stderr)
+            append_log(root, {
+                "ts": utc_now(), "action": "close", "agent": args.agent,
+                "role": info.get("role"), "runtime": info.get("runtime"),
+                "pane": pane, "delivery": "none", "status": agent_status,
+                "sender": sender_agent_name(), "result": "refused",
+                "reason": "awaiting_approval",
+            })
+            return 2
+        if agent_status in ("working", "blocked") and not (
+                args.force and (args.reason or "").strip()):
+            message = (
+                f"拒绝关闭：{args.agent} 当前 {agent_status}（在跑任务/阻塞中）。"
+                "确认要关请用：dispatch.py close --agent <名> --force"
+                " --reason '<原因>'（留痕）；或等其转 idle/done 再关。")
+            print(f"[拒绝] {message}", file=sys.stderr)
+            append_log(root, {
+                "ts": utc_now(), "action": "close", "agent": args.agent,
+                "role": info.get("role"), "runtime": info.get("runtime"),
+                "pane": pane, "delivery": "none", "status": agent_status,
+                "sender": sender_agent_name(), "result": "refused",
+                "reason": agent_status,
+            })
+            return 2
+        warnings = _close_orphan_warnings(root, args.agent)
         run_herdr(["herdr", "pane", "close", str(pane)], timeout=HERDR_LOCKED_TIMEOUT)
         registry.pop(args.agent, None)
         save_registry(root, registry)
@@ -2273,10 +2367,64 @@ def cmd_close(args: argparse.Namespace, root: Path) -> int:
             "role": info.get("role"),
             "runtime": info.get("runtime"),
             "pane": pane,
+            "status": agent_status or "unknown",
+            "sender": sender_agent_name(),
+            "reason": (args.reason or "").strip() or None,
             "result": "ok",
         })
     print(f"已关闭：{args.agent}（pane {pane}）")
+    for warning in warnings:
+        print(f"[警告] {warning}", file=sys.stderr)
     return 0
+
+
+def _close_orphan_warnings(root: Path, agent: str) -> list[str]:
+    """S4 提示级警告：目标 agent 最后一条 prompt 后无 close/无回执（提示不阻断，
+    真源=agent-log 与 <crew>/inbox 只读扫描）。"""
+    warnings: list[str] = []
+    try:
+        log_path = crew_dir(root) / "agent-log.jsonl"
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return warnings
+    rows: list[dict] = []
+    for line in lines[-200:]:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and row.get("agent") == agent:
+            rows.append(row)
+    last_prompt = next((r for r in reversed(rows) if r.get("action") == "prompt"
+                        and r.get("result") != "refused"), None)
+    if last_prompt is None:
+        return warnings
+    has_receipt = bool(_receipts_since(root, str(last_prompt.get("ts") or "")))
+    has_close = any(r.get("action") == "close" and r.get("result") == "ok"
+                    for r in rows[rows.index(last_prompt):])
+    if not has_receipt and not has_close:
+        warnings.append(
+            f"{agent} 最后一次 prompt（{last_prompt.get('ts')}）后无回执无 close，"
+            "本次关闭可能吞掉在途任务；建议先核收其回执。")
+    return warnings
+
+
+def _receipts_since(root: Path, ts: str) -> list[str]:
+    """ts（ISO 字符串）之后落盘的回执 id（ISO 字符串可字典序比较；坏数据跳过）。"""
+    ids: list[str] = []
+    try:
+        paths = sorted((crew_dir(root) / "inbox").glob("*.json"))
+    except OSError:
+        return ids
+    for path in paths:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        receipt_ts = str(data.get("ts") or "") if isinstance(data, dict) else ""
+        if receipt_ts and (not ts or receipt_ts >= ts):
+            ids.append(str(data.get("receipt_id") or path.stem))
+    return ids
 
 
 ONLINE_AGENT_STATUSES = ("working", "idle", "blocked", "pending")
@@ -2677,7 +2825,11 @@ def build_parser() -> argparse.ArgumentParser:
         "prompt",
         help="向 dispatch 托管的 agent 发提示（目标 pane 聚焦/无法判定时拒绝注入，rc=2）")
     prompt_p.add_argument("--agent", required=True)
-    prompt_p.add_argument("--message", required=True)
+    prompt_p.add_argument("--message", default=None,
+                          help="消息文件路径（2.2.32/T76/B3：只接受已存在文件；"
+                               "内联文本拒绝 rc=1；与 --message-file 等价，二选一）")
+    prompt_p.add_argument("--message-file", dest="message_file", default=None,
+                          help="消息文件路径（推荐形态；与 --message 等价，二选一）")
     prompt_p.add_argument("--task", help="任务/工单标识（agent-log 归因用）")
     prompt_p.add_argument(
         "--allow-unknown-ctx", action="store_true",
@@ -2697,7 +2849,11 @@ def build_parser() -> argparse.ArgumentParser:
     notify_p.add_argument("--role",
                           help="角色名（与 --workspace 同用）；helm 按代际解析，"
                                "其他角色要求唯一匹配，多实例用 --agent")
-    notify_p.add_argument("--message", help="通知正文（--ack 时不需要）")
+    notify_p.add_argument("--message",
+                          help="通知正文文件路径（2.2.32/T76/B3：只接受已存在文件；"
+                               "内联文本拒绝；--ack 时不需要）")
+    notify_p.add_argument("--message-file", dest="message_file", default=None,
+                          help="通知正文文件路径（推荐形态；与 --message 等价，二选一）")
     notify_p.add_argument("--ack", metavar="ID",
                           help="把收件方 inbox 中的通知标记 processed（终结未处理口径）")
     notify_p.add_argument("--no-require-receipt", action="store_true",
@@ -2707,6 +2863,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     close_p = sub.add_parser("close", help="关闭 dispatch 托管的 agent")
     close_p.add_argument("--agent", required=True)
+    close_p.add_argument("--force", action="store_true",
+                         help="目标 working/blocked 时人工确认关闭（必须同时给 --reason）")
+    close_p.add_argument("--reason", default="",
+                         help="--force 的关闭原因（留痕 agent-log；awaiting_approval 恒拒）")
     close_p.add_argument("--json", action="store_true")
     close_p.set_defaults(func=cmd_close)
 

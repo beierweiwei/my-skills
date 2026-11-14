@@ -178,6 +178,20 @@ IDLE_WAKE_ROUNDS_MAX = 240
 IDLE_CHANGE_STATE_FILE = "guard.state.json"
 IDLE_CHANGE_STATE_VERSION = 1
 IDLE_HEARTBEAT_EVERY_ROUNDS = 30
+# 2.2.32/T76/B2 未消费唤醒桶：idle/done 工位名下有未消费回执/被拒派单时，guard
+# 注入固定消费模板（只清单拼接，禁自由文本）。minIdleSeconds=300：CASE 实测
+# 6 次 40+ 分钟空转，5 分钟避开正常回合间隙；队列/重试上限（S2）防风暴，重试
+# 3 次失败升级通知后不再注入；状态持久化 guard.state.json unconsumedWake 键
+# （S1：旧文件无该键视为空队列，跨重启恢复）。
+UNCONSUMED_MIN_IDLE_SECONDS = 300
+UNCONSUMED_QUEUE_MAX = 20
+UNCONSUMED_RETRY_MAX = 3
+UNCONSUMED_LOG_WINDOW = 400
+UNCONSUMED_WAKE_TEMPLATE = (
+    "[guard 未消费唤醒] 你名下有 {count} 项未消费回执/被拒派单：\n{items}\n"
+    "请运行 `python3 scripts/crew-msg.py ls --unread` 消费并处置；"
+    "被拒派单明细见 <crew>/agent-log.jsonl 的 result=refused 行"
+    "（重投：`dispatch.py prompt --message-file <文件>`）。")
 # ⏸ 排队条目到期语义（要件 5）：文本中 YYYY-MM-DD 取最小值为到期日，今天 ≥ 到期日
 # 视为状态变化触发一次性叫醒。
 DUE_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -232,14 +246,10 @@ def effective_helm_runtime(info: object) -> str:
 def handoff_start_args(runtime: str, pane: str, name: str) -> list[str]:
     """交接继任舵的 dispatch start 实参（R2：继承现役舵 runtime，非单值假设）。
 
-    qoder/未知 → qoder 形态 bypass_permissions；claude → bypassPermissions；
-    opencode → 不传 --permission-mode（dispatch 拒绝该旗标，rc=2）。
-    runtime 已知时显式带 --runtime。"""
+    2.2.32/T76/C2：不再手传 --permission-mode（dispatch start 已拒绝手传，
+    rc=2；权限模式由 orchestration.json agents.permissionMode/模板解析）；
+    runtime 已知时显式带 --runtime（多栈消歧语义保留）。"""
     args = ["start", "--role", "helm", "--pane", pane]
-    if runtime == "claude":
-        args += ["--permission-mode", "bypassPermissions"]
-    elif runtime != "opencode":
-        args += ["--permission-mode", "bypass_permissions"]
     if runtime:
         args += ["--runtime", runtime]
     args += ["--name", name, "--json"]
@@ -1095,6 +1105,12 @@ class Guard:
     ctx_unresolved_logged: set[str] = field(default_factory=set, init=False)
     handoff_attempted: bool = field(default=False, init=False)
     handoff_failed_noted: bool = field(default=False, init=False)
+    # 2.2.32/T76/B2：工位 idle/done 起始时间表（回 working/blocked 清除；重启后从
+    # 重启时刻保守起算）与未消费唤醒状态 {key: {done, retries, pending}}——
+    # key=receipt|<id> 或 refused|<agent>|<ts>；持久化 guard.state.json。
+    agent_idle_since: dict[str, float] = field(default_factory=dict, init=False)
+    unconsumed_woken: dict[str, dict] = field(default_factory=dict, init=False)
+    unconsumed_restored: bool = field(default=False, init=False)
     handoff_wait_rounds: int = field(default=0, init=False)
     handoff_close_rounds: int = field(default=0, init=False)
     reaper_rounds: int = field(default=0, init=False)
@@ -1213,6 +1229,223 @@ class Guard:
             self.log(f"返工提醒：task={row['task']} 回执 {row['receipts']} 条，"
                      "建议评估是否触发 rework-reset（需人签）")
         return rework
+
+    # —— 2.2.32/T76/B2 未消费唤醒桶（兜底：refused 复投 / unrouted 后建 /
+    # done 残留未读；跨项目不注入为既定安全取舍，由收件方舵轮询兜底） ——
+
+    def _track_agent_idle(self, agents: list[dict], now: float) -> None:
+        """维护工位 idle/done 起始时间表；状态回 working/blocked 或工位消失时清除。
+        重启后从重启时刻保守起算（多等一个观察窗，不误叫正常回合间隙）。"""
+        seen: set[str] = set()
+        for agent in agents:
+            name = str(agent.get("name") or "")
+            if not name:
+                continue
+            seen.add(name)
+            if str(agent.get("agent_status") or "") in ("idle", "done"):
+                self.agent_idle_since.setdefault(name, now)
+            else:
+                self.agent_idle_since.pop(name, None)
+        for name in list(self.agent_idle_since):
+            if name not in seen:
+                del self.agent_idle_since[name]
+
+    def _unread_inbox_receipts(self) -> list[dict]:
+        """本 crew inbox 未消费回执（按 crew-msg 只读游标判定；guard 不代标读）。
+        游标缺失/损坏按全量未读处理（fail-safe 宁可多列，与 crew-msg 同口径）。"""
+        read_ids: set[str] = set()
+        try:
+            cursor = json.loads(
+                (self.crew_dir / "inbox-read-cursor.json").read_text(encoding="utf-8"))
+            read_ids = {str(k) for k in (cursor.get("read") or {})}
+        except (OSError, ValueError, AttributeError):
+            read_ids = set()
+        out: list[dict] = []
+        try:
+            paths = sorted((self.crew_dir / "inbox").glob("*.json"))
+        except OSError:
+            return []
+        for path in paths:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            rid = str(data.get("receipt_id") or path.stem)
+            if rid in read_ids:
+                continue
+            out.append(data)
+        return out
+
+    @staticmethod
+    def _match_unconsumed_owner(receipt: dict, name: str) -> bool:
+        """保守归属（2.2.32 补强）：优先 receipt['to'] == name 精确命中
+        （crew-msg write 落的收件方字段）；无 to 才回退 work_slot/task/findings
+        正文匹配；发送方自己排除（D7 B2-①：匹配不上跳过＋记日志，宁可漏叫
+        不叫错）。"""
+        if str(receipt.get("from") or "") == name:
+            return False
+        to = str(receipt.get("to") or "").strip()
+        if to:
+            return to == name
+        findings = receipt.get("findings")
+        hay = " ".join(filter(None, [
+            str(receipt.get("work_slot") or ""),
+            str(receipt.get("task") or ""),
+            " ".join(str(x) for x in findings) if isinstance(findings, list) else "",
+        ]))
+        return name in hay
+
+    def _refused_prompts(self) -> list[dict]:
+        """agent-log.jsonl 近窗口内 result=refused 的 prompt 行（含目标 agent 名），
+        供 dispatch prompt 聚焦/审批拒后的兜底复投提醒。"""
+        path = self.crew_dir / "agent-log.jsonl"
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+        rows: list[dict] = []
+        for line in lines[-UNCONSUMED_LOG_WINDOW:]:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if (isinstance(row, dict) and row.get("action") == "prompt"
+                    and row.get("result") == "refused"):
+                rows.append(row)
+        return rows
+
+    def _persist_unconsumed(self) -> None:
+        """unconsumedWake 并入 guard.state.json（合并读改写，不覆盖其它键；写失败
+        只记日志）。_write_idle_state 亦恒带该键，两写入路径互不丢。
+
+        首轮护栏：state 文件不存在且队列为空时直接 return——主流程 idle 基线
+        以「文件是否存在」判首轮（首轮建基线静默），此处预创建空文件会让首轮
+        被当成 diff 误叫醒（IdleChangeWakeTest 10 例回归实证）。"""
+        state = self._read_idle_state()
+        if state is None and not self.unconsumed_woken:
+            return
+        if state is None:
+            state = {"version": IDLE_CHANGE_STATE_VERSION,
+                     "buckets": {}, "pendingNotify": None}
+        state["unconsumedWake"] = self.unconsumed_woken
+        try:
+            atomic_write_text(
+                self.crew_dir / IDLE_CHANGE_STATE_FILE,
+                json.dumps(state, ensure_ascii=False, indent=1))
+        except OSError as exc:
+            self.log(f"guard.state.json 写入失败（unconsumed）：{type(exc).__name__}: {exc}")
+
+    def _restore_unconsumed(self) -> None:
+        """跨重启恢复未消费唤醒状态（S1：旧文件无 unconsumedWake 键=空队列）。"""
+        state = self._read_idle_state()
+        saved = state.get("unconsumedWake") if isinstance(state, dict) else None
+        if isinstance(saved, dict):
+            self.unconsumed_woken = {
+                str(k): dict(v) for k, v in saved.items() if isinstance(v, dict)}
+
+    def _scan_unconsumed_wake(self, agents: list[dict], now: float) -> None:
+        """兜底桶主扫描：idle/done ≥300s 的在册工位名下有未消费回执/被拒派单 →
+        注入固定消费模板。守卫链（安全矩阵不放松）：working/blocked 不叫；
+        probe/排除名单跳过；审批挂起或聚焦/不可判定 → 延后（不注入、不计数）；
+        注入失败按重试计，UNCONSUMED_RETRY_MAX 次后升级通知并停叫；
+        按条目 key 只成功叫一次；候选上限 UNCONSUMED_QUEUE_MAX。"""
+        candidates: dict[str, list[tuple[str, str]]] = {}
+        matched_keys: set[str] = set()
+        unread = self._unread_inbox_receipts()
+        for receipt in unread[:UNCONSUMED_QUEUE_MAX]:
+            rid = str(receipt.get("receipt_id") or "")
+            for agent in agents:
+                name = str(agent.get("name") or "")
+                if name and self._match_unconsumed_owner(receipt, name):
+                    key = f"receipt|{rid}"
+                    matched_keys.add(key)
+                    candidates.setdefault(name, []).append(
+                        (key, f"回执 {rid}（task={receipt.get('task') or '—'}）"))
+        for row in self._refused_prompts()[:UNCONSUMED_QUEUE_MAX]:
+            target = str(row.get("agent") or "")
+            if not target:
+                continue
+            key = f"refused|{target}|{row.get('ts')}"
+            matched_keys.add(key)
+            candidates.setdefault(target, []).append(
+                (key, f"被拒派单（task={row.get('task') or '—'}）"))
+        # 编排角色排除（对齐 _scan_worker_ctx 口径）：总舵不进兜底桶（guard 只叫
+        # helm 的既有拓扑不变；叫 helm 走 _wake 各通道）；registry role=helm 漂移
+        # 名与 helm 前缀测试名都命中；firstmate 仍可被叫。
+        try:
+            registry_roles = self._dispatch_registry()
+        except Exception:  # noqa: BLE001 - registry 不可读按名字前缀兜底
+            registry_roles = {}
+        for name, items in sorted(candidates.items()):
+            agent = next((a for a in agents if str(a.get("name") or "") == name), None)
+            if agent is None:
+                continue
+            if (str(agent.get("agent_status") or "") not in ("idle", "done")
+                    or is_probe_agent(agent) or self._excluded(agent)):
+                continue
+            info = registry_roles.get(name) if isinstance(registry_roles, dict) else None
+            role = (str(info.get("role")) if isinstance(info, dict)
+                    else "").strip().lower()
+            if role == "helm" or name.startswith("helm"):
+                continue
+            idle_since = self.agent_idle_since.get(name)
+            if idle_since is None or now - idle_since < UNCONSUMED_MIN_IDLE_SECONDS:
+                continue
+            pending = [(key, label) for key, label in items[:UNCONSUMED_QUEUE_MAX]
+                       if not self.unconsumed_woken.get(key, {}).get("done")]
+            if not pending:
+                continue
+            keys = [key for key, _ in pending]
+            defer_reason: str | None = None
+            if self._detect_stuck([agent], now):
+                defer_reason = "目标有未闭合审批"
+            else:
+                focused, focus_reason = self._pane_focus_state(agent)
+                if focused is not False:
+                    defer_reason = ("目标 pane 聚焦" if focused
+                                    else f"聚焦状态无法判定（{focus_reason}）")
+            if defer_reason:
+                for key in keys:
+                    self.unconsumed_woken.setdefault(key, {})["pending"] = True
+                self.log(f"未消费唤醒延后（{name}：{defer_reason}，不注入）："
+                         f"{len(pending)} 项")
+                continue
+            message = UNCONSUMED_WAKE_TEMPLATE.format(
+                count=len(pending),
+                items="\n".join(f"- {label}" for _, label in pending))
+            try:
+                prompted = bool(self.prompt(name, message))
+            except Exception as exc:  # noqa: BLE001 - 注入异常按失败重试
+                prompted = False
+                self.log(f"未消费唤醒注入异常（{name}）：{type(exc).__name__}: {exc}")
+            for key in keys:
+                entry = self.unconsumed_woken.setdefault(key, {"retries": 0})
+                entry["pending"] = False
+                entry["at"] = now
+                if prompted:
+                    entry["done"] = True
+                    continue
+                entry["retries"] = int(entry.get("retries") or 0) + 1
+                if entry["retries"] >= UNCONSUMED_RETRY_MAX:
+                    entry["done"] = True  # 停止重试，升级通知一次
+                    self.log(f"未消费唤醒重试 {entry['retries']} 次未成功（{name}，"
+                             f"{key}），升级通知后停止注入")
+                    try:
+                        self.notify("guard 未消费唤醒升级",
+                                    f"{name} 的未消费项 {key} 连续 "
+                                    f"{UNCONSUMED_RETRY_MAX} 次注入失败，请人工查看。")
+                    except Exception as exc:  # noqa: BLE001
+                        self.log(f"guard 通知失败：{exc}")
+            if prompted:
+                self.log(f"未消费唤醒（herdr agent prompt {name}）：{len(pending)} 项")
+        # 无主未读回执只记日志（宁可漏叫不叫错）
+        unmatched = [r for r in unread
+                     if f"receipt|{r.get('receipt_id')}" not in matched_keys]
+        if unmatched:
+            self.log(f"未消费唤醒：{len(unmatched)} 条未读回执无在册归属（跳过）")
+        self._persist_unconsumed()
 
     def _write_handoff(self, **updates: object) -> None:
         fields = self._read_handoff()
@@ -1569,8 +1802,17 @@ class Guard:
             "首报前不接新活；"
             "首报后 guard 会确认并关闭旧舵 pane 与旧 tab。"
         )
+        # 2.2.32/T76/B3：交接 prompt 走文件（dispatch --message 只收文件路径，
+        # 内联文本被拒；先落 <crew>/handoff-message-<ts>.md 再传 --message-file）。
+        message_file = self.crew_dir / f"handoff-message-{int(time.time())}.md"
+        try:
+            message_file.write_text(message, encoding="utf-8")
+        except OSError as exc:
+            return self._handoff_fail(
+                "handoff message file", f"写入失败：{exc}", base)
         code, output, error = self.dispatch(
-            self.root, ["prompt", "--agent", successor, "--message", message]
+            self.root, ["prompt", "--agent", successor,
+                        "--message-file", str(message_file)]
         )
         if code != 0:
             return self._handoff_fail("dispatch prompt", error or output, base)
@@ -2671,6 +2913,8 @@ class Guard:
                 .encode("utf-8")).hexdigest(),
             "buckets": buckets,
             "pendingNotify": pending_notify,
+            # 2.2.32/T76/B2：未消费唤醒状态恒随写（两写入路径互不丢；S1 向后兼容）
+            "unconsumedWake": self.unconsumed_woken,
         }
         try:
             atomic_write_text(self.crew_dir / IDLE_CHANGE_STATE_FILE,
@@ -2886,6 +3130,16 @@ class Guard:
             agent for agent in workers
             if str(agent.get("agent_status")) == "blocked" and not is_probe_agent(agent)
         ]
+        # 2.2.32/T76/B2：未消费唤醒兜底桶——idle/done 工位名下未消费回执/被拒
+        # 派单注入固定消费模板（守卫链不放松；失败只记日志不阻断值守主流程）。
+        self._track_agent_idle(workers, now)
+        if not self.unconsumed_restored:
+            self.unconsumed_restored = True
+            self._restore_unconsumed()
+        try:
+            self._scan_unconsumed_wake(workers, now)
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"未消费唤醒扫描异常：{type(exc).__name__}: {exc}")
         try:
             self._capacity_check(now, agents)
         except Exception as exc:  # noqa: BLE001 - 容量检查失败不阻断值守

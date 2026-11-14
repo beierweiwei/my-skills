@@ -274,6 +274,9 @@ class DispatchFocusTest(unittest.TestCase):
             "crew-builder": {"role": "builder", "runtime": "qoder",
                              "pane": "wX:p1"},
         }), encoding="utf-8")
+        # 2.2.32/T76/B3：--message/--message-file 只收文件路径，夹具先落文件
+        self.msg = self.base / "msg.md"
+        self.msg.write_text("hi\n", encoding="utf-8")
         self.notify_calls: list[tuple[str, str]] = []
 
     def run_main(self, fake: FakeHerdr, *args: str, notify_ok: bool = True):
@@ -306,7 +309,7 @@ class DispatchFocusTest(unittest.TestCase):
             [{"name": "crew-builder", "pane_id": "wX:p1"}],
             [{"pane_id": "wX:p1", "focused": True}])
         code, _out, err = self.run_main(
-            fake, "prompt", "--agent", "crew-builder", "--message", "hi")
+            fake, "prompt", "--agent", "crew-builder", "--message-file", str(self.msg))
 
         self.assertEqual(2, code)
         self.assertIn("聚焦", err)
@@ -321,7 +324,7 @@ class DispatchFocusTest(unittest.TestCase):
             [{"name": "crew-builder", "pane_id": "wX:p1"}],
             [{"pane_id": "wX:p1", "focused": False}])
         code, out, _err = self.run_main(
-            fake, "prompt", "--agent", "crew-builder", "--message", "hi")
+            fake, "prompt", "--agent", "crew-builder", "--message-file", str(self.msg))
 
         self.assertEqual(0, code)
         self.assertIn("已发送提示", out)
@@ -334,7 +337,7 @@ class DispatchFocusTest(unittest.TestCase):
         fake = FakeHerdr(
             [{"name": "crew-builder", "pane_id": "wX:p1"}], pane_mode="down")
         code, _out, err = self.run_main(
-            fake, "prompt", "--agent", "crew-builder", "--message", "hi")
+            fake, "prompt", "--agent", "crew-builder", "--message-file", str(self.msg))
 
         self.assertEqual(2, code)
         self.assertIn("fail-safe", err)
@@ -349,7 +352,7 @@ class DispatchFocusTest(unittest.TestCase):
               "cwd": str(self.root)}],
             [{"pane_id": "wX:p1", "focused": True}])
         code, out, _err = self.run_main(
-            fake, "notify", "--agent", "crew-builder", "--message", "hi",
+            fake, "notify", "--agent", "crew-builder", "--message-file", str(self.msg),
             "--no-require-receipt", "--json")
 
         self.assertEqual(0, code)
@@ -370,7 +373,7 @@ class DispatchFocusTest(unittest.TestCase):
             [{"name": "crew-builder", "pane_id": "wX:p1",
               "cwd": str(self.root)}], pane_mode="down")
         code, out, _err = self.run_main(
-            fake, "notify", "--agent", "crew-builder", "--message", "hi",
+            fake, "notify", "--agent", "crew-builder", "--message-file", str(self.msg),
             "--no-require-receipt", "--json")
 
         self.assertEqual(0, code)
@@ -386,7 +389,7 @@ class DispatchFocusTest(unittest.TestCase):
               "cwd": str(self.root)}],
             [{"pane_id": "wX:p1", "focused": True}])
         code, out, _err = self.run_main(
-            fake, "notify", "--agent", "crew-builder", "--message", "hi",
+            fake, "notify", "--agent", "crew-builder", "--message-file", str(self.msg),
             "--no-require-receipt", "--json", notify_ok=False)
 
         self.assertEqual(0, code)
@@ -404,7 +407,7 @@ class DispatchFocusTest(unittest.TestCase):
             [{"name": "crew-builder", "pane_id": "wX:p1", "cwd": str(plain)}],
             [{"pane_id": "wX:p1", "focused": True}])
         code, out, err = self.run_main(
-            fake, "notify", "--agent", "crew-builder", "--message", "hi",
+            fake, "notify", "--agent", "crew-builder", "--message-file", str(self.msg),
             "--no-require-receipt", "--json")
 
         self.assertEqual(2, code)
@@ -418,7 +421,8 @@ class DispatchFocusTest(unittest.TestCase):
     def test_notify_external_agent_without_pane_still_prompts(self):
         fake = FakeHerdr([])
         code, out, _err = self.run_main(
-            fake, "notify", "--agent", "case-agent", "--message", "hi",
+            fake, "notify", "--agent", "case-agent",
+            "--message-file", str(self.msg),
             "--no-require-receipt", "--json")
 
         self.assertEqual(0, code)

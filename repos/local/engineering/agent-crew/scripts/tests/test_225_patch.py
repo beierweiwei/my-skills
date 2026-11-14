@@ -88,7 +88,10 @@ class Nf001HelmDispatchFileTest(unittest.TestCase):
             with self.subTest(template=path.name):
                 text = read(path)
                 self.assertIn("所有派单一律先落临时文件（不区分长短）", text)
-                self.assertIn('"$(cat <file>)"', text)
+                # 2.2.32/T76/B3：$(cat) 经 shell 展开仍是内联文本会被拒，
+                # 模板口径升级为 --message-file <file>
+                self.assertIn("--message-file <file>", text)
+                self.assertNotIn('"$(cat <file>)"', text)
                 self.assertNotIn("长 prompt/含反引号等特殊字符的派单", text)
                 self.assertLessEqual(len(text.splitlines()), 80)
 

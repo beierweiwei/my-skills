@@ -46,7 +46,7 @@ python3 scripts/dispatch.py --root . compose --role builder --runtime qoder --js
 python3 scripts/dispatch.py --root . start --role builder --runtime qoder --pane <pane_id>
 
 # 提示 / 关闭 / 状态（--agent 取 dispatch 托管的 agent 名）
-python3 scripts/dispatch.py --root . prompt --agent <task>-builder --message "读工单 <路径>，执行。"
+printf '读工单 <路径>，执行。\n' > /tmp/msg.md && python3 scripts/dispatch.py --root . prompt --agent <task>-builder --message-file /tmp/msg.md  # 2.2.32/T76：--message/--message-file 只收文件路径
 python3 scripts/dispatch.py --root . close --agent <task>-builder
 python3 scripts/dispatch.py --root . status --json
 ```
@@ -60,7 +60,7 @@ python3 scripts/dispatch.py --root . status --json
 ## 5. 派活、等待、读结果
 
 ```bash
-python3 scripts/dispatch.py --root . prompt --agent <task>-builder --message "读 <需求文档路径>，执行工单 <工单路径>；只改指定文件。"
+printf '读 <需求文档路径>，执行工单 <工单路径>；只改指定文件。\n' > /tmp/msg.md && python3 scripts/dispatch.py --root . prompt --agent <task>-builder --message-file /tmp/msg.md
 herdr agent read <task>-builder --source recent-unwrapped --lines 200
 herdr agent get <task>-builder
 ```
