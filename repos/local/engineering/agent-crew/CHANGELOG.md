@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.2.30 — 2026-11-14
+
+公共功能批（CASE 两项公共实践升技能）：模型切换执行器 + plan 段级归档执行器，均为默认 dry-run、显式 `--apply`，标准库实现。
+
+### 新增
+
+- **A `crew-model.py` 模型切换执行器**：`settings`（qoder 改 `agents.overrides[*].modelConfig.model`；claude 改顶层 `model`，提示 per-role 路由在 orchestration.json）+ `panes`（运行中 pane 批量 `/model` 直切）双子命令；三运行时适配（opencode 明确拒绝）；目标模型无默认值；默认只处理本 workspace（`HERDR_WORKSPACE_ID`/`--workspace`，缺一拒绝防跨项目误伤）；working 跳过、未见提示符不硬切、切换后回读核验（qoder 状态行 `[<model>]` 为强证据，`Model set to` 有 feedback #35 误报实证）；改前备份（5 份滑动窗口 + 同秒递增后缀防覆盖）；`herdr-cheatsheet` §7 指针。
+- **B `plan-archive.py` plan 段级归档执行器**：流 `--task <slug>` 处理 `task_plan.md`（Next Step 已完成/最近完成 >10 裁剪归档，其余段不动）与 `progress.md`（≥40KB 或 ≥100 条触发；里程节式裁到 `--keep` 条同 `--rotate` 口径；日期段式整段迁移、保护最近 2 日与交接段）；flock 非阻塞占用即拒绝；读入后二次 sha256 复核防 TOCTOU；先写归档 fsync 再原子重写 live；归档头含来源/操作者/截止边界/before-after/源 sha256；同日追加分段；`--task all --apply` 拒绝；portfolio progress 仍归 `plan-status.py --rotate`（两锁并存）；`plan-discipline` §5.2 指针。CASE 口径 diff 与取舍见脚本头注释（阈值 400 行→40KB/100 条等，依据 §5.2 正文）。
+
 ## 2.2.29 — 2026-11-14
 
 上下文瘦身批（CASE 新舵接手 188k 实测驱动）：工具输出默认瘦身 + 交接读取口径，所有默认瘦身均保留显式展开开关（`--verbose`/`--all`/`--full`/`--json` 不变，不删调试能力、不破坏机器解析）。

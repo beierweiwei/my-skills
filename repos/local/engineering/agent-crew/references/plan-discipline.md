@@ -132,6 +132,8 @@
 
 **禁止**：无备份删除、归档活跃项、删改 Phase/Status、跨 task 合并归档、写者活跃时 apply、`.scratch` 作唯一备份。
 
+> 段级归档执行器（2.2.30）：`python3 scripts/plan-archive.py --task <slug> [--apply --owner <名>]`（默认 dry-run）——流 task_plan/progress 超限段归档（Next Step 已完成/最近完成 >10；progress ≥40KB 或 ≥100 条），flock + sha256 守恒 + 归档头 + 同日追加分段；与本表安全口径等效的替代实现（flock+sha256 TOCTOU 复核替代活动 worker 检测；静默窗口 apply、禁 `--task all --apply`、归档与 live 同一 commit 不变；portfolio progress 仍归 `--rotate`）。用法见脚本头注释。
+
 ### 5.3 feedback 生命周期
 
 - **信箱边界**：只收编排/流程/提示词问题；四路分诊、复盘与去向纪律见 [crew-rules.md](crew-rules.md) **R5**，本节省表结构与归档口径。
