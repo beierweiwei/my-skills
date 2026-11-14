@@ -2900,6 +2900,23 @@ BACKLOG_PAUSED_MIXED_PORTFOLIO = """# Task Plan: 总览
 | T3 | 待拍板事项 | P1 | - | ⏸ 待 Captain |
 """
 
+# —— 2.2.31：已完成判定先于 ⏸/外部标记匹配（guard-noise 流根因 1）——
+# 真实形态（本仓 portfolio T40–T49）：「✅ 已完成（…发布…；待 Captain 签认）」。
+# 已完成行带「待 Captain 签认」「⏸」后缀时不得误入暂停桶；「✅」单独出现也算完成。
+BACKLOG_DONE_VARIANTS_PORTFOLIO = """# Task Plan: 总览
+
+## Backlog
+
+| # | 目标 | P | 依赖 | 阻塞 |
+|---|---|---|---|---|
+| T1 | 完成带签认 | P1 | - | ✅ 已完成（2.2.16 本地发布；待 Captain 签认） |
+| T2 | 完成带暂停 | P1 | - | 已完成 ⏸ |
+| T3 | 完成勾号 | P1 | - | ✅ |
+| T4 | 完成英文 | P1 | - | done（待 Captain 签认） |
+| T5 | 未完成待Captain | P1 | - | 待 Captain |
+| T6 | 未完成暂停 | P1 | - | ⏸ 下批 |
+"""
+
 HELM_IDLE = {"name": "helm-1", "agent_status": "idle"}
 
 
@@ -2964,6 +2981,21 @@ class BacklogPausedScanTest(GuardTestBase):
         second = guard.run_once()
         self.assertFalse(second["woke"], "排队 ⏸ 不触发两轮 debounce 即时叫醒")
         self.assertEqual(self.prompt_calls, [])
+
+    def test_done_rows_with_pause_suffix_never_enter_any_bucket(self):
+        """2.2.31 根因 1：已完成判定先于 ⏸/外部标记匹配——已完成行不进任何桶。"""
+        self.write_fixture(stream=EMPTY_STREAM,
+                           portfolio=BACKLOG_DONE_VARIANTS_PORTFOLIO)
+        pending, residual, paused = cg.scan_todos(self.root)
+        # T1「✅ 已完成（…；待 Captain 签认）」/ T2「已完成 ⏸」/ T3「✅」/
+        # T4「done（待 Captain 签认）」：不进 pending、不进 ⏸ 待外部/排队、不进 ⛔。
+        self.assertEqual(pending, [], "已完成行不得进 pending")
+        self.assertEqual(residual, [])
+        # 对照：未完成行不受影响——「待 Captain」仍归 ⏸ 待外部、「⏸ 下批」仍归排队。
+        self.assertEqual([todo.text for todo in paused],
+                         ["⏸ 待外部：T5 未完成待Captain",
+                          "⏸ 排队：T6 未完成暂停"],
+                         "暂停桶只含未完成对照行，已完成行不得混入")
 
 
 class IdleBackoffWakeTest(GuardTestBase):

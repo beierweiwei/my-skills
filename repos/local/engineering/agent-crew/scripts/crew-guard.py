@@ -604,6 +604,10 @@ def _parse_backlog(root: Path, path: Path, rel: str, pending: list[Todo],
       （idle 兜底 wake 清单可见）但不触发即时叫醒，由空闲兜底/攒批触发承载。
     - 无 ⏸ 的行：blocked/已完成后过滤——可派进 pending（触发既有叫醒通道）；
       blocked 行进暂停桶「⛔ 阻塞：」（仅兜底清单可见，不触发）。
+
+    2.2.31：已完成判定（「已完成」/「✅」/DONE_RE）必须先于 ⏸/外部标记匹配——
+    已完成行常带「待 Captain 签认」等后缀（本仓 T40–T49 实证），后匹配会让已完成
+    行误入暂停桶、持续进出空闲兜底清单（制造假变化/假安静，guard-noise 流根因 1）。
     """
     config = load_config(root)
     prefix = config["backlog"]["agentPrefix"]
@@ -615,6 +619,8 @@ def _parse_backlog(root: Path, path: Path, rel: str, pending: list[Todo],
             continue
         text = " ".join(cells[:2]).strip()
         blocker = cells[-1]
+        if "已完成" in blocker or "✅" in blocker or DONE_RE.search(blocker.lower()):
+            continue
         if any(mark in blocker for mark in BACKLOG_EXTERNAL_PAUSE_MARKS):
             paused.append(Todo(rel, "Backlog", f"⏸ 待外部：{text}"))
             continue
@@ -623,8 +629,6 @@ def _parse_backlog(root: Path, path: Path, rel: str, pending: list[Todo],
             continue
         if "blocked" in blocker.lower():
             paused.append(Todo(rel, "Backlog", f"⛔ 阻塞：{text}"))
-            continue
-        if "已完成" in blocker or DONE_RE.search(blocker.lower()):
             continue
         pending.append(Todo(rel, "Backlog", text))
 
