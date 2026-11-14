@@ -3205,8 +3205,41 @@ class IdleChangeWakeTest(GuardTestBase):
             self.assertFalse(result["woke"], "同状态不重复叫醒")
         self.assertEqual(len(self.prompt_calls), 1)
 
-    def test_worker_edge_wake_then_swallowed_change_replayed_after_cooldown(self):
-        # 要件 7 / 审查建议 3：变化只受全局冷却；被吞增量持久化，冷却期满补发一次。
+    def test_swallowed_change_replayed_after_cooldown(self):
+        # 要件 7：变化只受全局冷却；冷却内再次变化被吞 → 持久化，冷却期满补发一次。
+        # （桶收窄后 workers 进出不进指纹、非安静期兜底不介入——既有通道行为不变。）
+        self.quiet0()
+        self.agents = [HELM_IDLE]
+        guard = self.make_guard()
+        self.settle(guard, 2)
+        # 安静期 paused 新增 → 兜底叫醒（last_wake_at 计时起点）
+        self.write_fixture(stream=EMPTY_STREAM, portfolio=QUEUE_ADDED_ROW_PORTFOLIO,
+                           config={"guard": {"idleWakeRounds": 0}})
+        self.now[0] += 700
+        result = guard.run_once()
+        self.assertTrue(result["woke"] and result.get("idleChangeWake"), "paused 新增叫醒")
+        # 冷却（默认 10 分钟）内 paused 再变（T7 移除）→ 被吞、持久化
+        self.write_fixture(stream=EMPTY_STREAM,
+                           portfolio=BACKLOG_PAUSED_QUEUE_PORTFOLIO,
+                           config={"guard": {"idleWakeRounds": 0}})
+        self.now[0] += 60
+        result = guard.run_once()
+        self.assertFalse(result["woke"], "冷却中被吞")
+        state = json.loads((self.crew / "guard.state.json").read_text(encoding="utf-8"))
+        self.assertTrue(state.get("pendingNotify"), "被吞增量持久化在 state")
+        self.assertTrue(any("留待补发" in line for line in self.logs), "被吞记日志")
+        # 冷却期满：补发一次（含移除增量）
+        self.now[0] += 700
+        result = guard.run_once()
+        self.assertTrue(result["woke"], "冷却期满补发一次")
+        message = self.prompt_calls[-1][1]
+        self.assertIn("T7 新排队项", message, "补发消息含移除增量")
+        self.now[0] += 700
+        self.assertFalse(guard.run_once()["woke"], "补发后不重复")
+
+    def test_worker_change_leaves_wake_to_existing_channels(self):
+        # 桶收窄（实现取舍）：pending/worker 变化打断安静期，由既有通道承载
+        # （fast_wake/pending 主叫醒），新兜底不介入——2.2.30 已验收行为不改变。
         self.quiet0()
         self.agents = [HELM_IDLE]
         guard = self.make_guard()
@@ -3214,21 +3247,17 @@ class IdleChangeWakeTest(GuardTestBase):
         self.agents = [HELM_IDLE, {"name": "worker-1", "agent_status": "working"}]
         self.now[0] += 700
         result = guard.run_once()
-        self.assertTrue(result["woke"], "worker 进入 → 变化叫醒")
-        self.assertTrue(result.get("idleChangeWake"))
-        self.now[0] += 60  # 冷却（默认 10 分钟）内
-        self.agents = [HELM_IDLE]
-        result = guard.run_once()
-        self.assertFalse(result["woke"], "冷却中被吞")
+        self.assertFalse(result["woke"], "worker 进入不触发状态变化兜底")
+        self.assertFalse(result.get("idleChangeWake"))
+        self.assertEqual(self.prompt_calls, [])
         state = json.loads((self.crew / "guard.state.json").read_text(encoding="utf-8"))
-        self.assertTrue(state.get("pendingNotify"), "被吞增量持久化在 state")
-        self.now[0] += 700  # 冷却期满
-        result = guard.run_once()
-        self.assertTrue(result["woke"], "冷却期满补发一次")
-        message = self.prompt_calls[-1][1]
-        self.assertIn("worker-1", message, "补发消息含移除增量")
+        self.assertNotIn("workers", state["buckets"], "指纹只含盲区两桶")
+        self.agents = [HELM_IDLE]
         self.now[0] += 700
-        self.assertFalse(guard.run_once()["woke"], "补发后不重复")
+        result = guard.run_once()
+        self.assertTrue(result["woke"], "worker 消失仍走完成边沿叫醒")
+        self.assertFalse(result.get("idleChangeWake"), "该叫醒来自 fast_wake 通道")
+        self.assertIn("worker 完成待核收", self.prompt_calls[-1][1])
 
     def test_due_queue_entry_wakes_once_on_date(self):
         # 要件 5：⏸ 排队条目「今天 ≥ 文本到期日」视为状态变化，一次性叫醒。

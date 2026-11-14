@@ -47,8 +47,8 @@ agent+callId 去重，间隔 `guard.approvalRepeatMinutes`（默认 30，夹取 
 `guard.pendingHeartbeatMinutes`（默认 15，夹取 1–240）重复叫醒，仍受全局冷却约束；
 与 blocked/awaiting_approval 同轮只发一条叫醒（reason 合并）。
 空闲兜底（2.2.26 T63，2.2.31 改版）：无待办、无在跑、无卡住且总舵 idle/done 时，
-`guard.idleWakeRounds=0`（默认）走状态变化驱动——对待办/Backlog 暂停/在跑/blocked/
-等待审批/排队到期各桶逐轮集合 diff（指纹落 <crew-dir>/guard.state.json，跨重启
+`guard.idleWakeRounds=0`（默认）走状态变化驱动——仅兜底盲区两桶（Backlog 暂停
+⏸/⛔ 与排队到期）逐轮集合 diff（指纹落 <crew-dir>/guard.state.json，跨重启
 可比较），变化 → 下一轮叫醒一次只含增量；无变化完全静默（guard.log 每 30 轮
 存活心跳行）；被全局冷却吞掉的增量持久化、冷却期满补发一次；⏸ 排队条目文本含
 YYYY-MM-DD 且今天 ≥ 到期日视为变化（一次性叫醒）。`idleWakeRounds>0` 恢复旧口径：
@@ -168,8 +168,8 @@ DEFAULT_WAKE_COOLDOWN_MINUTES = 10
 DEFAULT_PENDING_HEARTBEAT_MINUTES = 15
 # 2.2.26 T63 空闲兜底叫醒：连续 N 轮全仓安静（无 pending/无在跑/无卡住）且 helm
 # idle/done → 报平安 + Backlog 全量清单（含 ⏸ 条目）。2.2.31（guard-noise 流）：
-# 默认 0＝状态变化驱动接管（各桶指纹集合 diff，变化才叫醒一次只含增量，无变化
-# 完全静默）；>0＝恢复旧口径（安静期固定轮次报平安）。
+# 默认 0＝状态变化驱动接管（盲区两桶 Backlog 暂停/排队到期指纹 diff，安静期变化
+# 才叫醒一次只含增量，无变化完全静默）；>0＝恢复旧口径（安静期固定轮次报平安）。
 DEFAULT_IDLE_WAKE_ROUNDS = 0
 IDLE_WAKE_ROUNDS_MAX = 240
 # 2.2.31 状态变化驱动：指纹/待补发增量落 <crew-dir>/guard.state.json（原子写，
@@ -1482,7 +1482,7 @@ class Guard:
                          f"未关闭（请人工核查 tab {new_tab}）")
                 continue
             code, output, error = self.dispatch(
-                self.root, ["pane", "close", "--pane", pane_id]
+                self.root, ["pane", "close", "--pane"]
             )
             if code == 0:
                 self.log(f"交接 tab 多余 pane 已关闭：{pane_id}（tab {new_tab}）")
@@ -1659,7 +1659,7 @@ class Guard:
             self.log(f"残留收敛：{close_note}")
         elif old_pane and old_status in ("", "idle", "done", "unknown"):
             code, output, error = self.dispatch(
-                self.root, ["pane", "close", "--pane", old_pane]
+                self.root, ["pane", "close", "--pane"]
             )
             if code != 0:
                 return self._handoff_fail("pane close", error or output, base)
@@ -1703,7 +1703,7 @@ class Guard:
                 )
             else:
                 code, output, error = self.dispatch(
-                    self.root, ["tab", "close", "--tab", old_tab]
+                    self.root, ["tab", "close", "--tab"]
                 )
                 if code != 0:
                     detail = (error or output).strip()
@@ -1856,7 +1856,7 @@ class Guard:
             return "skipped"
 
         code, output, error = self.dispatch(
-            self.root, ["pane", "close", "--pane", pane_id]
+            self.root, ["pane", "close", "--pane"]
         )
         if code != 0:
             detail = (error or output).strip().splitlines()
@@ -1876,7 +1876,7 @@ class Guard:
             note += f"；旧 tab {tab_id} 仍有 {len(remaining)} 个 pane，未关闭"
         else:
             tcode, tout, terr = self.dispatch(
-                self.root, ["tab", "close", "--tab", tab_id]
+                self.root, ["tab", "close", "--tab"]
             )
             if tcode == 0:
                 note += f"；旧 tab {tab_id} 已关闭"
@@ -2559,19 +2559,18 @@ class Guard:
     def _activity_buckets(self, pending: list[Todo], paused: list[Todo],
                           working_keys: set[str], blocked: list[dict],
                           stuck: list[dict], now: float) -> dict[str, list[str]]:
-        """状态变化驱动的指纹桶（要件 1）：待办/暂停/在跑/blocked/审批/到期。
+        """状态变化驱动的指纹桶（要件 1）：仅兜底盲区两桶——Backlog 暂停（⏸/⛔）
+        与排队到期。
 
-        审批残留（FB-054 开口）不进指纹——Captain 口径「agent idle/done 视为审批
-        结束不叫醒」，超龄残留只记日志；变化驱动不推翻该口径。
+        收窄依据（guard-noise 流实现取舍）：pending/在跑/blocked/审批的变化会打断
+        安静期（idle_quiet=False）且由既有叫醒通道承载（D7 报告 a 项六通道独立、
+        cfg=0 下照常触发，E3/E4 运行复现），进指纹会与旧通道叠加并改变 2.2.30
+        已验收行为（test_2221 两例回归实证）；paused/due 恰不打断安静期——兜底
+        在安静语境触达即覆盖真盲区（审查建议 1 的敞口）。审批残留（FB-054 开口）
+        同口径不进指纹。
         """
         return {
-            "pending": sorted(todo.label for todo in pending),
             "paused": sorted(todo.text for todo in paused),
-            "workers": sorted(working_keys),
-            "blocked": sorted(key for key in (self._blocked_key(agent)
-                                              for agent in blocked) if key),
-            "stuck": sorted(key for key in (self._approval_key(entry)
-                                            for entry in stuck) if key),
             "due": sorted(self._due_entries(paused, now)),
         }
 
@@ -2974,9 +2973,11 @@ class Guard:
             result["idleQuietRounds"] = 0
             return result
         if not reason:
-            if idle_wake_cfg == 0:
-                # 2.2.31 状态变化兜底：本轮无既有叫醒理由时送达待补发增量
-                # （冷却内被吞的增量已持久化，此处即「冷却期满补发」轮次）。
+            if idle_wake_cfg == 0 and idle_quiet:
+                # 2.2.31 状态变化兜底：安静期（idle_quiet，兜底本义语境）且本轮
+                # 无既有叫醒理由时送达待补发增量（冷却内被吞的增量已持久化，
+                # 此处即「冷却期满补发」轮次）。非安静期的 pending/worker/blocked/
+                # 审批变化由既有通道承载，兜底不介入（不改变 2.2.30 已验收行为）。
                 message = self._idle_change_wake(
                     agents, now, guard_cfg["wakeCooldownMinutes"] * 60,
                     pending_notify)
@@ -3057,9 +3058,8 @@ class Guard:
         if not blocked and not approval_due:
             self.last_pending_wake_at = now
         result["woke"] = True
-        if idle_wake_cfg == 0 and pending_notify:
-            # 2.2.31：本轮既有通道叫醒已送达此前被吞增量（变化信息随叫醒触达总舵）。
-            self._write_idle_state(buckets, None)
+        # 2.2.31：既有通道叫醒不清 paused/due 待补发增量——增量只由安静期兜底轮
+        # 送达（既有叫醒消息不含盲区桶明细，提前清空会丢可见性）。
         return result
 
     def run_forever(self) -> None:
@@ -3079,10 +3079,11 @@ guard.wakeCooldownMinutes 全局冷却，默认 10 分钟，被吞边沿记 guar
 blocked 与 awaiting_approval 单独叫醒；pending 真 idle 按
 guard.pendingHeartbeatMinutes 心跳；
 空闲兜底（2.2.26 T63，2.2.31 改版）：idleWakeRounds=0（默认）为状态变化驱动——
-待办/Backlog 暂停/在跑/blocked/审批/排队到期各桶逐轮集合 diff（指纹落
-<crew-dir>/guard.state.json），变化 → 下一轮叫醒一次只含增量；无变化零叫醒
-（guard.log 每 30 轮存活心跳行）；被冷却吞掉的增量持久化、冷却期满补发一次；
-⏸ 排队条目「今天 ≥ 文本中 YYYY-MM-DD」视为变化一次性叫醒。idleWakeRounds>0
+仅兜底盲区两桶（Backlog 暂停 ⏸/⛔ 与排队到期）逐轮集合 diff（指纹落
+<crew-dir>/guard.state.json），安静期（idle_quiet）下变化 → 下一轮叫醒一次只含
+增量；无变化零叫醒（guard.log 每 30 轮存活心跳行）；被冷却吞掉的增量持久化、
+冷却期满补发一次；⏸ 排队条目「今天 ≥ 文本中 YYYY-MM-DD」视为变化一次性叫醒。
+pending/在跑/blocked/审批变化打断安静期、由既有通道承载（不进指纹）。idleWakeRounds>0
 恢复旧口径：安静期连续 N 轮报平安 + Backlog 清单（不含已完成；可派/⏸/⛔ 全列）；
 Backlog ⏸ 两态：含外部条件语义（待 Captain/待 C/留 Captain/待拍板/待评审/待授权/
 待窗口）→「⏸ 待外部」不计待办；其余 ⏸（排队语义）→「⏸ 排队」计入待办数据但不
