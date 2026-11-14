@@ -62,17 +62,6 @@ X4_SNAPSHOT = (
     "（取舍：静态扫描只做技能源回归，不覆盖变量构造的运行时复制路径，行为靠模板自检覆盖）。"
 )
 
-CREDENTIAL_BAN_PHRASES = {
-    "templates/agents/qoder/firstmate.md":
-        "不复制进仓库、证据、对话、沙箱、平台、共享目录、线程工作区",
-    "templates/agents/opencode/firstmate.md":
-        "不复制进仓库、证据、对话、沙箱、平台、共享目录、线程工作区",
-    "templates/agents/qoder/runner.md":
-        "不在仓库、证据、对话、沙箱、平台、共享目录、线程工作区留凭据",
-    "templates/agents/opencode/runner.md":
-        "不在仓库、证据、对话、沙箱、平台、共享目录、线程工作区留凭据",
-}
-
 # 字面量凭据文件名扫描（.example/.sample/.template 视为示例文件放行）。
 CREDENTIAL_NAMES = (
     ".env",
@@ -263,13 +252,15 @@ class CredentialRedlineTest(unittest.TestCase):
             self.assertIn(keyword, text, f"{RULES} 缺少：{keyword}")
 
     def test_firstmate_runner_credential_selfcheck(self):
+        """2.2.33/T51：凭据句纯指针化——模板不复述 X4 条款，只留指针+自检动作。"""
         for rel in FIRSTMATE_RUNNER:
             text = read(rel)
-            for keyword in ("凭据/会话文件", ".scratch/", "0600", "上抛", "不动他人凭据"):
+            for keyword in ("凭据/会话文件按 X4 执行", "`{{crew_rules}}` X4",
+                            "用前自检存落合规", "涉凭据一律上抛"):
                 self.assertIn(keyword, text, f"{rel} 缺少：{keyword}")
-            for zone in ("仓库", "证据", "对话", "沙箱", "平台", "共享目录", "线程工作区"):
-                self.assertIn(zone, text, f"{rel} 缺少落点：{zone}")
-            self.assertIn(CREDENTIAL_BAN_PHRASES[rel], text, f"{rel} 禁投落点不全")
+            # 复述句必须清除（X4 为唯一正文）
+            for zone in ("沙箱", "共享目录", "线程工作区"):
+                self.assertNotIn(zone, text, f"{rel} 残留 X4 落点复述：{zone}")
 
     def test_credential_copy_checker_flags_positive_examples(self):
         samples = (

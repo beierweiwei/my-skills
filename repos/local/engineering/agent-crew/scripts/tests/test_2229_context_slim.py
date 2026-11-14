@@ -502,16 +502,16 @@ class S5NextStepUnfinishedTest(unittest.TestCase):
 class Version2229Test(unittest.TestCase):
     def test_version_four_places_consistent(self):
         skill = (_SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("version: 2.2.32", skill, "SKILL.md frontmatter version")
-        self.assertIn("v2.2.32", skill, "SKILL.md 标题版本")
+        self.assertIn("version: 2.2.33", skill, "SKILL.md frontmatter version")
+        self.assertIn("v2.2.33", skill, "SKILL.md 标题版本")
         changelog = (_SKILL_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         head = changelog[:3000]
         self.assertTrue(
-            "2.2.32" in head.split("2.2.28", 1)[0] if "2.2.28" in head else "2.2.32" in head,
-            "CHANGELOG 最新版本段应为 2.2.32",
+            "2.2.33" in head.split("2.2.28", 1)[0] if "2.2.28" in head else "2.2.33" in head,
+            "CHANGELOG 最新版本段应为 2.2.33",
         )
         init_src = (_SCRIPTS / "init.py").read_text(encoding="utf-8")
-        self.assertIn('SKILL_VERSION_FALLBACK = "2.2.32"', init_src)
+        self.assertIn('SKILL_VERSION_FALLBACK = "2.2.33"', init_src)
 
 
 if __name__ == "__main__":

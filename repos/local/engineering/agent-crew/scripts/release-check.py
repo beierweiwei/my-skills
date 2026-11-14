@@ -28,8 +28,14 @@
 `--dry-run` 是默认且唯一模式：本脚本不写仓、不重启服务；子进程只跑只读命令
 （`init --check`、`doctor`）。`--json` 输出结构化结果，便于后续接入。
 
+`--snapshot-dir <dir>`：检查前把项目编排配置（`.planning/orchestration.json` 与
+`docs/crew/manifest.json`）按字节复制到证据目录并写 `config-snapshot.json`
+（ts/源路径/sha256/size），配置缺失记 `missing` 不崩（FB-063：配置被破坏后
+凭发布证据可逐字节还原，恢复命令见备份文件 sha256 对照）。快照不改检查表与
+rc；快照写入失败按环境错误 rc=3。
+
 退出码：0 全 pass（skip 不阻断但会显示）；1 有 fail；2 参数/用法错误；3 环境错误
-（root 不存在、显式 `--source` 不可用、crew 目录无法解析）。
+（root 不存在、显式 `--source` 不可用、crew 目录无法解析、快照写入失败）。
 """
 
 from __future__ import annotations
@@ -39,11 +45,13 @@ import sys
 sys.dont_write_bytecode = True  # 只读检查：不在源/项目 scripts 留 __pycache__
 
 import argparse  # noqa: E402
+import hashlib  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
 import subprocess  # noqa: E402
 from dataclasses import dataclass, field  # noqa: E402
+from datetime import datetime, timezone  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -54,6 +62,11 @@ import upgrade as upgrade_lib  # noqa: E402
 
 CONFIG_REL = Path(".planning/orchestration.json")
 MANIFEST_REL = Path("docs/crew/manifest.json")
+# 配置快照（FB-063）：快照文件名 → 项目内源路径
+SNAPSHOT_FILES = (
+    ("orchestration.json", CONFIG_REL),
+    ("manifest.json", MANIFEST_REL),
+)
 EXCLUDED_DIRS = {"__pycache__", ".pytest_cache", ".git"}
 EXCLUDED_SUFFIXES = (".pyc", ".pyo")
 MY_SKILLS_ENV = "CREW_MY_SKILLS_ROOT"
@@ -749,6 +762,44 @@ CHECKS = [
 
 
 # ---------------------------------------------------------------------------
+# 配置快照（FB-063：发布/升级证据固定含编排配置全文，事后可逐字节还原）
+# ---------------------------------------------------------------------------
+
+def snapshot_configs(root: Path, out_dir: Path) -> dict:
+    """把编排配置按字节复制到 out_dir 并写清单；IO 失败抛 OSError（调用方 rc=3）。"""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    files = []
+    for name, rel in SNAPSHOT_FILES:
+        source = root / rel
+        entry = {"file": name, "source": rel.as_posix(), "sha256": "",
+                 "size": 0, "status": "missing"}
+        if source.is_file():
+            payload = source.read_bytes()
+            (out_dir / name).write_bytes(payload)
+            entry.update(sha256=hashlib.sha256(payload).hexdigest(),
+                         size=len(payload), status="copied")
+        files.append(entry)
+    listing = {
+        "schemaVersion": 1,
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "root": str(root),
+        "dir": str(out_dir),
+        "files": files,
+    }
+    (out_dir / "config-snapshot.json").write_text(
+        json.dumps(listing, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return listing
+
+
+def snapshot_line(listing: dict) -> str:
+    parts = [f"{entry['file']}={entry['status']}"
+             + (f" sha256={entry['sha256'][:12]}" if entry["sha256"] else "")
+             for entry in listing["files"]]
+    return f"snapshot: {listing['dir']}（{'；'.join(parts)}；ts={listing['ts']}）"
+
+
+
+# ---------------------------------------------------------------------------
 # 输出与入口
 # ---------------------------------------------------------------------------
 
@@ -759,19 +810,23 @@ def summarize(checks: list[Check]) -> dict[str, int]:
     return summary
 
 
-def render_table(ctx: Context, checks: list[Check], exit_code: int) -> None:
+def render_table(ctx: Context, checks: list[Check], exit_code: int,
+                 snapshot: dict | None = None) -> None:
     print(f"release-check（dry-run，只读）：root={ctx.root} "
           f"source={ctx.source or '不可用'}（{ctx.source_note}）")
     print(f"{'CHECK':<22} {'RESULT':<6} VALUE | NEXT")
     for check in checks:
         print(f"{check.id:<22} {check.status.upper():<6} {check.value} | next={check.next}")
+    if snapshot is not None:
+        print(snapshot_line(snapshot))
     summary = summarize(checks)
     print(f"summary: pass={summary['pass']} fail={summary['fail']} "
           f"skip={summary['skip']} -> rc={exit_code}")
 
 
-def build_report(ctx: Context, checks: list[Check], exit_code: int) -> dict:
-    return {
+def build_report(ctx: Context, checks: list[Check], exit_code: int,
+                 snapshot: dict | None = None) -> dict:
+    report = {
         "schemaVersion": 1,
         "root": str(ctx.root),
         "source": str(ctx.source) if ctx.source else None,
@@ -785,6 +840,9 @@ def build_report(ctx: Context, checks: list[Check], exit_code: int) -> dict:
         "summary": summarize(checks),
         "exitCode": exit_code,
     }
+    if snapshot is not None:
+        report["snapshot"] = snapshot
+    return report
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -797,6 +855,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--source", help="技能源目录（默认：脚本自身所在技能副本，其次配置 skillRoot）")
     parser.add_argument("--dry-run", action="store_true",
                         help="只读模式（默认行为；兼容发布剧本显式传参）")
+    parser.add_argument(
+        "--snapshot-dir", metavar="DIR",
+        help="检查前把编排配置（orchestration.json/manifest.json）按字节快照到该"
+             "目录并写 config-snapshot.json（sha256+ts；FB-063 证据固定）")
     parser.add_argument("--json", action="store_true", help="输出机读 JSON")
     parser.add_argument("--timeout", type=int, default=120,
                         help="init/doctor 子进程超时秒数（默认 120）")
@@ -822,6 +884,14 @@ def main(argv: list[str] | None = None) -> int:
     config, config_error = load_config(root)
     ctx = Context(root=root, source=source, source_note=source_note, crew=crew,
                   timeout=args.timeout, config=config, config_error=config_error)
+    snapshot: dict | None = None
+    if args.snapshot_dir:
+        try:
+            snapshot = snapshot_configs(root,
+                                        Path(args.snapshot_dir).expanduser().resolve())
+        except OSError as exc:
+            print(f"release-check: 配置快照写入失败：{exc}", file=sys.stderr)
+            return 3
     checks: list[Check] = []
     for check_id, func in CHECKS:
         try:
@@ -832,10 +902,10 @@ def main(argv: list[str] | None = None) -> int:
     summary = summarize(checks)
     exit_code = 1 if summary["fail"] else 0
     if args.json:
-        print(json.dumps(build_report(ctx, checks, exit_code),
+        print(json.dumps(build_report(ctx, checks, exit_code, snapshot),
                          ensure_ascii=False, indent=2))
     else:
-        render_table(ctx, checks, exit_code)
+        render_table(ctx, checks, exit_code, snapshot)
     return exit_code
 
 

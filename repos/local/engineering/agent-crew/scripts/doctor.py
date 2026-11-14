@@ -1238,6 +1238,30 @@ class Doctor:
             return Result("config.identity", "warn", "；".join(warns))
         return Result("config.identity", "pass", f"projectId={project_id}")
 
+    def check_config_git_clean(self) -> Result:
+        """编排配置未提交告警（FB-063）：只提醒不阻断，发布判定以 fail=0 为准。
+
+        `orchestration.json`/`docs/crew/manifest.json` 有未提交/未跟踪改动 → warn
+        （未提交配置暴露在破坏性 git 操作下的丢失风险）；干净 → pass；非 git 仓
+        或 git 不可用 → skip。`--strict` 下 warn 仍按既有语义计入 rc=1。
+        """
+        watched = (".planning/orchestration.json", "docs/crew/manifest.json")
+        rc, stdout, stderr = self._run_cli(
+            ["git", "-C", str(self.root), "status", "--porcelain", "--", *watched])
+        if rc != 0:
+            return Result("config.git_clean", "skip",
+                          f"非 git 项目或 git 不可用（rc={rc}）：{stderr.strip()[:120]}")
+        dirty = [line.strip() for line in stdout.splitlines() if line.strip()]
+        if dirty:
+            summary = "；".join(dirty[:6]) + ("…" if len(dirty) > 6 else "")
+            return Result(
+                "config.git_clean", "warn",
+                f"编排配置未提交 {len(dirty)} 项：{summary}",
+                next=f"git add {' '.join(watched)} && git commit（或先跑 "
+                     "release-check --snapshot-dir 固定快照再处置）")
+        return Result("config.git_clean", "pass",
+                      f"{len(watched)} 项编排配置无未提交改动（{'、'.join(watched)}）")
+
     # ================= D2. agents（角色→模型配置，I 切片） =================
 
     @staticmethod
@@ -2527,7 +2551,7 @@ CHECKS = [
     "agents.config",
     "context.baseline",
     "docs.duplicate", "docs.pointers", "skill.source", "docs.links",
-    "config.schema", "config.paths", "config.identity",
+    "config.schema", "config.paths", "config.identity", "config.git_clean",
     "role.frontmatter", "role.descriptor", "role.capability", "role.inherit",
     "role.compose", "role.overlay_budget", "role.composed", "role.delivery", "role.gates",
     "role.names",
@@ -2563,6 +2587,7 @@ METHODS = {
     "config.schema": "check_config_schema",
     "config.paths": "check_config_paths",
     "config.identity": "check_config_identity",
+    "config.git_clean": "check_config_git_clean",
     "role.frontmatter": "check_role_frontmatter",
     "role.descriptor": "check_role_descriptor",
     "role.capability": "check_role_capability",

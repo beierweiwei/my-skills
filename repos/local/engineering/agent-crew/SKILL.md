@@ -1,10 +1,10 @@
 ---
 name: agent-crew
 description: 多 agent 编排体系一键启用与日常编排（Herdr 运行时 + 角色船员 + plan 工作记忆 + 派生看板）。Use when 需要在目标项目启用多 agent 协作编排、初始化角色与总舵、拆任务派活收口、维护 portfolio 多流 plan、生成进度看板，或搭建 Captain/总舵/大副/船员分工体系；触发词：编排、总舵、大副、副舵、船员、crew、herdr、派活、看板、portfolio。
-version: 2.2.32
+version: 2.2.33
 ---
 
-# agent-crew：多 Agent 编排体系（v2.2.32）
+# agent-crew：多 Agent 编排体系（v2.2.33）
 
 把「一人 + 多 Agent 船员」的协作编排放进目标项目：7 个核心角色的技能基类（Qoder / opencode 两套 runtime）、唯一 dispatcher、Herdr 运行时封装、plan 工作记忆与派生看板、安装/升级/体检脚本。安装后项目只保留配置、指针与项目自有文件；通用规则/验收/机制只在技能源一份。
 

@@ -13,6 +13,12 @@
 - 锁：<common>/crew/init.lock（crew_paths.crew_dir）；并发第二个实例 rc=2 并记 locked。
 - 原子写：同目录 temp + fsync + rename；覆盖受管脚本前备份到
   <common>/crew/backups/<UTC>/ + backup-manifest.json。
+- 写前备份（FB-063/A2）：常规 init 与 --refresh-block --confirm 在覆盖既有
+  orchestration.json/manifest.json 前先备份（action=init-write/refresh-block，
+  同 action 保留最近 5 份）；无写入路径零备份；备份失败 rc=1 中止写入不静默。
+  人工回滚：`cp <crew-dir>/backups/<id>/<相对路径> <项目>/<相对路径>`
+  （orchestration.json 亦可用 `upgrade.py --rollback <id>`；upgrade 不还原
+  manifest；backup id 见运行输出「写前备份 →」行）。
 - `--refresh-block [--confirm]` 只重渲染 AGENTS 受管块；无 --confirm rc=2 且零写入；
   --confirm 后块外与 orchestration.json 字节不变，manifest 更新 blockSha256/renderVersion/configHash。
 
@@ -28,6 +34,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -51,7 +58,7 @@ TEMPLATES = SKILL_DIR / "templates"
 MARK_START = "<!-- agent-crew:orchestration:start -->"
 MARK_END = "<!-- agent-crew:orchestration:end -->"
 MARK_PREFIX = "<!-- agent-crew:orchestration:"
-SKILL_VERSION_FALLBACK = "2.2.32"
+SKILL_VERSION_FALLBACK = "2.2.33"
 
 CONFIG_REL = Path(".planning/orchestration.json")
 MANIFEST_REL = Path("docs/crew/manifest.json")
@@ -59,6 +66,8 @@ INSTALL_LOG_REL = Path("docs/crew/install-log.jsonl")
 PENDING_REL = Path("docs/crew/AGENTS-block.pending.md")
 DEFAULT_TOPOLOGY_REL = Path("docs/orchestration/topology.md")
 BLOCK_LINE_LIMIT = 150
+# 同 action 备份保留份数（参照 crew-model BACKUP_KEEP 口径；FB-063/A2 写前备份）
+BACKUP_KEEP = 5
 
 ROLE_ORDER = ["helm", "firstmate", "builder", "planner", "reviewer", "runner", "scout"]
 ROLE_TITLES = {
@@ -116,6 +125,7 @@ SCRIPT_MANIFEST = [
     "release-check.py",
     "crew-model.py",   # 2.2.32 补 2.2.30 缺口：受管清单漏登，项目 upgrade 漏装
     "plan-archive.py",  # 2.2.32 补 2.2.30 缺口：同上
+    "crew_gitops.py",  # 2.2.33/A4：guard 破坏性 git 操作观测（guard import 依赖）
 ]
 COPY_BASENAMES = ("crew-rules.md", "crew-acceptance.md",
                   "orchestration-guide.md", "plan-discipline.md",
@@ -708,7 +718,7 @@ def append_install_log(root: Path, entry: dict) -> None:
 
 
 def create_backup(root: Path, action: str, paths: list[Path],
-                  extra: dict | None = None) -> str | None:
+                  extra: dict | None = None, keep: int = BACKUP_KEEP) -> str | None:
     existing = [path for path in paths if path.is_file()]
     if not existing:
         return None
@@ -740,7 +750,41 @@ def create_backup(root: Path, action: str, paths: list[Path],
         payload.update(extra)
     atomic_write_text(directory / "backup-manifest.json",
                       json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+    _prune_backups(crew, action, keep)
     return backup_id
+
+
+def _prune_backups(crew: Path, action: str, keep: int) -> list[str]:
+    """清理同 action 旧备份（按 backup-manifest.json 的 action 过滤），保留最近 keep 份。
+
+    目录名含 UTC 时间戳 + 同秒 counter，字典序即时间序；无 manifest 的残留目录
+    （写入中断）优先清理。keep<=0 不清理。返回被删除的 backup id。
+    """
+    if keep <= 0:
+        return []
+    base = crew / "backups"
+    if not base.is_dir():
+        return []
+    same: list[tuple[str, bool]] = []  # (backup_id, has_manifest)
+    for directory in base.iterdir():
+        if not directory.is_dir():
+            continue
+        manifest = directory / "backup-manifest.json"
+        if not manifest.is_file():
+            same.append((directory.name, False))
+            continue
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            same.append((directory.name, False))
+            continue
+        if data.get("action") == action:
+            same.append((directory.name, True))
+    same.sort(key=lambda item: item[0])
+    removed = [backup_id for backup_id, _ in same[:-keep]] if len(same) > keep else []
+    for backup_id in removed:
+        shutil.rmtree(base / backup_id, ignore_errors=True)
+    return removed
 
 
 def read_manifest(root: Path) -> dict | None:
@@ -750,6 +794,26 @@ def read_manifest(root: Path) -> dict | None:
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def _backup_before_write(root: Path, action: str, paths: list[Path]) -> str | None:
+    """写前备份（FB-063/A2）：IO 失败抛 OSError（调用方中止写入，不静默）。
+
+    备份落 `<crew-dir>/backups/<UTC>/`（含 sha256 清单），同 action 保留最近
+    BACKUP_KEEP 份；无既有文件（全新写入）返回 None。
+    人工回滚：`cp <crew-dir>/backups/<id>/<相对路径> <项目>/<相对路径>`；
+    orchestration.json 类备份亦可用 `python3 scripts/upgrade.py --rollback <id>`
+    （upgrade 只还原 scripts/ 与 orchestration.json，不含 manifest）。
+    """
+    backup_id = create_backup(root, action, paths)
+    if backup_id is not None:
+        crew = _crew_dir(root)
+        first_rel = next(
+            (path.relative_to(root) for path in paths if path.is_file()), None)
+        hint = (f"（回滚：cp {crew / 'backups' / backup_id / first_rel} "
+                f"{root / first_rel}）" if first_rel is not None else "")
+        print(f"{action}: 写前备份 → {backup_id}{hint}")
+    return backup_id
 
 
 # ---------------------------------------------------------------------------
@@ -1129,6 +1193,8 @@ def refresh_block(root: Path, templates: Path, skill_version: str, confirm: bool
             return 0
         try:
             with init_lock(root):
+                backup_id = _backup_before_write(root, "refresh-block",
+                                                 [root / MANIFEST_REL])
                 manifest["configHash"] = actual_hash
                 atomic_write_text(root / MANIFEST_REL,
                                   json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
@@ -1139,6 +1205,7 @@ def refresh_block(root: Path, templates: Path, skill_version: str, confirm: bool
                 "projectId": manifest.get("projectId"),
                 "skillVersion": skill_version,
                 "configHash": actual_hash,
+                "backupId": backup_id,
                 "root": str(root),
                 "result": "ok",
                 "files": [],
@@ -1147,6 +1214,9 @@ def refresh_block(root: Path, templates: Path, skill_version: str, confirm: bool
             })
         except InitLocked:
             print("refresh-block: 另一个 init/upgrade 正在运行（locked）", file=sys.stderr)
+            return 1
+        except OSError as exc:
+            print(f"refresh-block: 写前备份失败，中止写入：{exc}", file=sys.stderr)
             return 1
         print("refresh-block: 块内容已是最新；已重算 manifest configHash")
         return 0
@@ -1184,6 +1254,8 @@ def refresh_block(root: Path, templates: Path, skill_version: str, confirm: bool
             if scan["state"] != "ok":
                 print("refresh-block: 锁内复检标记失败", file=sys.stderr)
                 return 1
+            backup_id = _backup_before_write(root, "refresh-block",
+                                             [root / MANIFEST_REL])
             pre = current.split(MARK_START, 1)[0]
             post = current.split(MARK_END, 1)[1]
             atomic_write_text(agents_path, pre + section + post)
@@ -1220,6 +1292,7 @@ def refresh_block(root: Path, templates: Path, skill_version: str, confirm: bool
                 "projectId": manifest.get("projectId"),
                 "skillVersion": skill_version,
                 "configHash": manifest["configHash"],
+                "backupId": backup_id,
                 "root": str(root),
                 "result": "ok",
                 "files": [{"path": "AGENTS.md", "kind": "block", "status": "refreshed",
@@ -1231,6 +1304,9 @@ def refresh_block(root: Path, templates: Path, skill_version: str, confirm: bool
     except InitLocked:
         print("refresh-block: 另一个 init/upgrade 正在运行（locked）", file=sys.stderr)
         return 2
+    except OSError as exc:
+        print(f"refresh-block: 写前备份失败，中止写入：{exc}", file=sys.stderr)
+        return 1
     print("refresh-block: 已重渲染 AGENTS 受管块（块外未动）")
     return 0
 
@@ -1712,6 +1788,12 @@ def _run_apply_locked(root: Path, source_dir: Path, templates: Path, skill_versi
             backup_id = None
             if force and any(action[1] == "覆盖" for action in actions):
                 backup_id = create_backup(root, "init-force", files)
+            else:
+                # 常规 init 写前备份配置类（FB-063/A2）：orchestration.json/manifest.json
+                config_targets = [path for path in files
+                                  if path.name in ("orchestration.json", "manifest.json")]
+                if config_targets:
+                    backup_id = _backup_before_write(root, "init-write", config_targets)
             for rel, status, note, content in actions:
                 target = root / rel
                 if status == "新建" or status == "覆盖":
@@ -1795,6 +1877,9 @@ def _run_apply_locked(root: Path, source_dir: Path, templates: Path, skill_versi
             pass
         print("错误：另一个 init/upgrade 正在运行（locked）", file=sys.stderr)
         return 2
+    except OSError as exc:
+        print(f"错误：init 写前备份失败，中止写入：{exc}", file=sys.stderr)
+        return 1
     except InitError as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 1
