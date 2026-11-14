@@ -46,14 +46,18 @@ agent+callId 去重，间隔 `guard.approvalRepeatMinutes`（默认 30，夹取 
 周期心跳：pending 且真 idle（无 working/blocked/awaiting_approval）持续时，按
 `guard.pendingHeartbeatMinutes`（默认 15，夹取 1–240）重复叫醒，仍受全局冷却约束；
 与 blocked/awaiting_approval 同轮只发一条叫醒（reason 合并）。
-空闲兜底（2.2.26 T63）：无待办、无在跑、无卡住且总舵 idle/done 连续
-`guard.idleWakeRounds` 轮（默认 30≈60 分钟（T64，对齐每小时心跳口径），夹取 0–240，0=关闭）→ 报平安叫醒，
-附 Backlog 清单（不含已完成；可派/⏸ 排队/⏸ 待外部/⛔ 阻塞全列）；受全局冷却
-去重，触发后计数清零；总舵
-working/blocked/缺失不累计。Backlog ⏸ 两态（AMEND）：含外部条件语义
+空闲兜底（2.2.26 T63，2.2.31 改版）：无待办、无在跑、无卡住且总舵 idle/done 时，
+`guard.idleWakeRounds=0`（默认）走状态变化驱动——对待办/Backlog 暂停/在跑/blocked/
+等待审批/排队到期各桶逐轮集合 diff（指纹落 <crew-dir>/guard.state.json，跨重启
+可比较），变化 → 下一轮叫醒一次只含增量；无变化完全静默（guard.log 每 30 轮
+存活心跳行）；被全局冷却吞掉的增量持久化、冷却期满补发一次；⏸ 排队条目文本含
+YYYY-MM-DD 且今天 ≥ 到期日视为变化（一次性叫醒）。`idleWakeRounds>0` 恢复旧口径：
+安静期连续 N 轮报平安 + Backlog 全量清单（不含已完成；可派/⏸ 排队/⏸ 待外部/⛔
+阻塞全列），受全局冷却去重、触发后计数清零，总舵 working/blocked/缺失不累计。
+Backlog ⏸ 两态（AMEND）：含外部条件语义
 （待 Captain/待 C/留 Captain/待拍板/待评审/待授权/待窗口）→ 暂停桶「⏸ 待外部」
-不计待办；其余 ⏸（下批/batch/评估中等排队语义）→ 暂停桶「⏸ 排队」，计入待办数据
-（idle 兜底清单可见）但不触发即时叫醒，由空闲兜底承载。
+不计待办；其余 ⏸（下批/batch/评估中等排队语义）→ 暂停桶「⏸ 排队」（文本带阻塞列
+全文），计入待办数据但不触发即时叫醒。
 自动交接：每轮读总舵 pane 的 `ctx Nk/1M`（`herdr pane read <pane> --lines 80`），
 兼容小数与百分比（`ctx 75.4k/1M`、`ctx 62.3%`）；pane 先按 agent 名解析，
 名字缺失/漂移时回退 <crew-dir>/dispatch-agents.json（按名或最近 role=helm 条目反查，
@@ -88,6 +92,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -162,9 +167,20 @@ APPROVAL_MAX_AGE_MAX = 1440
 DEFAULT_WAKE_COOLDOWN_MINUTES = 10
 DEFAULT_PENDING_HEARTBEAT_MINUTES = 15
 # 2.2.26 T63 空闲兜底叫醒：连续 N 轮全仓安静（无 pending/无在跑/无卡住）且 helm
-# idle/done → 报平安 + Backlog 全量清单（含 ⏸ 条目）。0=关闭。
-DEFAULT_IDLE_WAKE_ROUNDS = 30
+# idle/done → 报平安 + Backlog 全量清单（含 ⏸ 条目）。2.2.31（guard-noise 流）：
+# 默认 0＝状态变化驱动接管（各桶指纹集合 diff，变化才叫醒一次只含增量，无变化
+# 完全静默）；>0＝恢复旧口径（安静期固定轮次报平安）。
+DEFAULT_IDLE_WAKE_ROUNDS = 0
 IDLE_WAKE_ROUNDS_MAX = 240
+# 2.2.31 状态变化驱动：指纹/待补发增量落 <crew-dir>/guard.state.json（原子写，
+# 跨进程/重启可比较）；安静期每 30 轮写 guard.log 存活心跳行（存活证明=看板 mtime
+# 300s 心跳 + 本心跳行 + doctor pid 判活，不新建 cron）。
+IDLE_CHANGE_STATE_FILE = "guard.state.json"
+IDLE_CHANGE_STATE_VERSION = 1
+IDLE_HEARTBEAT_EVERY_ROUNDS = 30
+# ⏸ 排队条目到期语义（要件 5）：文本中 YYYY-MM-DD 取最小值为到期日，今天 ≥ 到期日
+# 视为状态变化触发一次性叫醒。
+DUE_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 # FB-054（2.2.28 S0 裁定，不得改数）：①agent idle/done 即视为审批结束、从卡住
 # 集合移除（只在 guard 叫醒判定层；crew_approvals 公共返回不动）；超龄残留按
 # 30 分钟记去重日志（与 approvalRepeatMinutes/blockedGraceMinutes 同量级）。
@@ -625,7 +641,9 @@ def _parse_backlog(root: Path, path: Path, rel: str, pending: list[Todo],
             paused.append(Todo(rel, "Backlog", f"⏸ 待外部：{text}"))
             continue
         if any("⏸" in cell for cell in cells):
-            paused.append(Todo(rel, "Backlog", f"⏸ 排队：{text}"))
+            # 2.2.31：排队桶文本带 blocker 全文——到期语义（YYYY-MM-DD）常写在
+            # ⏸ 标记后（如「⏸ 复盘 2026-11-20」），_due_entries 需从文本解析到期日。
+            paused.append(Todo(rel, "Backlog", f"⏸ 排队：{text}（{blocker}）"))
             continue
         if "blocked" in blocker.lower():
             paused.append(Todo(rel, "Backlog", f"⛔ 阻塞：{text}"))
@@ -2506,6 +2524,156 @@ class Guard:
         self.log(f"guard.wake 已过期/已忽略（generated_at={stamp}，"
                  f"阈值 {DEFAULT_WAKE_TTL_SECONDS}s）：已删除")
 
+    # —— 2.2.31 状态变化驱动（guard-noise 流要件 1–7）——
+
+    def _read_idle_state(self) -> dict | None:
+        """读 guard.state.json（基线指纹 + 待补发增量）；缺/坏/版本不符返回 None。"""
+        try:
+            data = json.loads((self.crew_dir / IDLE_CHANGE_STATE_FILE)
+                              .read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if (not isinstance(data, dict)
+                or data.get("version") != IDLE_CHANGE_STATE_VERSION
+                or not isinstance(data.get("buckets"), dict)):
+            return None
+        return data
+
+    def _write_idle_state(self, buckets: dict[str, list[str]],
+                          pending_notify: dict | None) -> None:
+        payload = {
+            "version": IDLE_CHANGE_STATE_VERSION,
+            "ts": utc_now(),
+            "digest": hashlib.sha256(
+                json.dumps(buckets, ensure_ascii=False, sort_keys=True)
+                .encode("utf-8")).hexdigest(),
+            "buckets": buckets,
+            "pendingNotify": pending_notify,
+        }
+        try:
+            atomic_write_text(self.crew_dir / IDLE_CHANGE_STATE_FILE,
+                              json.dumps(payload, ensure_ascii=False, indent=1))
+        except OSError as exc:
+            self.log(f"guard.state.json 写入失败：{type(exc).__name__}: {exc}")
+
+    def _activity_buckets(self, pending: list[Todo], paused: list[Todo],
+                          working_keys: set[str], blocked: list[dict],
+                          stuck: list[dict], now: float) -> dict[str, list[str]]:
+        """状态变化驱动的指纹桶（要件 1）：待办/暂停/在跑/blocked/审批/到期。
+
+        审批残留（FB-054 开口）不进指纹——Captain 口径「agent idle/done 视为审批
+        结束不叫醒」，超龄残留只记日志；变化驱动不推翻该口径。
+        """
+        return {
+            "pending": sorted(todo.label for todo in pending),
+            "paused": sorted(todo.text for todo in paused),
+            "workers": sorted(working_keys),
+            "blocked": sorted(key for key in (self._blocked_key(agent)
+                                              for agent in blocked) if key),
+            "stuck": sorted(key for key in (self._approval_key(entry)
+                                            for entry in stuck) if key),
+            "due": sorted(self._due_entries(paused, now)),
+        }
+
+    @staticmethod
+    def _due_entries(paused: list[Todo], now: float) -> list[str]:
+        """⏸ 排队条目到期检测（要件 5）：文本含 YYYY-MM-DD 且今天 ≥ 最小日期。"""
+        today = datetime.fromtimestamp(now).date()
+        due: list[str] = []
+        for todo in paused:
+            if not todo.text.startswith("⏸ 排队："):
+                continue
+            dates = []
+            for match in DUE_DATE_RE.findall(todo.text):
+                try:
+                    dates.append(datetime.strptime(match, "%Y-%m-%d").date())
+                except ValueError:
+                    continue  # 形如 2026-13-45 的假日期忽略
+            if dates and today >= min(dates):
+                due.append(todo.text)
+        return due
+
+    @staticmethod
+    def _bucket_diff(old: dict,
+                     new: dict[str, list[str]]) -> dict[str, dict[str, list[str]]]:
+        """逐桶集合 diff：产出新增/移除增量（要件 2 的消息来源）。"""
+        changes: dict[str, dict[str, list[str]]] = {}
+        for bucket in sorted(set(old) | set(new)):
+            old_set = set(old.get(bucket) or [])
+            new_set = set(new.get(bucket) or [])
+            added = sorted(new_set - old_set)
+            removed = sorted(old_set - new_set)
+            if added or removed:
+                changes[bucket] = {"added": added, "removed": removed}
+        return changes
+
+    @staticmethod
+    def _merge_notify(pending_notify: dict | None,
+                      changes: dict[str, dict[str, list[str]]]) -> dict:
+        """被冷却吞掉的增量合并持久化（要件 7）：同桶 added/removed 取并集。"""
+        sources: list[dict] = []
+        if pending_notify:
+            sources.append(pending_notify.get("changes") or {})
+        sources.append(changes)
+        merged: dict[str, dict[str, list[str]]] = {}
+        for bucket in sorted({key for source in sources for key in source}):
+            added: set[str] = set()
+            removed: set[str] = set()
+            for source in sources:
+                entry = source.get(bucket) or {}
+                added |= set(entry.get("added") or [])
+                removed |= set(entry.get("removed") or [])
+            merged[bucket] = {"added": sorted(added), "removed": sorted(removed)}
+        return {"changes": merged}
+
+    def _idle_change_message(self, notify: dict) -> str:
+        lines = ["guard 状态变化：值守范围内状态发生变化，增量如下。"]
+        changes = notify.get("changes") or {}
+        titles = {"pending": "待办", "paused": "Backlog 暂停",
+                  "workers": "在跑 worker", "blocked": "blocked worker",
+                  "stuck": "等待审批", "due": "排队条目到期"}
+        for bucket in sorted(changes):
+            title = titles.get(bucket, bucket)
+            for arrow, key, verb in (("+", "added", "新增"),
+                                     ("-", "removed", "移除")):
+                items = changes[bucket].get(key) or []
+                if not items:
+                    continue
+                lines.append(f"- {title}{verb}：")
+                lines.extend(f"  {arrow} {item}" for item in items[:10])
+                if len(items) > 10:
+                    lines.append(f"  …等 {len(items)} 条")
+        lines.append("状态变化驱动模式（idleWakeRounds=0）：无变化时保持静默；"
+                     "请按增量评估分派/核收。")
+        lines.append(self._freshness_note())
+        lines.append("请接手编排。")
+        return "\n".join(lines)
+
+    def _idle_change_wake(self, agents: list[dict], now: float,
+                          cooldown_seconds: int,
+                          pending_notify: dict | None) -> str | None:
+        """状态变化兜底（idleWakeRounds=0 新口径，要件 2/7）：送达待补发增量。
+
+        变化属强信号，只受全局冷却、不受 pending 心跳间隔压制；被冷却吞掉的
+        增量已持久化在 guard.state.json，冷却期满后的首个无既有叫醒轮次补发
+        一次。返回消息或 None（不叫/失败）。
+        """
+        if not pending_notify or not (pending_notify.get("changes") or {}):
+            return None
+        if (self.last_wake_at is not None
+                and now - self.last_wake_at < cooldown_seconds):
+            self.log(f"状态变化叫醒冷却中，增量留待补发"
+                     f"（{len(pending_notify['changes'])} 桶）")
+            return None
+        message = self._idle_change_message(pending_notify)
+        try:
+            self._wake(message, agents, now)
+        except Exception as exc:  # noqa: BLE001 - 叫醒失败保留增量下轮重试
+            self.log(f"状态变化叫醒失败：{type(exc).__name__}: {exc}")
+            return None
+        self.last_wake_at = now
+        return message
+
     def _pane_focus_state(self, agent: dict) -> tuple[bool | None, str]:
         """目标 agent 的 pane 是否聚焦（T37）；None=无法判定，按 fail-safe 不注入。"""
         pane_id = str(agent.get("pane_id") or "").strip()
@@ -2646,8 +2814,37 @@ class Guard:
         )
         if idle_quiet:
             self.idle_quiet_rounds += 1
+            # 2.2.31 存活心跳（要件 6）：变化驱动下安静期无周期信号，guard.log
+            # 周期行 + 看板 mtime（_periodic_write 每 300s）+ doctor pid 判活构成
+            # 存活证明；只记日志，不叫醒。
+            if (idle_wake_cfg == 0
+                    and self.idle_quiet_rounds % IDLE_HEARTBEAT_EVERY_ROUNDS == 0):
+                self.log(f"存活心跳：安静 {self.idle_quiet_rounds} 轮（约 "
+                         f"{self.idle_quiet_rounds * self.interval // 60} 分钟），"
+                         f"状态无变化，值守在线")
         else:
             self.idle_quiet_rounds = 0
+
+        # —— 2.2.31 状态变化驱动（要件 1–3）：逐轮指纹 diff，基线落盘跨进程/
+        # 重启可比较；首次（无 state）建基线不叫醒（防升级即叫）。
+        # idleWakeRounds>0 旧口径：基线照常刷新但不维护补发队列（行为不变）。
+        buckets = self._activity_buckets(pending, paused, working_keys,
+                                         blocked, stuck, now)
+        idle_state = self._read_idle_state()
+        pending_notify: dict | None = None
+        if idle_state is None:
+            self._write_idle_state(buckets, None)
+        elif idle_wake_cfg == 0:
+            idle_changes = self._bucket_diff(idle_state.get("buckets") or {},
+                                             buckets)
+            if idle_changes:
+                pending_notify = self._merge_notify(
+                    idle_state.get("pendingNotify"), idle_changes)
+            else:
+                pending_notify = idle_state.get("pendingNotify")
+            self._write_idle_state(buckets, pending_notify)
+        else:
+            self._write_idle_state(buckets, None)
 
         reason_parts: list[str] = []
         if blocked:
@@ -2777,6 +2974,17 @@ class Guard:
             result["idleQuietRounds"] = 0
             return result
         if not reason:
+            if idle_wake_cfg == 0:
+                # 2.2.31 状态变化兜底：本轮无既有叫醒理由时送达待补发增量
+                # （冷却内被吞的增量已持久化，此处即「冷却期满补发」轮次）。
+                message = self._idle_change_wake(
+                    agents, now, guard_cfg["wakeCooldownMinutes"] * 60,
+                    pending_notify)
+                if message is not None:
+                    self._write_idle_state(buckets, None)  # 增量已送达，清队列
+                    result["woke"] = True
+                    result["idleChangeWake"] = True
+                    return result
             return result
         cooldown = guard_cfg["wakeCooldownMinutes"] * 60
         blocked_due: list[dict] = []
@@ -2849,6 +3057,9 @@ class Guard:
         if not blocked and not approval_due:
             self.last_pending_wake_at = now
         result["woke"] = True
+        if idle_wake_cfg == 0 and pending_notify:
+            # 2.2.31：本轮既有通道叫醒已送达此前被吞增量（变化信息随叫醒触达总舵）。
+            self._write_idle_state(buckets, None)
         return result
 
     def run_forever(self) -> None:
@@ -2867,11 +3078,15 @@ worker 从 working 消失（探针排除）即叫醒核收（不要求全部转 
 guard.wakeCooldownMinutes 全局冷却，默认 10 分钟，被吞边沿记 guard.log）；
 blocked 与 awaiting_approval 单独叫醒；pending 真 idle 按
 guard.pendingHeartbeatMinutes 心跳；
-空闲兜底（2.2.26）：无待办/无在跑/无卡住且 helm idle/done 连续 guard.idleWakeRounds
-轮（默认 30≈60 分钟（T64，对齐每小时心跳口径），0=关闭）报平安 + Backlog 清单（不含已完成；可派/⏸/⛔ 全列）；
+空闲兜底（2.2.26 T63，2.2.31 改版）：idleWakeRounds=0（默认）为状态变化驱动——
+待办/Backlog 暂停/在跑/blocked/审批/排队到期各桶逐轮集合 diff（指纹落
+<crew-dir>/guard.state.json），变化 → 下一轮叫醒一次只含增量；无变化零叫醒
+（guard.log 每 30 轮存活心跳行）；被冷却吞掉的增量持久化、冷却期满补发一次；
+⏸ 排队条目「今天 ≥ 文本中 YYYY-MM-DD」视为变化一次性叫醒。idleWakeRounds>0
+恢复旧口径：安静期连续 N 轮报平安 + Backlog 清单（不含已完成；可派/⏸/⛔ 全列）；
 Backlog ⏸ 两态：含外部条件语义（待 Captain/待 C/留 Captain/待拍板/待评审/待授权/
 待窗口）→「⏸ 待外部」不计待办；其余 ⏸（排队语义）→「⏸ 排队」计入待办数据但不
-触发即时叫醒，由空闲兜底承载；
+触发即时叫醒（文本带阻塞列全文，供到期解析）；
 在跑 worker = Herdr agent_status == working + `<crew-dir>/runs/` 存活注册
 （`crew-claude.py run` 写入；死 pid/坏 JSON/缺 pid 忽略并记日志；存活注册需进程
 身份/年龄核验，pid 复用按死处理并删除注册）；
