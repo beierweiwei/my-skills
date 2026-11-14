@@ -38,7 +38,7 @@
 - **D5 AMEND**：任何扩围必须先提交 AMEND（原因/文件/风险）并获确认；禁止静默扩围。
 - **D6 发现清单**：范围外问题只报不修；回执必须含发现清单，无发现写「无」。
 - **D7 关键决策对抗审查（硬）**：涉主数据、架构口径、验收口径、数据安全、范围变更的关键决策，实施前先派独立 Reviewer 以对抗立场审查（Captain 直令不豁免，取证可并行），阻断项清零才允许实施；结论与证据写 plan Decisions 或需求目录。未出示报告路径与 PASS/阻断清零记录即阻断，流程骨架见 `templates/playbooks/adversarial-review.md`。
-- **D8 YOLO 派单**：`dispatch.py start` 派 qoder worker 一律带 `--permission-mode bypass_permissions`；缺省由配置 `agents.permissionMode` 自动补传并记录来源（explicit/config-default），显式传参以显式值为准。opencode 工位的 YOLO 由角色模板 frontmatter `permission:` 块承担（不经 CLI 旗标；传 `--permission-mode` 会被 dispatch 拒绝 rc=2，registry/agent-log 记录 `permissionMode=template`）。所有角色无例外（含 scout/runner/planner）；发送前自检命令参数与运行时匹配；派单记录与回执写明 permissionMode 及来源；只代表工单边界内免确认，合并/推送/清理与数据安全门禁不放宽。缺该参数的 qoder 工位由 pane-audit `yolo-missing` 巡检告警；opencode 工位由 pane-audit 按组合产物 frontmatter `permission:` 块静态校验。
+- **D8 YOLO 派单**：`dispatch.py start` 不手传 `--permission-mode`（2.2.32/T76/C2 起手传被拒 rc=2）；qoder/claude worker 的权限模式由配置 `agents.permissionMode` 解析自动补传并记录来源（config-default）。opencode 工位的 YOLO 由角色模板 frontmatter `permission:` 块承担（不经 CLI 旗标；传 `--permission-mode` 会被 dispatch 拒绝 rc=2，registry/agent-log 记录 `permissionMode=template`）。所有角色无例外（含 scout/runner/planner）；发送前自检命令参数与运行时匹配；派单记录与回执写明 permissionMode 及来源；只代表工单边界内免确认，合并/推送/清理与数据安全门禁不放宽。qoder/claude 工位启动后进程 cmdline 缺该参数由 pane-audit `yolo-missing` 巡检告警（检测运行态而非派单命令）；opencode 工位由 pane-audit 按组合产物 frontmatter `permission:` 块静态校验。
 - **D9 派单前置纪律（FB-055）**：行为参数（阈值/频率/默认值）必须给依据（口径来源/对标/数据），拍脑袋数值禁止进工单；改动既有机制/规则/参数前先答原设计意图——原设计的合理内核是什么、新方案是否破坏、使用者视角体验（频率/打扰/噪音）如何；审查不过不派单（流程骨架见 `templates/playbooks/dispatch-preflight.md` Phase 0，项目层同名剧本可扩展）。
 
 ## R 回执
