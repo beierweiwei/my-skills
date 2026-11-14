@@ -79,7 +79,7 @@ opencode（项目级角色在 `.opencode/agent/`）：
 python3 scripts/dispatch.py start --role builder --runtime opencode --pane <root-pane-id> --name <task>-builder
 ```
 
-- 启动一律走 dispatch/薄包装，不直拼 `herdr agent start` 或 runtime `--agent`；qoder worker 由 dispatch 透传 `--permission-mode bypass_permissions`（缺省取配置 `agents.permissionMode`），opencode worker 的权限由角色模板 `permission` 块承担（dispatch 不带权限旗标）。
+- 启动一律走 dispatch/薄包装，不直拼 `herdr agent start` 或 runtime `--agent`；qoder/claude worker 的权限模式由配置 `agents.permissionMode` 解析自动补传（手传 `--permission-mode` 被拒 rc=2，2.2.32/T76/C2），opencode worker 的权限由角色模板 `permission` 块承担（dispatch 不带权限旗标）。
 - opencode crew 仅在 `.opencode/agent/<role>.md` 存在时可用；技能默认只带 `firstmate` 一份 opencode 角色，Builder/Reviewer/Scout/Runner/Planner 默认继续用 Qoder crew。需要 opencode crew 时先补角色文件并重启。
 - 角色文件缺失：Qoder 查 `.qoder/agents/<role>.md`，opencode 查 `.opencode/agent/<role>.md`，并先 `opencode agent list`；改完配置要重启会话。
 - 启动后界面应显示对应角色；没有就停下来确认，不要靠每次发身份 prompt 兜底。
