@@ -75,10 +75,17 @@ class Fb057bPromptReceiptLineTest(unittest.TestCase):
             with redirect_stdout(out):
                 return dispatch_mod.main(["--root", str(self.root), *args])
 
+    def _write_msg(self, text: str) -> str:
+        """2.2.32/T76/B3：--message/--message-file 只收文件路径（夹具落盘）。"""
+        import tempfile as _tf
+        path = Path(_tf.mkstemp(suffix=".md")[1])
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
     def test_prompt_appends_receipt_line_by_default(self):
         code = self.dispatch_main(
             "prompt", "--agent", "t33-builder",
-            "--message", "做 T33 切片", "--json")
+            "--message-file", self._write_msg("做 T33 切片"), "--json")
         self.assertEqual(0, code)
         self.assertEqual("做 T33 切片\n" + dispatch_mod.RECEIPT_LINE,
                          self.prompt_message())
@@ -89,7 +96,7 @@ class Fb057bPromptReceiptLineTest(unittest.TestCase):
     def test_prompt_opt_out_with_no_require_receipt(self):
         code = self.dispatch_main(
             "prompt", "--agent", "t33-builder",
-            "--message", "纯查询", "--no-require-receipt", "--json")
+            "--message-file", self._write_msg("纯查询"), "--no-require-receipt", "--json")
         self.assertEqual(0, code)
         self.assertEqual("纯查询", self.prompt_message())
         self.assertFalse(self.agent_log()[-1]["receipt_required"])
@@ -97,7 +104,7 @@ class Fb057bPromptReceiptLineTest(unittest.TestCase):
     def test_prompt_does_not_duplicate_receipt_line(self):
         code = self.dispatch_main(
             "prompt", "--agent", "t33-builder",
-            "--message", "已含要求\n" + dispatch_mod.RECEIPT_LINE, "--json")
+            "--message-file", self._write_msg("已含要求\n" + dispatch_mod.RECEIPT_LINE), "--json")
         self.assertEqual(0, code)
         self.assertEqual("已含要求\n" + dispatch_mod.RECEIPT_LINE,
                          self.prompt_message())

@@ -91,7 +91,7 @@ class CtxGateTest(CtxGateHarness):
     def test_under_40_percent_passes(self):
         self.pane_text = "ctx 210k/1M 输出"
         code, out, err = self.dispatch_main(
-            "prompt", "--agent", "t69-builder", "--message", "hi", "--json")
+            "prompt", "--agent", "t69-builder", "--message-file", self._write_msg("hi"), "--json")
         self.assertEqual(0, code, err)
         row = self.agent_log()[-1]
         self.assertEqual("ctx 21%", row["ctx"])
@@ -100,13 +100,13 @@ class CtxGateTest(CtxGateHarness):
         """>40% 才拒（40.0% 不拒）。"""
         self.pane_text = "ctx (400k/1M)"
         code, _, err = self.dispatch_main(
-            "prompt", "--agent", "t69-builder", "--message", "hi", "--json")
+            "prompt", "--agent", "t69-builder", "--message-file", self._write_msg("hi"), "--json")
         self.assertEqual(0, code, err)
 
     def test_over_40_percent_rejected_with_compact_directive(self):
         self.pane_text = "ctx 450k/1M"
         code, _, err = self.dispatch_main(
-            "prompt", "--agent", "t69-builder", "--message", "hi")
+            "prompt", "--agent", "t69-builder", "--message-file", self._write_msg("hi"))
         self.assertEqual(1, code)
         self.assertIn(">40%", err)
         self.assertIn("/compact", err)
@@ -116,16 +116,23 @@ class CtxGateTest(CtxGateHarness):
     def test_over_60_percent_rejected_with_rebuild_directive(self):
         self.pane_text = "ctx 650k/1M"
         code, _, err = self.dispatch_main(
-            "prompt", "--agent", "t69-builder", "--message", "hi")
+            "prompt", "--agent", "t69-builder", "--message-file", self._write_msg("hi"))
         self.assertEqual(1, code)
         self.assertIn("≥60%", err)
         self.assertIn("关闭", err)
         self.assertIn("重建", err)
 
+    def _write_msg(self, text: str) -> str:
+        """2.2.32/T76/B3：--message/--message-file 只收文件路径（夹具落盘）。"""
+        import tempfile as _tf
+        path = Path(_tf.mkstemp(suffix=".md")[1])
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
     def test_unknown_ctx_fails_closed(self):
         self.pane_text = "worker 一片忙碌，无 ctx 字样"
         code, _, err = self.dispatch_main(
-            "prompt", "--agent", "t69-builder", "--message", "hi")
+            "prompt", "--agent", "t69-builder", "--message-file", self._write_msg("hi"))
         self.assertEqual(1, code)
         self.assertIn("fail-closed", err)
         self.assertIn("--allow-unknown-ctx", err)
@@ -133,7 +140,7 @@ class CtxGateTest(CtxGateHarness):
     def test_unknown_ctx_escape_hatch_passes(self):
         self.pane_text = "无 ctx 字样"
         code, _, err = self.dispatch_main(
-            "prompt", "--agent", "t69-builder", "--message", "hi",
+            "prompt", "--agent", "t69-builder", "--message-file", self._write_msg("hi"),
             "--allow-unknown-ctx", "--json")
         self.assertEqual(0, code, err)
         row = self.agent_log()[-1]
@@ -144,7 +151,7 @@ class CtxGateTest(CtxGateHarness):
         """helm/firstmate 自身走 guard 交接机制，不适用 40/60 worker 门。"""
         self.pane_text = "ctx 950k/1M（helm 满载也不由本门拦截）"
         code, _, err = self.dispatch_main(
-            "prompt", "--agent", "t69-helm", "--message", "hi", "--json")
+            "prompt", "--agent", "t69-helm", "--message-file", self._write_msg("hi"), "--json")
         self.assertEqual(0, code, err)
         row = self.agent_log()[-1]
         self.assertIn("跳过 worker 门", row["ctx"])
@@ -165,7 +172,7 @@ class CtxGateTest(CtxGateHarness):
             with redirect_stdout(out), redirect_stderr(err):
                 code = dispatch_mod.main([
                     "--root", str(self.root), "prompt",
-                    "--agent", "t69-builder", "--message", "hi"])
+                    "--agent", "t69-builder", "--message-file", self._write_msg("hi")])
         self.assertEqual(1, code, "pane read 异常必须走 fail-closed（rc=1 非 3）")
         self.assertIn("fail-closed", err.getvalue())
         self.assertIn("pane read 调用失败", err.getvalue())
@@ -183,7 +190,7 @@ class CtxGateTest(CtxGateHarness):
             with redirect_stdout(out), redirect_stderr(err):
                 code = dispatch_mod.main([
                     "--root", str(self.root), "prompt",
-                    "--agent", "t69-builder", "--message", "hi",
+                    "--agent", "t69-builder", "--message-file", self._write_msg("hi"),
                     "--allow-unknown-ctx", "--json"])
         self.assertEqual(0, code, err)
 
@@ -196,7 +203,7 @@ class CtxGateTest(CtxGateHarness):
         }), encoding="utf-8")
         self.pane_text = "ctx 900k/1M"
         code, _, err = self.dispatch_main(
-            "prompt", "--agent", "t69-fm", "--message", "hi", "--json")
+            "prompt", "--agent", "t69-fm", "--message-file", self._write_msg("hi"), "--json")
         self.assertEqual(0, code, err)
         row = self.agent_log()[-1]
         self.assertIn("跳过 worker 门", row["ctx"])
@@ -207,7 +214,7 @@ class CtxGateTest(CtxGateHarness):
         """S-4：ctx 拒派必须落 agent-log（result=refused-ctx），可事后排障。"""
         self.pane_text = "ctx 450k/1M"
         code, _, _err = self.dispatch_main(
-            "prompt", "--agent", "t69-builder", "--message", "hi",
+            "prompt", "--agent", "t69-builder", "--message-file", self._write_msg("hi"),
             "--task", "t69-reject-log")
         self.assertEqual(1, code)
         rows = [row for row in self.agent_log()
@@ -220,21 +227,28 @@ class CtxGateTest(CtxGateHarness):
     def test_missing_agent_ctx_untouched_by_gate(self):
         """目标不在 herdr agent list → ctx 未知 → fail-closed。"""
         code, _, err = self.dispatch_main(
-            "prompt", "--agent", "t69-builder", "--message", "hi")
+            "prompt", "--agent", "t69-builder", "--message-file", self._write_msg("hi"))
         self.calls.clear()  # 前面已跑过一次；重跑一遍换目标
         self.pane_text = ""
         code, _, err = self.dispatch_main(
-            "prompt", "--agent", "t69-builder", "--message", "hi")
+            "prompt", "--agent", "t69-builder", "--message-file", self._write_msg("hi"))
         self.assertEqual(1, code)
         self.assertIn("fail-closed", err)
 
 
 class SenderTaskLogTest(CtxGateHarness):
+    def _write_msg(self, text: str) -> str:
+        """2.2.32/T76/B3：--message/--message-file 只收文件路径（夹具落盘）。"""
+        import tempfile as _tf
+        path = Path(_tf.mkstemp(suffix=".md")[1])
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
     def test_prompt_log_has_sender_and_task(self):
         self.pane_text = "ctx 100k/1M"
         with mock.patch.dict("os.environ", {"CREW_AGENT_NAME": "patch-2228-firstmate"}):
             code, _, err = self.dispatch_main(
-                "prompt", "--agent", "t69-builder", "--message", "hi",
+                "prompt", "--agent", "t69-builder", "--message-file", self._write_msg("hi"),
                 "--task", "patch-2228/S6", "--json")
         self.assertEqual(0, code, err)
         row = self.agent_log()[-1]
@@ -248,7 +262,7 @@ class SenderTaskLogTest(CtxGateHarness):
                if k not in ("CREW_AGENT_NAME", "INONE_AGENT_NAME")}
         with mock.patch.dict("os.environ", env, clear=True):
             code, _, err = self.dispatch_main(
-                "prompt", "--agent", "t69-builder", "--message", "hi", "--json")
+                "prompt", "--agent", "t69-builder", "--message-file", self._write_msg("hi"), "--json")
         self.assertEqual(0, code, err)
         self.assertEqual("dispatch", self.agent_log()[-1]["sender"])
 

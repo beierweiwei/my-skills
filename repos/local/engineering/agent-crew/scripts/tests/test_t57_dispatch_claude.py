@@ -389,20 +389,29 @@ class DispatchClaudeTest(unittest.TestCase):
         self.assertEqual("claude", info["runtime"])
         self.assertNotIn("actualRuntime", info)
 
-    def test_start_claude_passes_model_via_claude_flag(self):
-        proc = self._start_claude("--model", "glm-5.3")
-        self.assertEqual(0, proc.returncode, proc.stdout)
+    def test_start_claude_model_from_config_via_flag(self):
+        # 2.2.32/T76/C2：模型不手传——agents.roles.<role> 解析后经 --model 传 claude
+        self.config["agents"] = {
+            "default": {"backend": "claude", "model": ""},
+            "roles": {"builder": {"backend": "claude", "model": "glm-5.3"}},
+        }
+        self.write_config()
+        proc = self._start_claude()
+        self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertEqual("glm-5.3", payload["model"])
+        self.assertEqual("roles.builder", payload["modelSource"])
         starts = [c for c in self.herdr_calls() if c[:2] == ["agent", "start"]]
         self.assertEqual(1, len(starts))
         self.assertEqual(["--", "--model", "glm-5.3"], starts[0][-3:])
 
-    def test_start_claude_normalizes_permission_mode(self):
-        proc = self._start_claude("--permission-mode", "bypass_permissions")
-        self.assertEqual(0, proc.returncode, proc.stdout)
-        starts = [c for c in self.herdr_calls() if c[:2] == ["agent", "start"]]
-        self.assertEqual(1, len(starts))
-        self.assertEqual(
-            "bypassPermissions", starts[0][starts[0].index("--permission-mode") + 1])
+    def test_start_claude_rejects_manual_model_and_permission_mode(self):
+        # 手传一律 rc=2（配置解析为唯一入口；permissionMode 由配置/模板归一化）
+        for flag, value in (("--model", "glm-5.3"),
+                            ("--permission-mode", "bypass_permissions")):
+            proc = self._start_claude(flag, value)
+            self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+            self.assertIn("不再接受手传", proc.stderr)
 
     def test_start_claude_rejects_when_composed_missing(self):
         self.write_role("claude", "builder")
