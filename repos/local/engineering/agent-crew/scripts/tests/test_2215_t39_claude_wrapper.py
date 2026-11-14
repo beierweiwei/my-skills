@@ -63,7 +63,11 @@ STUB = textwrap.dedent(
         sys.exit(int(os.environ.get("T39_RC", "7")))
     if mode == "signal":
         os.kill(os.getpid(), signal.SIGKILL)
-    sys.stdout.write("STUB-REPORT\\n")
+    sys.stdout.write("STUB-REPORT\\n## 结论\\n"
+                     "证据一：结论正文甲与补充说明，用于抬高字节数到阈值之上。\\n"
+                     "证据二：结论正文乙与补充说明，用于抬高字节数到阈值之上。\\n"
+                     "证据三：结论正文丙与补充说明，用于抬高字节数到阈值之上。\\n"
+                     "## 来源\\n- 本地 stub 固定输出（无外部访问）。\\n")
     ''')
 
 UNIFIED_ENTRY_FILES = [
@@ -206,7 +210,13 @@ class ClaudeWrapperTest(unittest.TestCase):
         self.assertTrue(meta["prompt"].endswith("prompt.md"))
         self.assertTrue(meta["report"].endswith("case.md"))
 
-        self.assertEqual("STUB-REPORT\n", (self.out / "case.md").read_text(encoding="utf-8"))
+        self.assertEqual(
+            "STUB-REPORT\n## 结论\n"
+            "证据一：结论正文甲与补充说明，用于抬高字节数到阈值之上。\n"
+            "证据二：结论正文乙与补充说明，用于抬高字节数到阈值之上。\n"
+            "证据三：结论正文丙与补充说明，用于抬高字节数到阈值之上。\n"
+            "## 来源\n- 本地 stub 固定输出（无外部访问）。\n",
+            (self.out / "case.md").read_text(encoding="utf-8"))
         self.assertEqual("0\n", (self.out / "case.rc").read_text(encoding="utf-8"))
         self.assertEqual("", (self.out / "case.stderr").read_text(encoding="utf-8"))
 

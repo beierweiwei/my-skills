@@ -24,13 +24,14 @@
   .stderr     claude stderr 原文
   .rc         子进程退出码文本
   .meta.json  {role,playbook,backend,model,model_source,rc,timeout,timeout_seconds,
-               bytes,stderr_bytes,duration,prompt,report,stderr_path,rc_path,
-               claude,argv}
-stdout 只打印一行摘要；诊断写 stderr。
+               bytes,stderr_bytes,report_ok,report_lines,report_problems(仅失败),
+               duration,prompt,report,stderr_path,rc_path,claude,argv}
+stdout 只打印一行摘要（含 report_ok/report_lines/bytes）；诊断写 stderr。
 
 退出码：
-  0   报告非空且 claude rc=0
-  1   本地失败（claude rc=0 但报告为空）
+  0   报告完整（report_ok=true）且 claude rc=0
+  1   本地失败（claude rc=0 但报告空/过短/缺关键段——report_ok=false，可重派；
+      报告文件仍落盘供复核，不删）
   2   参数/配置校验失败（backend≠claude、model 非字符串、空 prompt、
       --timeout/--name 非法；模型空白不属此类）
   3   环境缺失（配置/可执行文件/prompt/输出目录不可用）
@@ -45,6 +46,14 @@ CLI/设置默认模型），不会返回 2。
 `crew_dir` 经 `crew_paths.crew_dir(root)` 解析；正常结束、非零 rc、超时统一删除
 （try/finally）。注册失败只 stderr 告警，不阻断 run；`meta.json` 的 `runs_registry`
 记注册文件路径（未注册为 null）。
+
+报告完整性（2.2.32/T78/FB-060）：落盘后校验 非空 + 最小非空行数/字节 + 关键段
+（含 `## ` 标题或首行行数/字节计法，二选一即过）；不符 → report_ok=false、
+退出 1（可重派）、meta.report_problems 列原因，报告文件保留。阈值解析：
+CLI `--min-report-lines/--min-report-bytes` 显式值 > 配置
+`reportCheck.{minLines,minBytes}` > 常量默认（REPORT_MIN_LINES/REPORT_MIN_BYTES；
+0=关闭该项，空报告仍恒拒）。默认依据 FB-060 实测：CASE headless scout 空报告
+0–54B vs 正常报告 ≥2KB，错落率 50%。
 
 决策：模型非空一律追加 `--model <model>`，不再判断是否为 CLI 已知别名，也不走
 env（settings.json env 会覆盖子进程同名变量；`--model` 对别名与网关模型 ID 均
@@ -78,6 +87,10 @@ EXIT_TIMEOUT = 124
 
 DEFAULT_TIMEOUT = 1500
 ALLOWED_TOOLS = ("Bash", "Read", "Grep", "Glob")
+
+# 报告完整性阈值（FB-060：CASE headless scout 空/仅摘要报告 0–54B vs 正常 ≥2KB）
+REPORT_MIN_LINES = 5   # 最小非空行数；0=关闭
+REPORT_MIN_BYTES = 200  # 最小字节数；0=关闭
 DISALLOWED_TOOLS = ("Edit", "Write", "NotebookEdit")
 STDERR_EXCERPT = 800
 
@@ -257,6 +270,46 @@ def run_registration(root: Path, role: str, backend: str, model: str,
         unregister_run(path)
 
 
+def check_report(stdout: bytes, *, min_lines: int, min_bytes: int
+                 ) -> tuple[bool, int, list[str]]:
+    """报告完整性校验（纯函数）：非空 + 最小非空行数/字节 + 关键段，返回
+    (report_ok, 非空行数, problems)。关键段=含 `## ` 标题或首行带行数/字节计法
+    （lines=/bytes=/行数/字节）二选一即过，兼容各角色报告格式；空报告恒拒。"""
+    if len(stdout) == 0:
+        return False, 0, ["报告为空（stdout 0 字节）"]
+    text = stdout.decode("utf-8", errors="replace")
+    rows = text.splitlines()
+    lines = sum(1 for row in rows if row.strip())
+    problems: list[str] = []
+    if min_lines and lines < min_lines:
+        problems.append(f"报告过短（非空行 {lines} < 最小 {min_lines}）")
+    if min_bytes and len(stdout) < min_bytes:
+        problems.append(f"报告过短（{len(stdout)} 字节 < 最小 {min_bytes}）")
+    first = rows[0] if rows else ""
+    has_heading = any(row.lstrip().startswith("## ") for row in rows)
+    has_count = any(k in first for k in ("lines=", "bytes=", "行数", "字节"))
+    if not (has_heading or has_count):
+        problems.append("报告缺关键段（无 `## ` 标题且首行无行数/字节计法）")
+    return (not problems), lines, problems
+
+
+def report_thresholds(args: argparse.Namespace, config_path: Path) -> tuple[int, int]:
+    """报告阈值解析：CLI 显式值 > 配置 reportCheck.{minLines,minBytes} > 常量默认。"""
+    cfg: dict = {}
+    if config_path.is_file():
+        cfg = (json.loads(config_path.read_text(encoding="utf-8"))
+               .get("reportCheck") or {})
+
+    def pick(cli_value: int | None, key: str, default: int) -> int:
+        if cli_value is not None:
+            return cli_value
+        value = cfg.get(key, default)
+        return int(value) if value is not None else default
+
+    return (pick(args.min_report_lines, "minLines", REPORT_MIN_LINES),
+            pick(args.min_report_bytes, "minBytes", REPORT_MIN_BYTES))
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     root, config = resolve_root(args.root, args.config)
     agents = load_agents(config)
@@ -324,6 +377,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         if rc < 0:
             rc = 128 + (-rc)
 
+        min_lines, min_bytes = report_thresholds(args, config)
+        report_ok, report_lines, report_problems = check_report(
+            stdout, min_lines=min_lines, min_bytes=min_bytes)
+
         meta = {
             "role": args.role,
             "playbook": args.playbook or "",
@@ -335,6 +392,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             "timeout_seconds": args.timeout,
             "bytes": len(stdout),
             "stderr_bytes": len(stderr),
+            "report_ok": report_ok,
+            "report_lines": report_lines,
             "duration": round(duration, 3),
             "prompt": display_path(prompt, root),
             "report": display_path(report_path, root),
@@ -345,6 +404,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             "runs_registry": (
                 display_path(runs_registry, root) if runs_registry else None),
         }
+        if report_problems:
+            meta["report_problems"] = report_problems
 
         # 一次落盘：报告 / stderr / rc / meta 全部在子进程结束后写入
         write_bytes_atomic(report_path, stdout)
@@ -359,8 +420,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             problems.append(f"超时（>{args.timeout}s），已杀子进程组")
         elif rc != 0:
             problems.append(f"claude rc={rc}；stderr 摘要：{stderr_excerpt(stderr)}")
-        if len(stdout) == 0:
-            problems.append("报告为空（stdout 0 字节）")
+        problems.extend(report_problems)  # rc≠0/超时不吞主因，报告问题并列
 
         if timed_out:
             exit_code = EXIT_TIMEOUT
@@ -375,7 +435,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(
             f"crew-claude: {status} role={args.role} "
             f"model={model or '<channel-default>'} "
-            f"backend={backend} rc={rc} bytes={len(stdout)} duration={duration:.1f}s "
+            f"backend={backend} rc={rc} bytes={len(stdout)} "
+            f"report_ok={str(report_ok).lower()} report_lines={report_lines} "
+            f"duration={duration:.1f}s "
             f"report={display_path(report_path, root)} meta={display_path(meta_path, root)}")
         if problems:
             print(f"crew-claude: 失败：{'；'.join(problems)}", file=sys.stderr)
@@ -402,6 +464,12 @@ def build_parser() -> argparse.ArgumentParser:
                      help=f"超时秒数（默认 {DEFAULT_TIMEOUT}；超时杀进程组并 rc=124）")
     run.add_argument("--root", default=None, help="项目根（默认从 cwd 向上查找配置）")
     run.add_argument("--config", default=None, help="指定 orchestration.json（测试/诊断用）")
+    run.add_argument("--min-report-lines", type=int, default=None,
+                     help=f"报告最小非空行数（默认配置 reportCheck.minLines 或 "
+                          f"{REPORT_MIN_LINES}；0=关闭该项，空报告仍恒拒）")
+    run.add_argument("--min-report-bytes", type=int, default=None,
+                     help=f"报告最小字节数（默认配置 reportCheck.minBytes 或 "
+                          f"{REPORT_MIN_BYTES}；0=关闭该项）")
     run.add_argument("--claude-bin", default=None, help=argparse.SUPPRESS)
     run.set_defaults(func=cmd_run)
     return parser

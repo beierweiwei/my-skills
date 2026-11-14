@@ -54,7 +54,11 @@ CLAUDE_STUB = textwrap.dedent(
     if mode == "fail":
         sys.stderr.write("boom-stub\\n")
         sys.exit(int(os.environ.get("FB040_RC", "3")))
-    sys.stdout.write("STUB-REPORT\\n")
+    sys.stdout.write("STUB-REPORT\\n## 结论\\n"
+                     "证据一：结论正文甲与补充说明，用于抬高字节数到阈值之上。\\n"
+                     "证据二：结论正文乙与补充说明，用于抬高字节数到阈值之上。\\n"
+                     "证据三：结论正文丙与补充说明，用于抬高字节数到阈值之上。\\n"
+                     "## 来源\\n- 本地 stub 固定输出（无外部访问）。\\n")
     ''')
 
 PLAN = """# Task Plan: FB040
