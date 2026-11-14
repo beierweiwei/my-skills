@@ -489,10 +489,11 @@ class RotateTest(_TmpRepoTest):
         self.assertIn("条目 002", archive_body)
         self.assertIn("  续行二甲", archive_body)
 
-        # 归档头字段
+        # 归档头字段（2.2.32/T77：截止边界=归档集时间戳；「保留最近 N 条」与实际一致）
         self.assertIn("> 来源：`.planning/portfolio/progress.md`", archive_text)
         self.assertIn("> 归档日期：", archive_text)
-        self.assertIn("> 截止边界：移出源文件第", archive_text)
+        self.assertIn("> 截止边界：归档 3 条（2026-11-02 → 2026-11-04）", archive_text)
+        self.assertIn("保留最近 3 条（2026-11-05 → 2026-11-07）", archive_text)
         self.assertIn("> 行数：", archive_text)
         self.assertIn("字节：", archive_text)
         self.assertIn(f"> 源文件归档前 sha256：{source_sha}", archive_text)
