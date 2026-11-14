@@ -1098,6 +1098,9 @@ class Guard:
     handoff_wait_rounds: int = field(default=0, init=False)
     handoff_close_rounds: int = field(default=0, init=False)
     reaper_rounds: int = field(default=0, init=False)
+    # 2.2.31 工单 07B：容量叫醒签名（清单不变不重复叫醒）+ >hard 首见时间戳
+    capacity_wake_signature: str = field(default="", init=False)
+    capacity_first_hard_at: float | None = field(default=None, init=False)
     rework_logged: set[str] = field(default_factory=set, init=False)
     rework_skipped: set[str] = field(default_factory=set, init=False)
     project_roots: set[Path] | None = None
@@ -2529,6 +2532,96 @@ class Guard:
         self.log(f"guard.wake 已过期/已忽略（generated_at={stamp}，"
                  f"阈值 {DEFAULT_WAKE_TTL_SECONDS}s）：已删除")
 
+    # —— 2.2.31 工单 07B：周期容量检查（Captain 直令 7/10）——
+    CAPACITY_HARD_ESCALATE_MINUTES = 60
+
+    def _capacity_persist(self, first_hard_at: float | None) -> None:
+        """>hard 首见时间戳落 <crew-dir>/guard.capacity.json（原子写）；重启丢失
+        则重计时（少发无害，help 已注明）。"""
+        import json as _json
+        payload = {"version": 1, "capacityFirstHardAt": first_hard_at}
+        try:
+            atomic_write_text(self.crew_dir / "guard.capacity.json",
+                              _json.dumps(payload, ensure_ascii=False))
+        except OSError:
+            pass
+
+    def _capacity_check(self, now: float, agents: list[dict]) -> None:
+        """每轮容量检查：>warn 记 guard.log；>hard 先调 pane-audit --apply 强制
+        回收（复用既有安全判定与 caller 留痕，禁新写目标选择器/直调裸 herdr）→
+        重取 live 计数 → 仍 >hard → _wake 叫醒「必须关闭清单」（受全局冷却 +
+        签名去重，清单不变不重复）；拒建持续 60 分钟升级 herdr_notify 通知
+        Captain。全在跑（无可安全回收）只告警+拒建，不杀在跑任务。"""
+        try:
+            import crew_capacity
+        except ImportError:
+            return
+        cap = crew_capacity.count_crew_agents(agents, self.root, self.helm)
+        cfg = crew_capacity.load_capacity_config(self.root)
+        total = cap["total"]
+        if total <= cfg["warn"]:
+            if self.capacity_first_hard_at is not None:
+                self.capacity_first_hard_at = None
+                self._capacity_persist(None)
+            return
+        names = ", ".join(cap["names"])
+        if total < cfg["hard"]:
+            if self.capacity_wake_signature != f"warn:{names}":
+                self.log(f"容量警告：crew 工位 {total} 超 warn={cfg['warn']}"
+                         f"（hard={cfg['hard']}）：{names}")
+                self.capacity_wake_signature = f"warn:{names}"
+            return
+        # >hard：先按既有安全规则回收（pane-audit --apply；working/blocked/
+        # unknown 永不关、非白名单、非聚焦、idle/done、完成流）
+        audit_script = Path(__file__).resolve().parent / "pane-audit.py"
+        try:
+            subprocess.run(
+                [sys.executable, str(audit_script), "--root", str(self.root),
+                 "--apply", "--caller", "guard"],
+                capture_output=True, text=True, check=False, timeout=120)
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.log(f"容量强制回收调用 pane-audit 失败：{exc}")
+        live = self.list_agents()
+        cap2 = crew_capacity.count_crew_agents(live, self.root, self.helm)
+        total2 = cap2["total"]
+        if total2 <= cfg["hard"]:
+            self.log(f"容量强制回收完成：{total} → {total2}（hard={cfg['hard']}）")
+            self.capacity_wake_signature = ""
+            return
+        signature = f"hard:{sorted(cap2['names'])}"
+        if self.capacity_first_hard_at is None:
+            self.capacity_first_hard_at = now
+            try:
+                stored = json.loads((self.crew_dir / "guard.capacity.json")
+                                    .read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                stored = {}
+            if isinstance(stored, dict) and stored.get("capacityFirstHardAt"):
+                self.capacity_first_hard_at = float(stored["capacityFirstHardAt"])
+            self._capacity_persist(self.capacity_first_hard_at)
+        escalate = (self.capacity_first_hard_at is not None
+                    and now - self.capacity_first_hard_at
+                    >= self.CAPACITY_HARD_ESCALATE_MINUTES * 60)
+        if signature != self.capacity_wake_signature or escalate:
+            listing = "\n".join(f"- {name}" for name in cap2["names"][:20])
+            message = (
+                f"guard 容量超限：crew 工位 {total2} > hard={cfg['hard']}，"
+                "安全回收后仍超限，dispatch start 已拒建新工位。必须关闭清单：\n"
+                f"{listing}\n"
+                "处置：逐个 `python3 scripts/dispatch.py close <agent>`（working/"
+                "blocked 先人工处置），或人工评估后 `dispatch start --force`。")
+            if escalate:
+                message += ("\n超限已持续 ≥60 分钟，升级通知 Captain。")
+                try:
+                    self.notify("guard 容量超限升级", message)
+                except Exception as exc:  # noqa: BLE001
+                    self.log(f"容量升级通知失败：{exc}")
+            try:
+                self._wake(message, agents, now)
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"容量叫醒失败：{type(exc).__name__}: {exc}")
+            self.capacity_wake_signature = signature
+
     # —— 2.2.31 状态变化驱动（guard-noise 流要件 1–7）——
 
     def _read_idle_state(self) -> dict | None:
@@ -2769,6 +2862,10 @@ class Guard:
             agent for agent in workers
             if str(agent.get("agent_status")) == "blocked" and not is_probe_agent(agent)
         ]
+        try:
+            self._capacity_check(now, agents)
+        except Exception as exc:  # noqa: BLE001 - 容量检查失败不阻断值守
+            self.log(f"容量检查异常：{type(exc).__name__}: {exc}")
         claude_runs = self._claude_runs()
         # 年龄表先于 handoff 分支更新：交接期间 blocked 时长继续累计。
         blocked_since = self._track_blocked(now, blocked)

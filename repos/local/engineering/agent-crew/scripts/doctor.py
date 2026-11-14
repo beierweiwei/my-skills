@@ -100,7 +100,7 @@ CORE_IDS = set(dispatch_lib.CORE_ROLES)
 CORE_TOP_KEYS = {
     "projectId", "projectName", "skillRoot", "skillVersion", "portfolioDir",
     "portfolioMatch", "board", "backlog", "docNames", "captainDecisions",
-    "redLines", "dataDir", "aopReference", "helm", "retro", "guard", "roles",
+    "redLines", "dataDir", "aopReference", "helm", "retro", "guard", "capacity", "roles",
     "agents", "hooks", "schemaVersion",
 }
 RUNTIME_DIRECT_PATTERNS = (
@@ -1089,6 +1089,19 @@ class Doctor:
                          if not key.startswith("_") and key not in CORE_TOP_KEYS)
         if unknown:
             problems.append(f"未知配置键：{unknown}")
+        capacity = config.get("capacity")
+        if capacity is not None:
+            if not isinstance(capacity, dict):
+                problems.append(f"capacity 应为对象：{capacity!r}")
+            else:
+                warn, hard = capacity.get("warn"), capacity.get("hard")
+                if not isinstance(warn, int) or isinstance(warn, bool) or warn < 1:
+                    problems.append(f"capacity.warn 应为 ≥1 整数：{warn!r}")
+                if (not isinstance(hard, int) or isinstance(hard, bool)
+                        or not isinstance(warn, int) or hard <= warn):
+                    problems.append(
+                        f"capacity.hard 应为整数且 > warn（1 ≤ warn < hard）："
+                        f"warn={warn!r} hard={hard!r}")
         project_id = config.get("projectId")
         if not isinstance(project_id, str) or not dispatch_lib.ROLE_ID_RE.match(project_id):
             problems.append(f"projectId 非法：{project_id!r}")

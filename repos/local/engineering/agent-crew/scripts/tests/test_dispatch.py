@@ -34,6 +34,7 @@ from pathlib import Path
 from unittest import mock
 
 SKILL_DIR = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(SKILL_DIR / "scripts"))  # dispatch 顶层 import crew_capacity（07B）
 DISPATCH = SKILL_DIR / "scripts" / "dispatch.py"
 _spec = importlib.util.spec_from_file_location("dispatch_under_test", DISPATCH)
 dispatch_mod = importlib.util.module_from_spec(_spec)
@@ -365,7 +366,8 @@ class DispatchTest(unittest.TestCase):
         self.assertIn("引用", report["protectedHeadingConflicts"])
         started = self.start("builder", "qoder")
         self.assertEqual(1, started.returncode)
-        self.assertEqual([], self.herdr_calls())
+        self.assertEqual([], [c for c in self.herdr_calls() if c != ["agent", "list"]],
+                    "除容量门只读 agent list（07B）外不得有 herdr 调用")
 
     def test_non_protected_duplicate_heading_warns_but_passes(self):
         self.write_role(
@@ -419,7 +421,8 @@ class DispatchTest(unittest.TestCase):
                                 report)
         started = self.start("builder", "qoder")
         self.assertEqual(1, started.returncode)
-        self.assertEqual([], self.herdr_calls())
+        self.assertEqual([], [c for c in self.herdr_calls() if c != ["agent", "list"]],
+                    "除容量门只读 agent list（07B）外不得有 herdr 调用")
 
     # ---------- ⑥ gates ----------
 
@@ -439,7 +442,8 @@ class DispatchTest(unittest.TestCase):
         self.assertTrue(any("核心 gate" in err for err in report["errors"]), report)
         started = self.start("builder", "qoder")
         self.assertEqual(1, started.returncode)
-        self.assertEqual([], self.herdr_calls())
+        self.assertEqual([], [c for c in self.herdr_calls() if c != ["agent", "list"]],
+                    "除容量门只读 agent list（07B）外不得有 herdr 调用")
 
     # ---------- ⑦ Qoder 命令构造 + 交付 + agent-log ----------
 
@@ -453,7 +457,8 @@ class DispatchTest(unittest.TestCase):
                                  "--pane", "wX:p1", "--json")
         self.assertEqual(1, proc.returncode)
         self.assertIn("config.paths", proc.stderr)
-        self.assertEqual([], self.herdr_calls())
+        self.assertEqual([], [c for c in self.herdr_calls() if c != ["agent", "list"]],
+                    "除容量门只读 agent list（07B）外不得有 herdr 调用")
 
     def test_list_discovers_opencode_custom_agent(self):
         self.write_role("opencode", "process-auditor", base="reviewer", custom=True,
@@ -625,7 +630,8 @@ class DispatchTest(unittest.TestCase):
         proc = self.start("builder", "qoder", name="Bad Name")
         self.assertEqual(1, proc.returncode)
         self.assertIn("--name", proc.stderr)
-        self.assertEqual([], self.herdr_calls())
+        self.assertEqual([], [c for c in self.herdr_calls() if c != ["agent", "list"]],
+                    "除容量门只读 agent list（07B）外不得有 herdr 调用")
 
     def test_start_rejects_duplicate_explicit_name(self):
         self.herdr_agents = ["custom-builder"]

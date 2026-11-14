@@ -392,8 +392,8 @@ sys.exit(2)
         }])
         proc = self.run_preflight(bindir=bindir)
         checks, data = self.checks(proc)
-        self.assertEqual(["wake", "inbox", "agents", "board", "guard"],
-                         [item["id"] for item in data["checks"]])
+        self.assertEqual(["wake", "inbox", "agents", "board", "guard", "capacity"],
+                         [item["id"] for item in data["checks"]])  # capacity=07B 附项
         for key in ("wake", "inbox", "agents", "board", "guard"):
             self.assertTrue(checks[key]["available"], checks[key])
             self.assertIn("value", checks[key])
