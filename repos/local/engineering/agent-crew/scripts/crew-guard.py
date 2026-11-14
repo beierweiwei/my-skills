@@ -227,6 +227,12 @@ REWORK_RECEIPT_THRESHOLD = 3
 
 # T57：runtime 三栈；交接 start_args 按现役舵 runtime 组装（R2）
 HANDOFF_RUNTIMES = ("qoder", "opencode", "claude")
+# 2.2.32/T79/D：继任 helm 接手窗口 ctx 观测（只观测不叫醒）。15 分钟＝工程默认
+# （无行为影响；标定素材 n=4 不足，样本 ≥10 后再随阈值一并复审走 D7——S6）。
+# 窗口起点=guard.handoff doneAt（写出 phase=done 时补记）；样本落
+# <crew>/guard.ctxobserve.jsonl（append-only，最小字段 ts/helm/ctx_k/phase）。
+HANDOFF_CTX_OBSERVE_MINUTES = 15
+CTX_OBSERVE_FILE = "guard.ctxobserve.jsonl"
 
 
 def effective_helm_runtime(info: object) -> str:
@@ -1139,6 +1145,58 @@ class Guard:
     def _read_handoff(self) -> dict[str, str]:
         return read_handoff_state(self.crew_dir)
 
+    def _ctx_observe(self, agents: list[dict], now: float) -> None:
+        """2.2.32/T79/D：继任 helm 接手窗口 ctx 观测（只观测不叫醒）。
+
+        guard.handoff phase=done（result=ok，继任实际接手）且带 doneAt 时，对
+        继任（handoff new）在 doneAt 起 HANDOFF_CTX_OBSERVE_MINUTES 分钟内每轮
+        采样一次 pane ctx（parse_ctx_k），追加 <crew>/guard.ctxobserve.jsonl
+        （最小字段 ts/helm/ctx_k/phase，不加推测字段——S6）+ guard.log 一行摘要。
+        本批不设阈值/不分类/不告警（n=4 不足标定，样本 ≥10 后随阈值复审）；
+        不 wake/不通知/不阻断/不改 ctxWarn/ctxHandoff 既有行为。窗口外/缺
+        doneAt（旧文件升级残留）/继任不在册/ctx 解析失败 → 静默跳过本轮。
+        重启按 doneAt 续窗不重采（JSONL append-only 时间序列，幂等天然成立）。"""
+        state = self._read_handoff()
+        if (state.get("phase") != "done" or state.get("result") != "ok"
+                or not state.get("new") or not state.get("doneAt")):
+            return
+        try:
+            done_at = datetime.fromisoformat(
+                str(state["doneAt"]).replace("Z", "+00:00"))
+        except ValueError:
+            return
+        elapsed = now - done_at.timestamp()
+        window = HANDOFF_CTX_OBSERVE_MINUTES * 60
+        if elapsed < 0 or elapsed > window:
+            return
+        successor = str(state["new"])
+        agent = next((a for a in agents
+                      if isinstance(a, dict)
+                      and str(a.get("name") or "") == successor), None)
+        if agent is None:
+            return
+        pane = str(agent.get("pane_id") or "").strip()
+        if not pane:
+            return
+        try:
+            text = self.pane_read(pane, 80)
+        except Exception:  # noqa: BLE001 - 读失败不记样本、不中断值守
+            return
+        ctx_k = parse_ctx_k(text)
+        if ctx_k is None:
+            return
+        sample = {"ts": utc_now(), "helm": successor,
+                  "ctx_k": ctx_k, "phase": state.get("phase", "")}
+        try:
+            with open(self.crew_dir / CTX_OBSERVE_FILE, "a",
+                      encoding="utf-8") as handle:
+                handle.write(json.dumps(sample, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            self.log(f"ctx 观测写入失败：{type(exc).__name__}: {exc}")
+            return
+        self.log(f"继任 helm 接手 ctx={ctx_k:g}k"
+                 f"（+{int(elapsed // 60)} 分钟，观测窗 {HANDOFF_CTX_OBSERVE_MINUTES} 分钟内）")
+
     @staticmethod
     def _valid_task_key(task: str) -> bool:
         """task 作为 plan 目录前缀匹配键：拒绝空、NUL、绝对路径与 `..` 段。"""
@@ -1452,7 +1510,7 @@ class Guard:
         fields.update({key: str(value).replace("\n", " ") for key, value in updates.items()})
         order = ("phase", "old", "oldPane", "oldTab", "tabCheck", "new", "newPane",
                  "newTab", "reclaim", "time", "reason", "result", "error",
-                 "successorWasWorking")
+                 "successorWasWorking", "doneAt")
         lines = [f"{key}={fields[key]}" for key in order if key in fields]
         lines.extend(f"{key}={value}" for key, value in fields.items() if key not in order)
         atomic_write_text(self.crew_dir / "guard.handoff", "\n".join(lines) + "\n")
@@ -1467,7 +1525,8 @@ class Guard:
         error = f"{step}: {detail}".strip()
         fields = dict(base)
         fields.setdefault("time", utc_now())
-        self._write_handoff(**fields, phase="done", result="failed", error=error)
+        self._write_handoff(**fields, phase="done", result="failed", error=error,
+                            doneAt=utc_now())
         old = str(base.get("old") or self.helm)
         body = f"{old} 自动交接失败（{step}），旧舵未关闭；请 Captain 人工接手。\n{detail}"
         resources = [
@@ -1964,6 +2023,7 @@ class Guard:
 
         self._write_handoff(
             **base, phase="done", result="ok", successorWasWorking="1",
+            doneAt=utc_now(),
         )
         self.helm = successor
         # 一次交接已完成；新 helm 后续再达阈值时允许再次交接（防同进程永久短路）。
@@ -3140,6 +3200,11 @@ class Guard:
             self._scan_unconsumed_wake(workers, now)
         except Exception as exc:  # noqa: BLE001
             self.log(f"未消费唤醒扫描异常：{type(exc).__name__}: {exc}")
+        # 2.2.32/T79/D：继任 helm 接手窗口 ctx 观测（只观测不叫醒，失败不阻断）
+        try:
+            self._ctx_observe(agents, now)
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"ctx 观测异常：{type(exc).__name__}: {exc}")
         try:
             self._capacity_check(now, agents)
         except Exception as exc:  # noqa: BLE001 - 容量检查失败不阻断值守
