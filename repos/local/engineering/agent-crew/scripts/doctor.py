@@ -1260,7 +1260,7 @@ class Doctor:
                 next=f"git add {' '.join(watched)} && git commit（或先跑 "
                      "release-check --snapshot-dir 固定快照再处置）")
         return Result("config.git_clean", "pass",
-                      f"{len(watched)} 项编排配置已提交（{'、'.join(watched)}）")
+                      f"{len(watched)} 项编排配置无未提交改动（{'、'.join(watched)}）")
 
     # ================= D2. agents（角色→模型配置，I 切片） =================
 

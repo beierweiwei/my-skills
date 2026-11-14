@@ -235,6 +235,77 @@ class ScanReflogTest(unittest.TestCase):
         self.assertFalse(baseline)
 
 
+class ObserveReflogDefaultStateTest(unittest.TestCase):
+    """BLK-A4-1（A 路评审阻断）：生产默认路径 S1 基线（不显式传 offset）。
+
+    _read_state 缺省 reflogOffset 必须为 None（首走基线=末尾），旧状态文件
+    已存的 int 0 视为旧格式重置——历史 reset 行存在时首轮零告警（BLK-6）。
+    端到端经 observe()（FakeGuard），非纯函数直调。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.base = Path(self._tmp.name)
+        self.root = self.base / "repo"
+        self.root.mkdir()
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True,
+                       capture_output=True)
+        for n in ("c1", "c2", "c3"):
+            subprocess.run(["git", "-C", str(self.root), "-c", "user.email=t@t",
+                            "-c", "user.name=t", "commit", "-qm", n,
+                            "--allow-empty"], check=True, capture_output=True)
+        # 历史 reset 行（首轮之前已存在，应被基线吸收、零告警）
+        subprocess.run(["git", "-C", str(self.root), "reset", "--hard", "HEAD~1"],
+                       check=True, capture_output=True)
+        self.crew = self.base / "crew"
+        self.crew.mkdir()
+        self.projects = self.base / "empty-projects"
+        self.projects.mkdir()
+
+    def observe(self, guard: FakeGuard) -> None:
+        gitops.observe(guard, projects_dir=self.projects)
+
+    def test_default_state_first_round_zero_noise(self):
+        guard = FakeGuard(self.root, self.crew)
+        self.observe(guard)  # 首轮：无状态文件 → _read_state 缺省 → 只拍基线
+        alerts = [m for m in guard.logs if "破坏性 git 操作" in m]
+        self.assertEqual([], alerts, f"首轮回溯历史 reset 行（BLK-A4-1）：{alerts}")
+        state = json.loads((self.crew / "guard.gitops.json").read_text(
+            encoding="utf-8"))
+        reflog_size = (self.root / ".git" / "logs" / "HEAD").stat().st_size
+        self.assertEqual(reflog_size, state["reflogOffset"],
+                         "基线 offset 应=reflog 当前末尾")
+
+        # 第二轮：新 reset → 恰 1 告警
+        subprocess.run(["git", "-C", str(self.root), "reset", "--hard", "HEAD"],
+                       check=True, capture_output=True)
+        self.observe(guard)
+        alerts = [m for m in guard.logs if "破坏性 git 操作" in m]
+        self.assertEqual(1, len(alerts), guard.logs)
+
+    def test_legacy_state_zero_offset_reset_to_baseline(self):
+        """旧状态文件 reflogOffset=0（int）→ 视为旧格式重置到末尾并记日志。"""
+        legacy = {"version": 1, "fileOffsets": {}, "alerted": {},
+                  "reflogOffset": 0, "seenEvents": {}}
+        (self.crew / "guard.gitops.json").write_text(
+            json.dumps(legacy), encoding="utf-8")
+        guard = FakeGuard(self.root, self.crew)
+        self.observe(guard)
+        alerts = [m for m in guard.logs if "破坏性 git 操作" in m]
+        self.assertEqual([], alerts, f"旧格式 0 回溯历史（BLK-A4-1）：{alerts}")
+        self.assertTrue(any("旧格式" in m or "重置" in m for m in guard.logs),
+                        f"缺旧格式迁移日志：{guard.logs}")
+        state = json.loads((self.crew / "guard.gitops.json").read_text(
+            encoding="utf-8"))
+        reflog_size = (self.root / ".git" / "logs" / "HEAD").stat().st_size
+        self.assertEqual(reflog_size, state["reflogOffset"])
+
+    def test_missing_state_defaults_none(self):
+        state = gitops._read_state(self.crew / "nonexistent-dir")
+        self.assertIsNone(state["reflogOffset"], "缺省 reflogOffset 必须 None")
+
+
 class ObserveIntegrationTest(unittest.TestCase):
     """端到端：fixture 仓 + 注入 projects_dir（真实 subprocess git）。"""
 

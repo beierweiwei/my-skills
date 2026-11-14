@@ -72,19 +72,30 @@ def _event_key(source_file: str, tool_use_id: str) -> str:
 
 
 def _read_state(crew_dir: Path) -> dict:
+    """读观测状态；缺省/旧格式的 reflogOffset 一律 None（BLK-A4-1 修复）。
+
+    - 状态文件缺失/损坏 → 全缺省，reflogOffset=None（首轮只拍基线，不回溯）。
+    - 旧格式 reflogOffset=0（int，修复前缺省值）无法与「空 reflog 基线=0」
+      区分 → 确定性策略：一律视为旧格式置 None 重走基线（重置到末尾并记
+      日志），杜绝升级后一次性回溯告警；唯一漏检窗口=「空 reflog 基线后
+      立即产生新 reset 行」一行（漏检优于误报，失败侧安全）。
+    """
+    fresh = {"version": 1, "fileOffsets": {}, "alerted": {},
+             "reflogOffset": None, "seenEvents": {}}
     try:
         data = json.loads((crew_dir / STATE_REL).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {"version": 1, "fileOffsets": {}, "alerted": {},
-                "reflogOffset": 0, "seenEvents": {}}
+        return fresh
     if not isinstance(data, dict):
-        return {"version": 1, "fileOffsets": {}, "alerted": {},
-                "reflogOffset": 0, "seenEvents": {}}
+        return fresh
     data.setdefault("version", 1)
     data.setdefault("fileOffsets", {})
     data.setdefault("alerted", {})
-    data.setdefault("reflogOffset", 0)
     data.setdefault("seenEvents", {})
+    data.setdefault("reflogOffset", None)
+    if data["reflogOffset"] == 0:  # 旧格式 int 0 → 重走基线（见 docstring）
+        data["reflogOffset"] = None
+        data["_migratedReflog"] = True  # observe 记迁移日志后剔除，不落盘
     return data
 
 
@@ -289,6 +300,9 @@ def observe(guard, projects_dir: Path | None = None) -> None:
     roots = {root} | git_worktree_roots(root)
     now = time.time()
     state = _read_state(crew_dir)
+    if state.pop("_migratedReflog", False):
+        guard.log("gitops 观测：检测到旧格式 reflogOffset=0，重置基线到末尾"
+                  "（避免升级后回溯历史告警；BLK-A4-1）")
     offsets = dict(state["fileOffsets"])
     seen = dict(state["seenEvents"])
 
