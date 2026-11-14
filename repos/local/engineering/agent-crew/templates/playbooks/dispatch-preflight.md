@@ -22,7 +22,7 @@
 - [ ] 判定该单能否全自动跑完不阻断（无中途人工决策/凭据/窗口依赖）
 - [ ] 派前查目标 worker ctx 并记录读数（T69）：>40% 先 `/compact`，≥60% 关闭重建；helm/firstmate 自身交接阈值（30% warn/50% 交接）不动；`dispatch.py prompt` 已内置 ctx 硬门（ctx 解析不出 fail-closed 拒派，人工确认后 `--allow-unknown-ctx` 放行）
 - [ ] **compact 保真清单（Captain 硬要求，compact 前确保 plan/progress/findings 写全）**：目标、当前 Phase、Next Step、Decisions、Deviation、在途任务三时间戳、待回执/待核收、证据路径、占用/工位、验收断言；compact 后先读回 plan/progress/findings 再继续
-- [ ] **compact 操作口径**：worker 不能自 compact（CLI 命令需外部注入）——由 firstmate/helm 经 `dispatch.py prompt --agent <worker> --message "/compact"` 注入；流程=compact 前 handoff/plan 保真落盘 → 注入 → worker R1 回执 → 复核 ctx <40% 且读回 handoff/plan → 再派下一片
+- [ ] **compact 操作口径**：worker 不能自 compact（CLI 命令需外部注入）——由 firstmate/helm 经 `printf '/compact\n' > /tmp/msg.md && dispatch.py prompt --agent <worker> --message-file /tmp/msg.md` 注入（2.2.32/T76：--message 只收文件路径）；流程=compact 前 handoff/plan 保真落盘 → 注入 → worker R1 回执 → 复核 ctx <40% 且读回 handoff/plan → 再派下一片
 - [ ] 工单要素完整：目标/现状根因/边界/验收断言/**回执要求（R1 文件回执段必写——dispatch prompt 自动附加回执行（2.2.28 FB-057②），`--no-require-receipt` 可显式关闭）**/证据要求
 - [ ] 不能全自动时：把「提前需要什么决策、找谁、什么时候要」在派单前告知 Captain，且标为最紧急事项上抛；不派了再等
 - **Status:** pending

@@ -88,7 +88,10 @@ class Nf001HelmDispatchFileTest(unittest.TestCase):
             with self.subTest(template=path.name):
                 text = read(path)
                 self.assertIn("所有派单一律先落临时文件（不区分长短）", text)
-                self.assertIn('"$(cat <file>)"', text)
+                # 2.2.32/T76/B3：$(cat) 经 shell 展开仍是内联文本会被拒，
+                # 模板口径升级为 --message-file <file>
+                self.assertIn("--message-file <file>", text)
+                self.assertNotIn('"$(cat <file>)"', text)
                 self.assertNotIn("长 prompt/含反引号等特殊字符的派单", text)
                 self.assertLessEqual(len(text.splitlines()), 80)
 
@@ -128,12 +131,12 @@ class Nf003CheatsheetDispatchTest(unittest.TestCase):
 
 class Version225Test(unittest.TestCase):
     def test_version_synced(self):
-        self.assertIn("version: 2.2.31", read(SKILL_MD))
-        self.assertIn("v2.2.31", read(SKILL_MD))
-        self.assertIn('SKILL_VERSION_FALLBACK = "2.2.31"', read(INIT))
+        self.assertIn("version: 2.2.32", read(SKILL_MD))
+        self.assertIn("v2.2.32", read(SKILL_MD))
+        self.assertIn('SKILL_VERSION_FALLBACK = "2.2.32"', read(INIT))
         self.assertIn("## 2.2.31", read(CHANGELOG))
-        self.assertIn('"2.2.31"', read(TEST_CREW_LINT))
-        self.assertIn("2.2.31", read(TEST_220))
+        self.assertIn('"2.2.32"', read(TEST_CREW_LINT))
+        self.assertIn("2.2.32", read(TEST_220))
 
 
 if __name__ == "__main__":

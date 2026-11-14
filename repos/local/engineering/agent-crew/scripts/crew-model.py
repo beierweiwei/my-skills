@@ -135,8 +135,25 @@ def cmd_settings(args: argparse.Namespace) -> int:
     if not settings.is_file():
         return fail(f"settings 不存在：{settings}")
     data = load_json(settings)
+    # 2.2.32/T72：settings 根与 agents 键类型校验（失败侧安全——友好 rc=1、
+    # 零写入，不 traceback；null/str/list 均为 2.2.30 评审残留观察的实炸形态）
+    if not isinstance(data, dict):
+        return fail(f"settings 根必须是 JSON 对象，实际为 "
+                    f"{type(data).__name__}；请修复 {settings}")
     if runtime == "qoder":
-        overrides = data.get("agents", {}).get("overrides", {})
+        agents = data.get("agents")
+        if agents is not None and not isinstance(agents, dict):
+            return fail(f"settings 的 agents 键必须是对象，实际为 "
+                        f"{type(agents).__name__}；请修复 {settings}"
+                        "（改为 {} 或删除该键后重试）")
+        agents = agents or {}
+        env = agents.get("env")
+        if env is not None and (
+                not isinstance(env, dict)
+                or not all(isinstance(v, str) for v in env.values())):
+            return fail(f"settings 的 agents.env 必须是对象且值为字符串；"
+                        f"请修复 {settings}（非字符串值改为字符串或删除该键）")
+        overrides = agents.get("overrides", {})
         if not isinstance(overrides, dict) or not overrides:
             return fail(f"agents.overrides 为空或结构异常，无键可改：{settings}")
         # 结构校验（dry-run/apply 同关口）：值或 modelConfig 非对象（含 null）拒绝，

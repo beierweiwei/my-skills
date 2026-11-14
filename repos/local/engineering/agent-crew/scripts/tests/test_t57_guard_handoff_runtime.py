@@ -66,11 +66,13 @@ class EffectiveHelmRuntimeTest(unittest.TestCase):
 class HandoffStartArgsTest(unittest.TestCase):
     """R2：交接 start_args 继承现役舵 runtime，而非 qoder 单值假设。"""
 
+    # 2.2.32/T76/C2：start 不再手传 --permission-mode（配置/模板解析），
+    # 只保留 runtime 继承与消歧语义。
+
     def test_claude_runtime_claude_args(self):
         args = cg.handoff_start_args("claude", "wX:pNEW", "helm-1-2")
         self.assertEqual(
             ["start", "--role", "helm", "--pane", "wX:pNEW",
-             "--permission-mode", "bypassPermissions",
              "--runtime", "claude", "--name", "helm-1-2", "--json"],
             args)
 
@@ -78,8 +80,7 @@ class HandoffStartArgsTest(unittest.TestCase):
         args = cg.handoff_start_args("qoder", "wX:pNEW", "helm-1-2")
         self.assertIn("--runtime", args)
         self.assertEqual("qoder", args[args.index("--runtime") + 1])
-        self.assertEqual(
-            "bypass_permissions", args[args.index("--permission-mode") + 1])
+        self.assertNotIn("--permission-mode", args)
 
     def test_opencode_runtime_no_qoder_permission_flag(self):
         args = cg.handoff_start_args("opencode", "wX:pNEW", "helm-1-2")
@@ -90,8 +91,7 @@ class HandoffStartArgsTest(unittest.TestCase):
     def test_missing_runtime_keeps_legacy_behavior(self):
         args = cg.handoff_start_args("", "wX:pNEW", "helm-1-2")
         self.assertNotIn("--runtime", args)
-        self.assertEqual(
-            "bypass_permissions", args[args.index("--permission-mode") + 1])
+        self.assertNotIn("--permission-mode", args)
 
 
 class IdleWakeDefaultTest(unittest.TestCase):
@@ -148,8 +148,8 @@ class GuardHandoffClaudeRuntimeTest(GuardTestBase):
         starts = [c for c in self.dispatch_calls if c[:1] == ["start"]]
         self.assertEqual(1, len(starts))
         self.assertEqual("claude", starts[0][starts[0].index("--runtime") + 1])
-        self.assertEqual(
-            "bypassPermissions", starts[0][starts[0].index("--permission-mode") + 1])
+        # 2.2.32/T76/C2：permission-mode 不再手传（配置解析）
+        self.assertNotIn("--permission-mode", starts[0])
 
     def test_handoff_qoder_record_keeps_qoder_successor(self):
         self.prepare_handoff(registry={

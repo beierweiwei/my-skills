@@ -138,6 +138,13 @@ class ApprovalDetectorTest(unittest.TestCase):
             entry["agent_session"] = {"agent": "qodercli", "value": session}
         return entry
 
+    def _write_msg(self, text: str) -> str:
+        """2.2.32/T76/B3：--message/--message-file 只收文件路径（夹具落盘）。"""
+        import tempfile as _tf
+        path = Path(_tf.mkstemp(suffix=".md")[1])
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
     def test_agent_run_log_maps_session_segment_to_run_log(self):
         self.assertEqual(self.run_log, ca.agent_run_log(
             self.agent(), qoder_home=self.home))
@@ -589,6 +596,13 @@ class StuckGuardTest(GuardHarness):
 
 
 class InjectionFallbackTest(GuardHarness):
+    def _write_msg(self, text: str) -> str:
+        """2.2.32/T76/B3：--message/--message-file 只收文件路径（夹具落盘）。"""
+        import tempfile as _tf
+        path = Path(_tf.mkstemp(suffix=".md")[1])
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
     def test_crew_msg_pending_approval_skips_herdr_prompt(self):
         receipt = cm.build_receipt(
             from_="builder-1", runtime="qoder", task="patch-2221/BC",
@@ -649,7 +663,7 @@ class InjectionFallbackTest(GuardHarness):
                                       else fake_run_herdr(argv))), \
                 redirect_stdout(out), redirect_stderr(err):
             code = dispatch.main(["--root", str(root), "prompt",
-                                  "--agent", "worker-1", "--message", "hi"])
+                                  "--agent", "worker-1", "--message-file", self._write_msg("hi")])
 
         self.assertEqual(2, code)
         self.assertEqual([], calls)

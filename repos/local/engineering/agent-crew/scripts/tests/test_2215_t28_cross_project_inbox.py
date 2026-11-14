@@ -109,10 +109,17 @@ class DispatchNotifyInboxTest(unittest.TestCase):
         return {"name": name, "workspace_id": "wQ", "agent_status": status,
                 "cwd": str(cwd or self.receiver)}
 
+    def _write_msg(self, text: str) -> str:
+        """2.2.32/T76/B3：--message/--message-file 只收文件路径（夹具落盘）。"""
+        import tempfile as _tf
+        path = Path(_tf.mkstemp(suffix=".md")[1])
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
     def test_agent_direct_writes_receiver_inbox_with_traceable_fields(self):
         self.agents = [self.target_agent()]
         code, out = self.main(
-            "notify", "--agent", "case-helm-1", "--message", "T28 通知正文", "--json")
+            "notify", "--agent", "case-helm-1", "--message-file", self._write_msg("T28 通知正文"), "--json")
         self.assertEqual(0, code)
         payload = json.loads(out)
         self.assertEqual("written", payload["inbox"]["status"])
@@ -139,7 +146,7 @@ class DispatchNotifyInboxTest(unittest.TestCase):
 
     def test_same_content_is_idempotent_dedup(self):
         self.agents = [self.target_agent()]
-        argv = ("notify", "--agent", "case-helm-1", "--message", "重复通知",
+        argv = ("notify", "--agent", "case-helm-1", "--message-file", self._write_msg("重复通知"),
                 "--no-require-receipt", "--json")
         code1, out1 = self.main(*argv)
         code2, out2 = self.main(*argv)
@@ -157,7 +164,7 @@ class DispatchNotifyInboxTest(unittest.TestCase):
         ]
         code, out = self.main(
             "notify", "--workspace", "wQ", "--role", "helm",
-            "--message", "换舵通知", "--no-require-receipt", "--json")
+            "--message-file", self._write_msg("换舵通知"), "--no-require-receipt", "--json")
         self.assertEqual(0, code)
         payload = json.loads(out)
         self.assertEqual("herdr", payload["delivery"])
@@ -170,7 +177,7 @@ class DispatchNotifyInboxTest(unittest.TestCase):
     def test_target_not_on_machine_degrades_with_explicit_note(self):
         self.agents = []
         code, out = self.main(
-            "notify", "--agent", "ghost-helm", "--message", "hi",
+            "notify", "--agent", "ghost-helm", "--message-file", self._write_msg("hi"),
             "--no-require-receipt")
         self.assertEqual(0, code)
         self.assertIn("未落收件方 inbox", out)
@@ -188,7 +195,7 @@ class DispatchNotifyInboxTest(unittest.TestCase):
         plain.mkdir()
         self.agents = [self.target_agent(cwd=plain)]
         code, out = self.main(
-            "notify", "--agent", "case-helm-1", "--message", "hi", "--json")
+            "notify", "--agent", "case-helm-1", "--message-file", self._write_msg("hi"), "--json")
         self.assertEqual(0, code)
         payload = json.loads(out)
         self.assertEqual("skipped", payload["inbox"]["status"])
@@ -198,7 +205,7 @@ class DispatchNotifyInboxTest(unittest.TestCase):
     def test_ack_marks_processed_and_is_idempotent(self):
         self.agents = [self.target_agent()]
         code, out = self.main(
-            "notify", "--agent", "case-helm-1", "--message", "待处置", "--json")
+            "notify", "--agent", "case-helm-1", "--message-file", self._write_msg("待处置"), "--json")
         self.assertEqual(0, code)
         ident = json.loads(out)["inbox"]["path"]
         path = Path(ident)
@@ -224,7 +231,7 @@ class DispatchNotifyInboxTest(unittest.TestCase):
     def test_ack_unknown_or_mixed_usage_rejected(self):
         code, _ = self.main("notify", "--ack", "notify-not-exist")
         self.assertEqual(1, code)
-        code, _ = self.main("notify", "--ack", "notify-not-exist", "--message", "x")
+        code, _ = self.main("notify", "--ack", "notify-not-exist", "--message-file", self._write_msg("x"))
         self.assertEqual(1, code)
 
 

@@ -1333,10 +1333,20 @@ class Doctor:
             return Result("agents.config", "fail", detail, next=AGENTS_CONFIG_NEXT)
         summary = (f"default={default.get('backend')}；"
                    f"roles={len(roles)}；playbooks={len(playbooks)}")
+        # 2.2.32/T76/S5：编排角色完备性——helm/firstmate 缺 roles 条目时起舵/大副
+        # 静默落 default 模型（#88 同型配置事故）；warn 不阻断（与 start 硬拒手传
+        # 同批交付，存量项目可显式接受 default 回落）。
+        orchestration_missing = [
+            role for role in ("helm", "firstmate") if role not in roles]
         if missing:
             return Result("agents.config", "warn",
                           summary + "；缺命令：" + "、".join(missing),
                           next=AGENTS_COMMAND_NEXT)
+        if orchestration_missing:
+            return Result("agents.config", "warn",
+                          summary + "；编排角色缺 roles 条目："
+                          + "、".join(orchestration_missing)
+                          + "（将回落 agents.default；补 agents.roles.<role> 显式声明）")
         return Result("agents.config", "pass", summary)
 
     # ================= E. roles =================

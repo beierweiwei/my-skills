@@ -6,8 +6,12 @@
 「未落收件方 inbox」不阻断推送（T28）。
 注册表：<git-common-dir>/crew/registry.json，只存 Herdr 不知道的路由；默认不创建。
 
-推送边界（2.2.17）：
+推送边界（2.2.17；2.2.32/T76/B1 同项目放宽）：
 - opencode→opencode：POST /api/session/{id}/prompt，请求体 delivery=queue；
+- 同项目（任意 runtime → 任意 runtime）：auto 且目标为本机同项目 herdr agent 时
+  默认 `herdr agent prompt <目标名>` 直推（运行时无关通道；发送方不再限 qoder——
+  claude 发送方同项目回执到达即注入，消灭「送达不唤醒」notification 大分支；
+  投递结果 runtime=same-project、delivery_runtime=herdr-prompt）；
 - qoder→qoder：默认 `herdr agent prompt <目标名>` 直推（非交互、无跨会话审批）；
   `--via sendmessage` 显式回到 DELEGATE（需接收方人工确认，inbox 为真源）；
   `--via herdr` 强制 herdr，herdr 调用失败时回退 DELEGATE 并返回诊断错误；
@@ -186,6 +190,7 @@ def build_receipt(
     receipt_id: str | None = None,
     ts: str | None = None,
     handoff_read_bytes: int | None = None,
+    to: str = "",
 ) -> dict:
     if runtime not in SENDER_RUNTIMES:
         raise CrewMsgError(f"未知 runtime: {runtime!r}（可选: {', '.join(SENDER_RUNTIMES)}）")
@@ -219,6 +224,10 @@ def build_receipt(
         "summary": summary,
         "ts": ts or utc_now(),
     }
+    # 2.2.32/T76/B2：可选收件方字段（--to 的回执留存）——guard 兜底桶据此精确
+    # 归属（旧回执无该字段回退 work_slot/task 正文匹配，向后兼容不强制）。
+    if isinstance(to, str) and to.strip():
+        receipt["to"] = to.strip()
     if handoff_read_bytes is not None:
         receipt["handoff_read_bytes"] = handoff_read_bytes
     return receipt
@@ -985,18 +994,21 @@ def deliver_receipt(
         return result
 
     route = routes.get(to)
-    # FB-039：auto + 同项目 herdr 目标默认直推，叫醒已结束回合的收件方；
-    # 复用 T28 的「本地 inbox 即收件方 inbox」判定，聚焦守卫等仍由 deliver_qoder 承担。
+    # FB-039 + 2.2.32/T76/B1：auto + 同项目 herdr 目标默认直推，叫醒已结束回合的
+    # 收件方。status=="same" 本身已逐步验证「to 是合法 herdr agent 名 → 在本机
+    # agent list → 目标 crew inbox 与发送方同一目录」（_resolve_peer_inbox），
+    # 故发送方 runtime 不再限制——claude 发送方同项目回执同样注入，消灭
+    # 「送达不唤醒」notification 大分支（CASE 实测 173+/202 条）；聚焦/审批/
+    # 不可达守卫由 deliver_qoder 承担（herdr agent prompt 是运行时无关通道）。
     auto_same_project = (
         route is None
         and peer_inbox.get("status") == "same"
-        and receipt.get("runtime") == "qoder"
     )
     if target_runtime in (None, "auto"):
         if route:
             runtime = route["runtime"]
         elif auto_same_project:
-            runtime = "qoder"
+            runtime = "inject"  # B1：同项目直连注入链（运行时无关）
         else:
             runtime = "herdr"
     else:
@@ -1006,6 +1018,17 @@ def deliver_receipt(
                 f'目标 "{to}" 在注册表中的 runtime={route["runtime"]}，'
                 f"与 --target-runtime={runtime} 冲突"
             )
+
+    if runtime == "inject":
+        # B1：同项目回执到达即注入。显式跳过下方跨产品 runtime 检查（仅同项目
+        # 目标；显式 --target-runtime 的跨产品/跨项目请求仍走 notification，安全
+        # 矩阵不放松）。runtime 字段改写为 same-project + delivery_runtime 标注注入
+        # 通道（S7），避免「runtime=qoder 通道注入 claude 工位」在 agent-log 误读。
+        result = deliver_qoder(
+            receipt, to=to, via=via, crew_dir=crew_dir, timeout=timeout)
+        result["runtime"] = "same-project"
+        result["delivery_runtime"] = "herdr-prompt"
+        return finish(result)
 
     if runtime == "herdr":
         # FB-053：目标与已知 agent 名/registry 路由都不匹配 → 明确拒绝，
@@ -1027,11 +1050,6 @@ def deliver_receipt(
             })
         if target_runtime == "herdr":
             note = "Herdr 目标（显式 --target-runtime herdr）：只写文件 + 通知"
-        elif peer_inbox.get("status") == "same":
-            note = (
-                f"同项目但发送方 runtime={receipt.get('runtime')}："
-                "未注入，只写文件 + Herdr 通知"
-            )
         elif peer_inbox.get("status") in ("written", "dedup"):
             note = "跨项目目标：未注入，只写文件 + Herdr 通知"
         else:
@@ -1223,6 +1241,7 @@ def _cmd_write(args, crew_dir: Path) -> int:
         findings=args.finding,
         receipt_id=args.receipt_id,
         handoff_read_bytes=args.handoff_read_bytes,
+        to=args.to or "",
     )
     try:
         result = write_receipt(
@@ -1382,10 +1401,12 @@ def _common_parser() -> argparse.ArgumentParser:
 def build_parser() -> argparse.ArgumentParser:
     epilog = """\
 回执字段：receipt_id / from / runtime / task / status(done|blocked|captain) / commit /
-changed_files[] / evidence[] / work_slot / findings[] / summary / ts。
+changed_files[] / evidence[] / work_slot / findings[] / summary / ts；to（可选，2.2.32/T76：
+--to 落进回执留存，guard 兜底桶据此精确归属收件工位）。
 status=captain 表示 ⏸ 待 Captain。回执先原子落盘，推送失败不影响回执成立。
 
-推送边界（2.2.17）：
+推送边界（2.2.17；2.2.32/T76/B1 同项目放宽——任意 runtime 同项目 auto 默认
+herdr 直推，结果 runtime=same-project/delivery_runtime=herdr-prompt）：
 - qoder→qoder：默认 `herdr agent prompt <目标名>` 直推（非交互、无跨会话审批）；
   直推前查目标 pane 的 focused（T37）：聚焦或无法判定 → 不注入，回执落 inbox +
   Herdr 通知，结果记 delivery=inbox_fallback（`--via herdr` 同此口径）；

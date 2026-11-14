@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.2.32 — 2026-11-14
+
+2.2.32 总批（反馈清零 + CASE 缺陷 + 观测 + 受管补缺；A/B 分路评审 PASS、C/D 按 D7 快审阻断清零后实施）：
+
+- **A/T77/FB-058**：`plan-status.py --rotate` 归档集改按条目时间戳排序（日期+首行 HH:MM，无时刻按 00:00、同键文件序稳定 tie-break）——源文件保留最新 N 条、其余归档，与行/块顺序无关（progress 倒序置顶时旧实现会把最新条目归档、源文件反留最旧）；保留集不重排；摘要/归档头时间戳化一致可对账；三夹具 8 例。
+- **B/T78/FB-060**：`crew-claude.py run` 落盘后校验报告完整性（非空+最小非空行数/字节+关键段二选一），不符 `report_ok=false` 退出 1 可重派（报告保留）；阈值 `--min-report-lines/--min-report-bytes`（0=关闭）> 配置 `reportCheck` > 默认 5 行/200B；meta 增 `report_ok/report_lines/report_problems`；scout/runner 三栈模板报告首行固定「行数: N 字节: M」且 R1 回执同值（不一致=未完成）。
+- **C1/T76（CASE 缺陷①）**：crew-msg 同项目（任意 runtime）auto 直连 herdr agent prompt 注入（`runtime=same-project`+`delivery_runtime=herdr-prompt`；聚焦/审批/不可达守卫不放松；跨产品/跨项目仍通知）；`--to` 落回执可选字段；guard 未消费唤醒桶（idle≥300s 工位名下未读回执/被拒派单→固定消费模板；聚焦/审批延后、probe/helm 排除、按 key 只叫一次、队列≤20、重试 3 次升级；`guard.state.json` 持久化跨重启恢复）。
+- **C2/T76（CASE 缺陷②）**：生命周期脚本化——dispatch start 拒手传 `--model/--permission-mode`（rc=2+配置指引；模型按 `agents.roles.<role>`>`default` 级联解析，registry/agent-log/JSON 记 `modelSource`）；prompt/notify `--message/--message-file` 只收文件路径（内联 rc=1；三栈 helm 模板 `$(cat)` 口径同批迁移 `--message-file`）；close 关闭前对账（working/blocked 拒关、`--force --reason` 留痕放行、awaiting_approval 恒拒、close 行补 sender/reason/status、末次 prompt 后无回执提示级警告）；guard 交接 prompt 文件化、`handoff_start_args` 去手传 permission-mode；doctor agents.config 增 helm/firstmate 完备性 warn。
+- **D/T79**：guard 继任 helm 接手窗口 ctx 观测（只观测不叫醒）——`guard.handoff` 补 `doneAt`，done(ok) 起 15 分钟窗内每轮采样继任 pane ctx 落 `guard.ctxobserve.jsonl`（最小字段 ts/helm/ctx_k/phase）；不设阈值/不告警（n=4 不足标定，样本 ≥10 后随阈值复审）；零 wake/零通知。
+- **受管脚本补缺（2.2.30 缺口）**：`SCRIPT_MANIFEST` 补 `crew-model.py`、`plan-archive.py`（27 项），项目 upgrade 后两脚本随源安装。
+- **验证档**：新增测试文件 5 个（rotate 三夹具/报告完整性/C1 唤醒链/C2 生命周期/ctx 观测）共 57 例；verify-crew 新 feature 4 项规格（plan-status-rotate-order、crew-claude-report-integrity、crew-model-guardrails、plan-archive、dispatch-claude——verify 工位 2c8b9c1）。
+
 ## 2.2.31 — 2026-11-14
 
 guard 空闲兜底改版（guard-noise 流，D7 对抗审查 PASS 后实施）：止历史「报平安」噪音，堵回口敞口。

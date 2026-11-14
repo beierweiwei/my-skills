@@ -87,7 +87,9 @@ python3 scripts/dispatch.py start --role builder --runtime opencode --pane <root
 ### 3.3 发任务
 
 ```bash
-python3 scripts/dispatch.py prompt --agent <task>-builder --message "目标：<一句话>；读 <{{doc_req}}/工单路径>；只改 <文件>；验收：<命令/口径>；完成写 <报告路径>；ctx>40% 停止接新切片（先 `/compact`），≥60% 关闭重建（dispatch prompt 已内置 ctx 硬门，超阈自动拒派）。"
+MSG=/tmp/<task>-builder-msg.md  # 先落临时文件（2.2.32/T76：--message 只收文件路径）
+printf '目标：<一句话>；读 <{{doc_req}}/工单路径>；只改 <文件>；验收：<命令/口径>；完成写 <报告路径>；ctx>40%% 停止接新切片（先 `/compact`），≥60%% 关闭重建（dispatch prompt 已内置 ctx 硬门，超阈自动拒派）。\n' > "$MSG"
+python3 scripts/dispatch.py prompt --agent <task>-builder --message-file "$MSG"
 ```
 
 - 任何任务都不在前台 `--wait` 等结果；派活后立即返回，用后台 `agent-watch.py` 或 Monitor 监听，收到完成通知再读结果。

@@ -39,7 +39,7 @@ permission:
 5. 收口：按回执更新 portfolio 的 Phases/Deviation/Next Step（流 plan 由副舵写）；行为/脚本改动必须实测项目验证技能对应 feature；规则/模板/提示词文本改动以 grep/lint/schema 测试为主证据 + 安装后 1 个 smoke feature 为辅证，回执写清 feature 名、命令 + stdout/stderr + 退出码、证据路径；diff/接口 200/自述只作旁证（F6）；关键决策类交付另出示 D7 对抗审查结论与证据（路径 + PASS/阻断清零），缺则阻断；需要 Captain 的决策按三段式 + 推荐，一次 ≤3。
 6. 汇报：按下方「回复格式」；以看板为准（`python3 scripts/plan-status.py --brief` 一屏 + `--lint` 卫生提醒，默认不阻断，`--strict` 才失败）；A5.6 模板仅用于验收呈报；首句用业务术语答「现在能不能用、到哪一步」，技术细节与证据只放技术明细段（A5.4）。
 7. 每轮开工先检查：跑 `python3 scripts/crew-preflight.py` 一次核五项（guard.wake 新鲜度、未读回执、agent 状态+ctx、看板新鲜度、guard pid），不可用项按输出标注处理；wake 段先读首行 `generated_at:`，超过 2h 或无法解析视为过期，忽略并删除/标记（fail-safe），不得按旧叫醒派活；guard 启动也会清理过期 wake；新鲜则读取、按需处置，消费后删除或标记（防「prompt 失败回退文件但总舵未察觉」）。
-8. **所有派单一律先落临时文件（不区分长短）**，传参统一用 `"$(cat <file>)"`；不在命令行内联 prompt（反引号/特殊字符会被本地 shell 先执行，BUG-010）。
+8. **所有派单一律先落临时文件（不区分长短）**，传参统一用 `--message-file <file>`（2.2.32/T76：dispatch prompt/notify 的 --message 只收文件路径，`$(cat)` 经 shell 展开仍是内联文本，会被拒 rc=1）；不在命令行内联 prompt（反引号/特殊字符会被本地 shell 先执行，BUG-010）。
 9. 每轮开工查 `<crew-dir>/inbox/`（R1 文件真源）：`python3 scripts/crew-msg.py ls --unread` 取未读，处置后 `ls --mark-read <receipt_id>...`（或 `--all`）记游标——游标只记读取进度，不改不删回执；preflight 报游标未就绪且历史积压时，执行一次 `python3 scripts/crew-msg.py ls --mark-read --all` 初始化游标（一次性；只记读取进度，不代表已处置）；跨项目通知落收件方 inbox（`kind=notification`、`status=pending`），处置后用 `python3 scripts/dispatch.py notify --ack <id>` 标 processed；先处理 `status=blocked` 与 ⏸ 回执（re-task / close / escalate），回写原工位并标状态，再开新活（R6）。
 10. 若会话弹出跨会话消息审批：按「1. Delivered / 2. Decline」人工处置后继续；不依赖 SendMessage 送达、不当成交接问题（inbox 已落盘为真源）。
 11. 每轮开工先查 `<crew-dir>/guard.handoff`：存在则停止接新活、收口当前切片，按记录等待继任首报；首报后由 guard 关闭旧 pane/旧 tab。phase=warn 只准备交接，phase=started/done 不得重复启动继任。

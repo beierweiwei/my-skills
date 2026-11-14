@@ -79,13 +79,20 @@ class Fb052NotifyDoneTargetTest(unittest.TestCase):
         return [json.loads(line) for line in
                 path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
+    def _write_msg(self, text: str) -> str:
+        """2.2.32/T76/B3：--message/--message-file 只收文件路径（夹具落盘）。"""
+        import tempfile as _tf
+        path = Path(_tf.mkstemp(suffix=".md")[1])
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
     def test_done_target_resolved_and_inbox_fallback_without_prompt(self):
         """role 解析到 done 目标：rc=0、落收件方 inbox、不注入 pane。"""
         self.agents = [{"name": "helm-x-4", "workspace_id": "w1",
                         "agent_status": "done", "cwd": str(self.root)}]
         code, out = self.dispatch_main(
             "notify", "--workspace", "w1", "--role", "helm",
-            "--message", "切片完成，请核收", "--json")
+            "--message-file", self._write_msg("切片完成，请核收"), "--json")
         self.assertEqual(0, code)
         self.assertEqual([], self.prompt_calls(), "done 目标不得 pane 注入")
         payload = json.loads(out)
@@ -110,7 +117,7 @@ class Fb052NotifyDoneTargetTest(unittest.TestCase):
                         "agent_status": "done", "cwd": str(self.root)}]
         code, out = self.dispatch_main(
             "notify", "--agent", "t57-builder",
-            "--message", "请核收", "--no-require-receipt", "--json")
+            "--message-file", self._write_msg("请核收"), "--no-require-receipt", "--json")
         self.assertEqual(0, code)
         self.assertEqual([], self.prompt_calls())
         payload = json.loads(out)

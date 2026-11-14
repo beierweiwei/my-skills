@@ -51,7 +51,7 @@ TEMPLATES = SKILL_DIR / "templates"
 MARK_START = "<!-- agent-crew:orchestration:start -->"
 MARK_END = "<!-- agent-crew:orchestration:end -->"
 MARK_PREFIX = "<!-- agent-crew:orchestration:"
-SKILL_VERSION_FALLBACK = "2.2.31"
+SKILL_VERSION_FALLBACK = "2.2.32"
 
 CONFIG_REL = Path(".planning/orchestration.json")
 MANIFEST_REL = Path("docs/crew/manifest.json")
@@ -114,6 +114,8 @@ SCRIPT_MANIFEST = [
     "crew-evidence.py",
     "crew-preflight.py",
     "release-check.py",
+    "crew-model.py",   # 2.2.32 补 2.2.30 缺口：受管清单漏登，项目 upgrade 漏装
+    "plan-archive.py",  # 2.2.32 补 2.2.30 缺口：同上
 ]
 COPY_BASENAMES = ("crew-rules.md", "crew-acceptance.md",
                   "orchestration-guide.md", "plan-discipline.md",

@@ -104,6 +104,10 @@ CONFIG_REL = ".planning/orchestration.json"
 WRITE_HINT = "请运行 `python3 scripts/plan-status.py --write` 重刷看板"
 
 # —— 交接瘦身（2.2.7）：--handover 摘要 / --rotate 归档 / --write 体量告警 ——
+# rotate 归档集按条目时间戳排序决定（2.2.32/T77/FB-058）：日期 + 条目首行可解析的
+# HH:MM（无时刻按 00:00；19:4x 等遮蔽写法不匹配，只按日期），同键按文件内相对顺序
+# 稳定 tie-break；源文件保留最新 N 条、其余归档——与条目在文件中的行/块顺序无关
+# （progress 约定最新在顶部，按块序切分会把最新条目归档、源文件反留最旧）。
 # 阈值以常量落代码（--help 与模块 docstring 同步；单测直接构造边界夹具）：
 #   progress ≥ PROGRESS_WARN_BYTES 字节或 ≥ PROGRESS_WARN_ENTRIES 条 → --write stderr 告警；
 #   --handover 恒 ≤ HANDOVER_MAX_LINES 行且输出 ≤ HANDOVER_MAX_BYTES 字节（2.2.19：
@@ -603,6 +607,35 @@ def _entry_blocks(lines: list[str], *, fallback_stops_at_heading: bool = False
         else:
             i += 1
     return blocks, not has_section
+
+
+_ENTRY_TIME_RE = re.compile(r"\b(\d{1,2}):(\d{2})\b")
+
+
+def _entry_time(line: str) -> str:
+    """条目首行内第一个合法 HH:MM（时 ≤23、分 ≤59，容忍 H:MM 补零）；无则空串。
+    19:4x 等遮蔽写法不满足两位数字要求，自动落到日期粒度；解析失败不抛异常。"""
+    for m in _ENTRY_TIME_RE.finditer(line):
+        if int(m.group(1)) <= 23 and int(m.group(2)) <= 59:
+            return f"{int(m.group(1)):02d}:{m.group(2)}"
+    return ""
+
+
+def _entry_stamp(lines: list[str], block: tuple[int, int]) -> str:
+    """条目时间戳（排序键的显示形态）：`YYYY-MM-DD` + 可解析的 ` HH:MM`。"""
+    first = lines[block[0]]
+    m = re.match(r"- (\d{4}-\d{2}-\d{2})", first)
+    date = m.group(1) if m else "—"
+    t = _entry_time(first)
+    return f"{date} {t}" if t else date
+
+
+def _rotate_key(lines: list[str], block: tuple[int, int]) -> tuple[str, str, int]:
+    """rotate 排序键：(日期, 时刻, 文件内起始行)。无时刻按 00:00 参与排序；
+    同键（同日同时刻/同日均无时刻）按文件内相对顺序稳定 tie-break，确定性可复算。"""
+    first = lines[block[0]]
+    m = re.match(r"- (\d{4}-\d{2}-\d{2})", first)
+    return (m.group(1) if m else "9999-99-99", _entry_time(first) or "00:00", block[0])
 
 
 def _read_head(path: Path, max_bytes: int = PROGRESS_TAIL_BYTES) -> str:
@@ -1263,7 +1296,12 @@ def _rotate_plan(root: Path, cfg: dict, keep: int) -> dict | None:
     total = len(blocks)
     if total <= keep:
         return None
-    removed, kept = blocks[: total - keep], blocks[total - keep:]
+    # 归档集=时间排序后最旧的 total-keep 条；保留集=最新 keep 条（FB-058）。
+    # sorted 稳定：同键保持输入序（=文件内相对顺序），二次运行同结果。
+    order = sorted(range(total), key=lambda i: _rotate_key(lines, blocks[i]))
+    removed_idx = order[: total - keep]
+    kept_idx = order[total - keep:]
+    removed = [blocks[i] for i in sorted(removed_idx)]  # 归档块按文件顺序拼接
     drop = {i for start, end in removed for i in range(start, end)}
     remaining = "".join(raw_lines[i] for i in range(len(raw_lines)) if i not in drop)
     if remaining and not remaining.endswith("\n"):
@@ -1275,23 +1313,23 @@ def _rotate_plan(root: Path, cfg: dict, keep: int) -> dict | None:
                f"已移入 `{archive_rel}`（--keep {keep}）。\n")
     new_live = remaining + pointer
 
-    def _entry_date(block: tuple[int, int]) -> str:
-        m = re.match(r"- (\d{4}-\d{2}-\d{2})", lines[block[0]])
-        return m.group(1) if m else "—"
+    def _stamp(idx: int) -> str:
+        return _entry_stamp(lines, blocks[idx])
 
+    archive_span = f"{_stamp(removed_idx[0])} → {_stamp(removed_idx[-1])}"
+    kept_span = f"{_stamp(kept_idx[0])} → {_stamp(kept_idx[-1])}"
     before_lines, before_bytes = len(source.splitlines()), len(source.encode("utf-8"))
     after_lines, after_bytes = len(new_live.splitlines()), len(new_live.encode("utf-8"))
     body = "\n\n".join("".join(raw_lines[s:e]).rstrip("\r\n") for s, e in removed)
     digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
-    boundary = f"移出源文件第 {removed[0][0] + 1}–{removed[-1][1]} 行"
+    boundary = f"归档 {len(removed)} 条（{archive_span}）"
     role = os.environ.get("CREW_ROLE") or "unknown"
     archive_text = (
         f"# progress 归档（{date[:4]}-{date[4:6]}-{date[6:]}）\n\n"
         f"> 来源：`{path.relative_to(root).as_posix()}`\n"
         f"> 归档日期：{datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
-        f"> 截止边界：{boundary}，"
-        f"共 {len(removed)} 条（{_entry_date(removed[0])} → {_entry_date(removed[-1])}）；"
-        f"保留最近 {keep} 条\n"
+        f"> 截止边界：{boundary}；"
+        f"保留最近 {keep} 条（{kept_span}）\n"
         f"> 行数：{before_lines} → {after_lines}；字节：{before_bytes} → {after_bytes}\n"
         f"> 源文件归档前 sha256：{digest}\n"
         f"> 操作角色：{role}\n\n"
@@ -1299,7 +1337,7 @@ def _rotate_plan(root: Path, cfg: dict, keep: int) -> dict | None:
     return {
         "path": path, "rel": path.relative_to(root).as_posix(),
         "total": total, "keep": keep, "fallback": fallback,
-        "removed": len(removed), "kept_start": kept[0][0] + 1,
+        "removed": len(removed), "archive_span": archive_span, "kept_span": kept_span,
         "before_lines": before_lines, "before_bytes": before_bytes,
         "after_lines": after_lines, "after_bytes": after_bytes,
         "archive_path": archive_path, "archive_rel": archive_rel,
@@ -1312,9 +1350,10 @@ def _rotate_plan(root: Path, cfg: dict, keep: int) -> dict | None:
 def _print_rotate_plan(plan: dict) -> None:
     print(f"[rotate] progress：{plan['rel']}")
     print(f"  条目：{plan['total']} → 保留 {plan['keep']}，移出 {plan['removed']}")
+    print(f"  保留集时间戳：{plan['kept_span']}")
+    print(f"  归档集时间戳：{plan['archive_span']}")
     print(f"  行数：{plan['before_lines']} → {plan['after_lines']}；"
           f"字节：{plan['before_bytes']} → {plan['after_bytes']}")
-    print(f"  保留条目：源文件第 {plan['kept_start']} 行起（最近 {plan['keep']} 条）")
     print(f"  归档：{plan['archive_rel']}（{plan['removed']} 条）")
     if plan["fallback"]:
         print(f"  提示：未找到 `## {PROGRESS_SECTION}` 节，已按行首 `- YYYY-MM-DD` 兜底计条目。")
@@ -1364,7 +1403,7 @@ def rotate(root: Path, cfg: dict, keep: int, apply: bool) -> int:
             if archive_path.exists():
                 prior = archive_path.read_text(encoding="utf-8")
                 already = (f"源文件归档前 sha256：{plan['digest']}" in prior
-                           and f"截止边界：{plan['boundary']}，" in prior)
+                           and f"截止边界：{plan['boundary']}；" in prior)
                 if already:
                     archive_text = None  # 同一批重试：归档已落，不重复追加
                 else:

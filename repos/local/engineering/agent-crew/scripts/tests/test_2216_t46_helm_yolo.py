@@ -39,17 +39,16 @@ class HandoffYoloTest(GuardTestBase):
         ]
         self.pane_outputs[self.OLD_PANE] = f"status line ctx ({ctx_k}k/1M) tail"
 
-    def test_handoff_start_passes_yolo_permission_mode(self):
+    def test_handoff_start_no_manual_permission_mode(self):
+        # 2.2.32/T76/C2：交接 start 不再手传 --permission-mode（YOLO 由配置
+        # agents.permissionMode 承担）；role/启动口径不回退
         self.prepare_handoff()
         self.make_guard().run_once()
 
         start_calls = [c for c in self.dispatch_calls if c[:1] == ["start"]]
         self.assertEqual(1, len(start_calls), self.dispatch_calls)
         argv = start_calls[0]
-        self.assertIn("--permission-mode", argv, argv)
-        mode = argv[argv.index("--permission-mode") + 1]
-        self.assertEqual("bypass_permissions", mode)
-        # 既有启动口径不回退
+        self.assertNotIn("--permission-mode", argv, argv)
         self.assertIn("--role", argv)
         self.assertEqual("helm", argv[argv.index("--role") + 1])
         self.assertIn("--pane", argv)
@@ -59,21 +58,16 @@ class HandoffYoloTest(GuardTestBase):
 class StartHelmScriptYoloTest(unittest.TestCase):
     SCRIPT = SKILL_DIR / "scripts" / "start-helm.sh"
 
-    def test_dispatch_start_includes_yolo_permission_mode(self):
+    def test_dispatch_start_no_manual_permission_mode(self):
+        # 2.2.32/T76/C2：start-helm.sh 不再手传 --permission-mode——YOLO 来源
+        # 改 orchestration.json agents.permissionMode=bypass_permissions（配置）
         text = self.SCRIPT.read_text(encoding="utf-8")
         start_lines = [
             line for line in text.splitlines()
             if "start --role helm" in line and not line.lstrip().startswith("#")
         ]
         self.assertEqual(1, len(start_lines), text)
-        line = start_lines[0]
-        self.assertIn("--permission-mode", line)
-        tokens = line.split()
-        self.assertEqual(
-            "bypass_permissions",
-            tokens[tokens.index("--permission-mode") + 1],
-            line,
-        )
+        self.assertNotIn("--permission-mode", start_lines[0])
 
 
 if __name__ == "__main__":

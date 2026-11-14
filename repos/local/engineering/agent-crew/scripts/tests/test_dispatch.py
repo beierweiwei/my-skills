@@ -544,26 +544,18 @@ class DispatchTest(unittest.TestCase):
             (self.root / ".git/crew/dispatch-agents.json").read_text(encoding="utf-8")
         )
 
-    def test_start_records_explicit_permission_mode_and_passes_to_herdr(self):
+    def test_start_rejects_explicit_permission_mode(self):
+        # 2.2.32/T76/C2：生命周期参数只从配置解析，手传一律 rc=2 拒绝
         self._write_composed("qoder", "builder")
         proc = self.run_dispatch(
             "start", "--role", "builder", "--runtime", "qoder",
             "--pane", "wX:p1", "--name", "yolo-builder",
             "--permission-mode", "bypass_permissions", "--json")
-        self.assertEqual(0, proc.returncode, proc.stderr)
-        argv = self._start_argv()
-        self.assertIn("--permission-mode", argv)
-        self.assertEqual("bypass_permissions",
-                         argv[argv.index("--permission-mode") + 1])
-        row = self.agent_log()[-1]
-        self.assertEqual("start", row["action"])
-        self.assertEqual("bypass_permissions", row["permissionMode"])
-        self.assertEqual("explicit", row["permissionModeSource"])
-        registry = self._registry()
-        self.assertEqual(
-            "bypass_permissions", registry["yolo-builder"]["permissionMode"])
-        self.assertEqual(
-            "explicit", registry["yolo-builder"]["permissionModeSource"])
+        self.assertEqual(2, proc.returncode, proc.stderr)
+        self.assertIn("不再接受手传 --permission-mode", proc.stderr)
+        self.assertFalse(
+            [c for c in self.herdr_calls() if c[:2] == ["agent", "start"]])
+        self.assertFalse((self.root / ".git/crew/registry.json").exists())
 
     def test_start_uses_config_default_permission_mode(self):
         self.config["agents"] = {"permissionMode": "bypass_permissions"}
@@ -581,19 +573,16 @@ class DispatchTest(unittest.TestCase):
             "config-default",
             self._registry()["proj-builder"]["permissionModeSource"])
 
-    def test_start_explicit_permission_mode_overrides_config_default(self):
+    def test_start_rejects_permission_mode_even_with_config_default(self):
+        # 配置存在也不接受手传覆盖（有配置走 config-default，无配置走空）
         self.config["agents"] = {"permissionMode": "bypass_permissions"}
         self.write_config()
         self._write_composed("qoder", "builder")
         proc = self.run_dispatch(
             "start", "--role", "builder", "--runtime", "qoder",
             "--pane", "wX:p1", "--permission-mode", "default", "--json")
-        self.assertEqual(0, proc.returncode, proc.stderr)
-        argv = self._start_argv()
-        self.assertEqual("default", argv[argv.index("--permission-mode") + 1])
-        row = self.agent_log()[-1]
-        self.assertEqual("default", row["permissionMode"])
-        self.assertEqual("explicit", row["permissionModeSource"])
+        self.assertEqual(2, proc.returncode, proc.stderr)
+        self.assertIn("不再接受手传 --permission-mode", proc.stderr)
 
     def test_start_without_permission_mode_records_empty(self):
         proc = self.start("builder", "qoder")
@@ -884,6 +873,13 @@ class NotifyCommandTest(unittest.TestCase):
         self.calls: list[list[str]] = []
         self.agents: list[dict] = []
 
+        # 2.2.32/T76/B3：--message/--message-file 只收文件路径
+        def write_msg(text: str) -> str:
+            path = self.root / f"msg-{abs(hash(text)) % 10**8}.md"
+            path.write_text(text, encoding="utf-8")
+            return str(path)
+        self.write_msg = write_msg
+
     def fake_herdr(self, argv: list[str]) -> str:
         self.calls.append(list(argv))
         if argv[:3] == ["herdr", "agent", "list"]:
@@ -923,7 +919,7 @@ class NotifyCommandTest(unittest.TestCase):
         registry = dispatch_mod.registry_path(self.root)
         self.assertFalse(registry.exists())
         code, out = self.dispatch_main(
-            "notify", "--agent", "case-agent", "--message", "2.2.11 已发布", "--json")
+            "notify", "--agent", "case-agent", "--message-file", self.write_msg("2.2.11 已发布"), "--json")
         self.assertEqual(0, code)
         # T28：literal 模式先查 herdr agent list 解析收件方 inbox；目标不在本机 →
         # 只 prompt 并显式标记未落盘。
@@ -959,7 +955,7 @@ class NotifyCommandTest(unittest.TestCase):
             encoding="utf-8")
         before = registry.read_bytes()
         code, out = self.dispatch_main(
-            "notify", "--agent", "case-agent", "--message", "ping", "--no-require-receipt")
+            "notify", "--agent", "case-agent", "--message-file", self.write_msg("ping"), "--no-require-receipt")
         self.assertEqual(0, code)
         self.assertEqual(before, registry.read_bytes())
         self.assertEqual(
@@ -982,13 +978,13 @@ class NotifyCommandTest(unittest.TestCase):
 
     def test_receipt_line_default_and_opt_out(self):
         code, _ = self.dispatch_main(
-            "notify", "--agent", "case-agent", "--message", "默认", "--json")
+            "notify", "--agent", "case-agent", "--message-file", self.write_msg("默认"), "--json")
         self.assertEqual(0, code)
         self.assertEqual("默认\n" + dispatch_mod.RECEIPT_LINE,
                          self.calls[-1][-1])
 
         code, _ = self.dispatch_main(
-            "notify", "--agent", "case-agent", "--message", "关闭",
+            "notify", "--agent", "case-agent", "--message-file", self.write_msg("关闭"),
             "--no-require-receipt", "--json")
         self.assertEqual(0, code)
         self.assertEqual("关闭", self.calls[-1][-1])
@@ -1002,7 +998,7 @@ class NotifyCommandTest(unittest.TestCase):
         ]
         code, out = self.dispatch_main(
             "notify", "--workspace", "w1", "--role", "helm",
-            "--message", "请接管", "--no-require-receipt", "--json")
+            "--message-file", self.write_msg("请接管"), "--no-require-receipt", "--json")
         self.assertEqual(0, code)
         self.assertEqual(
             [["herdr", "agent", "list"],
@@ -1025,7 +1021,7 @@ class NotifyCommandTest(unittest.TestCase):
         ]
         code, _ = self.dispatch_main(
             "notify", "--workspace", "w1", "--role", "helm",
-            "--message", "hi", "--no-require-receipt", "--json")
+            "--message-file", self.write_msg("hi"), "--no-require-receipt", "--json")
         self.assertEqual(0, code)
         self.assertEqual([["herdr", "agent", "prompt", "proj-helm-4", "hi"]],
                          self.prompt_calls())
@@ -1037,7 +1033,7 @@ class NotifyCommandTest(unittest.TestCase):
         ]
         code, _ = self.dispatch_main(
             "notify", "--workspace", "w1", "--role", "helm",
-            "--message", "hi", "--no-require-receipt", "--json")
+            "--message-file", self.write_msg("hi"), "--no-require-receipt", "--json")
         self.assertEqual(1, code)
         self.assertEqual([], self.prompt_calls())
         self.assertEqual([], self.agent_log())
@@ -1047,7 +1043,7 @@ class NotifyCommandTest(unittest.TestCase):
         self.agents = [{"name": "helm-x-3", "workspace_id": "w1"}]
         code, _ = self.dispatch_main(
             "notify", "--workspace", "w1", "--role", "helm",
-            "--message", "hi", "--no-require-receipt", "--json")
+            "--message-file", self.write_msg("hi"), "--no-require-receipt", "--json")
         self.assertEqual(1, code)
         self.assertEqual([], self.prompt_calls())
         with self.assertRaises(dispatch_mod.DispatchError) as ctx:
@@ -1062,7 +1058,7 @@ class NotifyCommandTest(unittest.TestCase):
             {"name": "helm-x-3", "workspace_id": "w1", "agent_status": None}]
         code, _ = self.dispatch_main(
             "notify", "--workspace", "w1", "--role", "helm",
-            "--message", "hi", "--no-require-receipt", "--json")
+            "--message-file", self.write_msg("hi"), "--no-require-receipt", "--json")
         self.assertEqual(1, code)
         self.assertEqual([], self.prompt_calls())
         with self.assertRaises(dispatch_mod.DispatchError) as ctx:
@@ -1078,7 +1074,7 @@ class NotifyCommandTest(unittest.TestCase):
                                 "agent_status": status}]
                 code, _ = self.dispatch_main(
                     "notify", "--workspace", "w1", "--role", "helm",
-                    "--message", "hi", "--no-require-receipt", "--json")
+                    "--message-file", self.write_msg("hi"), "--no-require-receipt", "--json")
                 self.assertEqual(1, code)
                 self.assertEqual([], self.prompt_calls())
                 with self.assertRaises(dispatch_mod.DispatchError) as ctx:
@@ -1093,7 +1089,7 @@ class NotifyCommandTest(unittest.TestCase):
                                 "agent_status": status}]
                 code, _ = self.dispatch_main(
                     "notify", "--workspace", "w1", "--role", "helm",
-                    "--message", "hi", "--no-require-receipt", "--json")
+                    "--message-file", self.write_msg("hi"), "--no-require-receipt", "--json")
                 self.assertEqual(0, code)
                 self.assertEqual("helm-x-3", self.agent_log()[-1]["target"])
 
@@ -1102,7 +1098,7 @@ class NotifyCommandTest(unittest.TestCase):
             {"name": "worker", "workspace_id": "w1", "agent_status": "idle"}]
         code, _ = self.dispatch_main(
             "notify", "--workspace", "w1", "--role", "helm",
-            "--message", "hi", "--no-require-receipt", "--json")
+            "--message-file", self.write_msg("hi"), "--no-require-receipt", "--json")
         self.assertEqual(1, code)
         self.assertEqual([], self.prompt_calls())
 
@@ -1112,13 +1108,13 @@ class NotifyCommandTest(unittest.TestCase):
             {"name": "helm-b-1", "workspace_id": "w2", "agent_status": "idle"},
         ]
         code, _ = self.dispatch_main(
-            "notify", "--role", "helm", "--message", "hi", "--json")
+            "notify", "--role", "helm", "--message-file", self.write_msg("hi"), "--json")
         self.assertEqual(1, code)
         self.assertEqual([], self.prompt_calls())
 
     def test_workspace_without_role_rejected(self):
         code, _ = self.dispatch_main(
-            "notify", "--workspace", "w1", "--message", "hi", "--json")
+            "notify", "--workspace", "w1", "--message-file", self.write_msg("hi"), "--json")
         self.assertEqual(1, code)
         self.assertEqual([], self.calls)
 
@@ -1130,7 +1126,7 @@ class NotifyCommandTest(unittest.TestCase):
         ]
         code, _ = self.dispatch_main(
             "notify", "--workspace", "wQ", "--role", "firstmate",
-            "--message", "hi", "--no-require-receipt")
+            "--message-file", self.write_msg("hi"), "--no-require-receipt")
         self.assertEqual(1, code)
         self.assertEqual([], self.prompt_calls())
         with self.assertRaises(dispatch_mod.DispatchError) as ctx:
@@ -1147,7 +1143,7 @@ class NotifyCommandTest(unittest.TestCase):
         ]
         code, _ = self.dispatch_main(
             "notify", "--workspace", "wQ", "--role", "firstmate",
-            "--message", "hi", "--no-require-receipt")
+            "--message-file", self.write_msg("hi"), "--no-require-receipt")
         self.assertEqual(0, code)
         self.assertEqual(
             [["herdr", "agent", "prompt", "req2-main-firstmate-3", "hi"]],
@@ -1160,7 +1156,7 @@ class NotifyCommandTest(unittest.TestCase):
         ]
         code, _ = self.dispatch_main(
             "notify", "--workspace", "w1", "--role", "helm",
-            "--message", "hi", "--no-require-receipt")
+            "--message-file", self.write_msg("hi"), "--no-require-receipt")
         self.assertEqual(1, code)
         self.assertEqual([], self.prompt_calls())
         with self.assertRaises(dispatch_mod.DispatchError) as ctx:
@@ -1172,7 +1168,7 @@ class NotifyCommandTest(unittest.TestCase):
         # S6：消息已以回执行结尾时不重复追加
         code, _ = self.dispatch_main(
             "notify", "--agent", "case-agent",
-            "--message", "已处理\n" + dispatch_mod.RECEIPT_LINE, "--json")
+            "--message-file", self.write_msg("已处理\n" + dispatch_mod.RECEIPT_LINE), "--json")
         self.assertEqual(0, code)
         sent = self.calls[-1][-1]
         self.assertEqual(1, sent.count(dispatch_mod.RECEIPT_LINE))

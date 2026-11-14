@@ -289,7 +289,7 @@ class Fb012NotifyRuleTest(unittest.TestCase):
         rules = read(CREW_RULES)
         for phrase in (
             "跨项目通知（外部 agent）",
-            "dispatch.py notify --agent <外部名> --message <文本>",
+            "dispatch.py notify --agent <外部名> --message <文件路径>",
             "不查/不写 dispatch 注册表",
             "不 start/close",
             "禁止直写 `herdr agent prompt`",
